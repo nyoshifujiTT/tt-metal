@@ -312,10 +312,6 @@ class BgeM3ForEmbedding:
         sparse_embedding = to_torch_auto_compose(sparse_embedding_tt, device=self.device)
         return sparse_embedding.to(torch.float32)
 
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        """vLLM interface hook for pooling-model introspection compatibility."""
-        return input_ids
-
     def _colbert_embedding(self, hidden_state: ttnn.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         self._initialize_model()
         if self.model is None or self.model.colbert_linear is None:
