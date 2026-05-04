@@ -283,7 +283,6 @@ class BgeM3ForEmbedding:
         if self.model is None or self.model.sparse_linear is None:
             raise ValueError("Sparse linear head is not initialized")
 
-        del positions
         batch_size, seq_len = input_ids.shape
         token_weights_tt = self.model.sparse_linear(hidden_state)
         token_weights_tt = _crop_hidden_state_ttnn(token_weights_tt, batch_size, seq_len)
