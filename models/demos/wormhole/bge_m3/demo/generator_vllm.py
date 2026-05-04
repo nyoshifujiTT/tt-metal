@@ -21,6 +21,7 @@ class BgeM3ForEmbedding:
 
     This implementation intentionally keeps a single-device execution path.
     """
+    is_pooling_model = True
 
     def __init__(
         self,
