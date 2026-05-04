@@ -111,6 +111,7 @@ class BgeM3ForEmbedding:
 
         return cls(
             device=mesh_device,
+            vllm_config=vllm_config,
             model_location_generator=model_location_generator,
             max_batch_size=max_batch_size,
             max_seq_len=max_seq_len,
