@@ -352,7 +352,6 @@ class BgeM3ForEmbedding:
     def forward(
         self,
         input_ids: torch.Tensor,
-        positions: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
