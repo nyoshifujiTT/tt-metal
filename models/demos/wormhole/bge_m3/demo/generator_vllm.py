@@ -21,7 +21,6 @@ class BgeM3ForEmbedding:
 
     This implementation intentionally keeps a single-device execution path.
     """
-    is_pooling_model = True
 
     def __init__(
         self,
@@ -112,7 +111,6 @@ class BgeM3ForEmbedding:
 
         return cls(
             device=mesh_device,
-            vllm_config=vllm_config,
             model_location_generator=model_location_generator,
             max_batch_size=max_batch_size,
             max_seq_len=max_seq_len,
@@ -283,7 +281,6 @@ class BgeM3ForEmbedding:
         if self.model is None or self.model.sparse_linear is None:
             raise ValueError("Sparse linear head is not initialized")
 
-        del positions
         batch_size, seq_len = input_ids.shape
         token_weights_tt = self.model.sparse_linear(hidden_state)
         token_weights_tt = _crop_hidden_state_ttnn(token_weights_tt, batch_size, seq_len)
@@ -312,10 +309,6 @@ class BgeM3ForEmbedding:
         )
         sparse_embedding = to_torch_auto_compose(sparse_embedding_tt, device=self.device)
         return sparse_embedding.to(torch.float32)
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        """vLLM interface hook for pooling-model introspection compatibility."""
-        return input_ids
 
     def _colbert_embedding(self, hidden_state: ttnn.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         self._initialize_model()
@@ -353,7 +346,6 @@ class BgeM3ForEmbedding:
     def forward(
         self,
         input_ids: torch.Tensor,
-        positions: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
