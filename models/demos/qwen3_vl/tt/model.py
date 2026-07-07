@@ -257,7 +257,7 @@ class DropInVisionTransformer(torch.nn.Module):
             grid_thw = grid_thw.unsqueeze(0)
             unpadded_seq_len = (grid_thw[:, 1] * grid_thw[:, 2]).sum().item()
             # Calculate padded sequence length (divisible by 2048) required by models/tt_transformers/tt/attention.py::forward_prefill
-            seq_len = ((unpadded_seq_len // 2048) + 1) * 2048
+            seq_len = max(2048, ((unpadded_seq_len + 2047) // 2048) * 2048)  # CEIL to 2048 (was always +2048): aligned images get 0 padding -> no O(seq^2) mask, avoids vision DRAM OOM
 
             # 2. Use preprocessing function from reference/functional to get indices and embeddings
             cu_seqlens, position_embeddings = qwen3_vision_transformer_preprocess(
@@ -386,7 +386,7 @@ class DropInVisionTransformer(torch.nn.Module):
         # Calculate total unpadded sequence length across all images for this user
         unpadded_seq_len = (grid_thw[:, 1] * grid_thw[:, 2]).sum().item()
         # Calculate padded sequence length (divisible by 2048)
-        seq_len = ((unpadded_seq_len // 2048) + 1) * 2048
+        seq_len = max(2048, ((unpadded_seq_len + 2047) // 2048) * 2048)  # CEIL to 2048 (was always +2048): aligned images get 0 padding -> no O(seq^2) mask, avoids vision DRAM OOM
 
         # Use preprocessing function from reference/functional to get indices and embeddings
         cu_seqlens, position_embeddings = qwen3_vision_transformer_preprocess(
