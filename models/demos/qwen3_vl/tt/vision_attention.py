@@ -476,6 +476,7 @@ class VisionAttention(LightweightModule):
                 q_heads_1QSD_8b,
                 k_heads_1KSD_8b,
                 v_heads_1VSD_8b,
+                attn_mask=getattr(self, "_pad_attn_mask", None),  # ACCURACY: block attention to seq-length padding
                 is_causal=False,
                 scale=self.scale,
                 compute_kernel_config=self.sdpa_prefill_compute_kernel_cfg,

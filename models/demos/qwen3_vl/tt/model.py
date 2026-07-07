@@ -137,6 +137,26 @@ class VisionTransformer(LightweightModule):
         Returns:
             ttnn.Tensor: Output tensor
         """
+        # Build a padding attention mask so blocks do NOT attend to seq-length padding
+        # (real image tokens = first unpadded_seq_len; the rest up to seq_len are padding).
+        # ACCURACY FIX: without this, non-causal vision SDPA attends over all padded keys,
+        # corrupting short-image embeddings (worse the more padding). Mask cols>=unpadded.
+        import torch as _torch
+        _pad_mask = None
+        _seq = x.shape[-2]
+        if unpadded_seq_len < _seq:
+            _m = _torch.zeros((1, 1, _seq, _seq), dtype=_torch.bfloat16)
+            _m[:, :, :, unpadded_seq_len:] = _torch.finfo(_torch.bfloat16).min
+            _pad_mask = ttnn.from_torch(
+                _m,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.args.mesh_device,
+                mesh_mapper=ttnn.ReplicateTensorToMesh(self.args.mesh_device),
+            )
+        for _blk in self.blocks:
+            _blk.attention._pad_attn_mask = _pad_mask
+
         # Forward through each block
         deepstack_feature_list = []
         for i, block in enumerate(self.blocks):
