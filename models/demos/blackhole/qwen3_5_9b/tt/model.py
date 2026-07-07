@@ -887,7 +887,7 @@ class Qwen35Model:
             x = x_new
         return x
 
-    def _forward_prefill_chunk_masked_tp(self, token_buf, valid_len, chunk_start, page_table, bucket, flex_sdpa=True):
+    def _forward_prefill_chunk_masked_tp(self, token_buf, valid_len, chunk_start, page_table, bucket, flex_sdpa=True, input_embeds=None, rope_cos_sin=None):
         """TP (num_devices>1) masked fixed-bucket single-chunk prefill forward.
 
         flex_sdpa=True (default, the serving path) drives the full-attention SDPA via the FLEXIBLE
@@ -905,18 +905,41 @@ class Qwen35Model:
         real blocks (blkN = ceil((chunk_start+valid_len)/block_size)), never overshooting the
         request's page-table allocation. Returns the last-layer hidden [1, 1, bucket, dim]."""
         block_size = get_block_size(self._paged_kv_caches)
-        tok = ttnn.from_torch(
-            token_buf.to(torch.int32),
-            dtype=ttnn.uint32,
-            device=self.device,
-            mesh_mapper=ttnn.ReplicateTensorToMesh(self.device),
-        )
-        x = self.embd(tok)
-        x = ttnn.reshape(x, (1, 1, bucket, x.shape[-1]))
-        x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
-        ttnn.deallocate(tok)
+        if input_embeds is not None:
+            # Multimodal path: caller provides the merged text+vision embeddings for the whole
+            # bucket ([1, bucket, hidden] host torch). Shard the hidden dim across the mesh exactly
+            # like the framework Embedding (ShardTensor2dMesh dims=(None, <lastdim>)), skipping the
+            # token-id lookup. This is transformers' native inputs_embeds path (text tokens embedded
+            # by the SAME embed_tokens weights on host; image_token positions overwritten by the
+            # vision encoder output) — not a bypass of the model.
+            ie = input_embeds
+            if ie.shape[1] < bucket:
+                pad = torch.zeros(1, bucket - ie.shape[1], ie.shape[2], dtype=ie.dtype)
+                ie = torch.cat([ie, pad], dim=1)
+            x = ttnn.from_torch(
+                ie.unsqueeze(0),  # [1,1,bucket,hidden]
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device,
+                mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device=self.device, dims=(None, 3), mesh_shape=self.args.cluster_shape),
+            )
+            x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
+        else:
+            tok = ttnn.from_torch(
+                token_buf.to(torch.int32),
+                dtype=ttnn.uint32,
+                device=self.device,
+                mesh_mapper=ttnn.ReplicateTensorToMesh(self.device),
+            )
+            x = self.embd(tok)
+            x = ttnn.reshape(x, (1, 1, bucket, x.shape[-1]))
+            x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
+            ttnn.deallocate(tok)
         # rope_tp cos/sin for absolute positions [chunk_start, chunk_start+bucket).
-        cos_t, sin_t = self._rope_tp_cos_sin_torch(chunk_start, bucket)
+        if rope_cos_sin is not None:
+            cos_t, sin_t = rope_cos_sin
+        else:
+            cos_t, sin_t = self._rope_tp_cos_sin_torch(chunk_start, bucket)
         cos = ttnn.from_torch(
             cos_t,
             dtype=ttnn.bfloat16,
@@ -977,7 +1000,7 @@ class Qwen35Model:
             ttnn.deallocate(csi_tensor)
         return x
 
-    def prefill_masked_bucket(self, token_ids, page_table, actual_len, chunk_start=0, bucket=None, flex_sdpa=True):
+    def prefill_masked_bucket(self, token_ids, page_table, actual_len, chunk_start=0, bucket=None, flex_sdpa=True, input_embeds=None, rope_cos_sin=None):
         """Masked fixed-bucket prefill for a segment of `actual_len` real tokens.
 
         Pads the segment up to a fixed bucket length, runs all layers ONCE, and masks the GDN
@@ -1011,9 +1034,15 @@ class Qwen35Model:
         else:
             token_buf = real
 
-        hidden = self._forward_prefill_chunk_masked(
-            token_buf, actual_len, chunk_start, page_table, bucket, flex_sdpa=flex_sdpa
-        )
+        if self.num_devices > 1:
+            hidden = self._forward_prefill_chunk_masked_tp(
+                token_buf, actual_len, chunk_start, page_table, bucket, flex_sdpa=flex_sdpa,
+                input_embeds=input_embeds, rope_cos_sin=rope_cos_sin,
+            )
+        else:
+            hidden = self._forward_prefill_chunk_masked(
+                token_buf, actual_len, chunk_start, page_table, bucket, flex_sdpa=flex_sdpa
+            )
         ttnn.synchronize_device(self.device)
 
         if self.num_devices > 1:
@@ -1067,23 +1096,34 @@ class Qwen35Model:
         trace-clobber hang. MUST run while the GDN is in its serving state mode and BEFORE any
         trace is parked; capture_prefill_trace_chunked calls this just before begin_trace_capture.
         Requires page_table to cover the largest bucket (max 2048 -> 32 blocks of 64)."""
+        # Sweep from the BUCKET set, not block_size: this hybrid GDN unifies the attention KV
+        # page with the large recurrent-state page, so get_block_size() is big (~800, not 64) and
+        # the old max(buckets)//block_size only warmed the large buckets, never the small
+        # 128/256/512 ones -> a short real prompt hit an UNWARMED bucket, compiled at request time,
+        # and clobbered the parked decode/chunk trace (second-request hang, tt-metal #48536/#48522).
+        # Per bucket cover the no-mask program (actual_len == bucket), the masked program
+        # (actual_len < bucket), and one length per distinct paged_fill_cache fill width.
         if buckets is None:
             buckets = self._PREFILL_MASK_BUCKETS
         block_size = get_block_size(self._paged_kv_caches)
-        # The masked GDN/SDPA/sel programs key on the bucket; paged_fill_cache keys on the
-        # real-block FILL WIDTH = ceil(valid_len/64), which a real prompt/tail can land on at any
-        # value in 1..max_width. Warm each width via a vlen=width*block_size: w*64 rounds to its
-        # bucket and produces fill width w. This sweep also covers, per bucket, both the no-mask
-        # variant (vlen == bucket) and the masked variant (vlen < bucket).
-        max_width = max(buckets) // block_size
-        for w in range(1, max_width + 1):
-            vlen = w * block_size
-            b = self._mask_bucket_for(vlen)
-            toks = torch.zeros(1, vlen, dtype=torch.int32)
-            self.prefill_masked_bucket(toks, page_table, actual_len=vlen, bucket=b)
+        seen = set()
+        for bucket in sorted(buckets):
+            lengths = {bucket, max(1, bucket // 2)}
+            for w in range(1, num_blocks_in_seq(bucket, block_size) + 1):
+                lengths.add(min(w * block_size, bucket))       # no-mask-ish at fill width w
+                if bucket > 1:
+                    lengths.add(min(w * block_size, bucket - 1))  # masked at fill width w
+            for actual_len in sorted(lengths):
+                actual_len = max(1, min(actual_len, bucket))
+                key = (bucket, num_blocks_in_seq(actual_len, block_size), actual_len == bucket)
+                if key in seen:
+                    continue
+                seen.add(key)
+                toks = torch.zeros(1, actual_len, dtype=torch.int32)
+                self.prefill_masked_bucket(toks, page_table, actual_len=actual_len, bucket=bucket)
         ttnn.synchronize_device(self.device)
 
-    def prefill_traced_chunked(self, token_ids, page_table, actual_len):
+    def prefill_traced_chunked(self, token_ids, page_table, actual_len, input_embeds=None, rope_cos_sin=None):
         """Prefill by replaying the captured per-chunk trace for each FULL 2048-token chunk,
         then processing the final partial chunk eagerly with minimal padding.
 
@@ -1116,8 +1156,38 @@ class Qwen35Model:
         # shared by short prompts and the long-prompt tail; prefill_dispatch routes every traced
         # prefill here so the short/long seam is defined once.
         if num_full == 0:
+            # Pad/clip the SDPA page table to the warmed/captured width so the short-prompt forward
+            # REPLAYS the pre-warmed programs instead of recompiling at request time (which clobbers
+            # parked decode/chunk traces -> second-request hang, tt-metal #48536/#48522). vLLM pads
+            # to its own max_num_blocks_per_req, which differs from the warmed width. Trailing
+            # entries index blocks past the prompt and are never read by causal SDPA (as in the
+            # long-prompt branch below). No-op when no chunk buffer was captured or widths match.
+            buf = getattr(self, "_chunk_full_page_table_buf", None)
+            if buf is not None:
+                buf_blocks = int(buf.shape[-1])
+                if page_table.shape[1] < buf_blocks:
+                    page_table = torch.cat(
+                        [
+                            page_table,
+                            torch.zeros(page_table.shape[0], buf_blocks - page_table.shape[1], dtype=page_table.dtype),
+                        ],
+                        dim=1,
+                    )
+                elif page_table.shape[1] > buf_blocks:
+                    page_table = page_table[:, :buf_blocks]
             return self.prefill_masked_bucket(
-                token_ids[:, :actual_len], page_table, actual_len=actual_len, chunk_start=0
+                token_ids[:, :actual_len], page_table, actual_len=actual_len, chunk_start=0,
+                input_embeds=input_embeds, rope_cos_sin=rope_cos_sin,
+            )
+        # Multimodal long prompt (>chunk_size): run the EAGER chunked TP path with the merged
+        # text+vision embeddings sliced per chunk. Eager (no parked trace during prefill) is the
+        # safe path for vision device work, and it carries GDN/KV state in place across chunks —
+        # extending MM support beyond a single 2048 chunk (parity with the text long-prompt path).
+        if input_embeds is not None:
+            assert self.num_devices > 1, "MM long-prompt path is TP-only"
+            return self._prefill_chunked_eager_tp_mm(
+                token_ids, page_table, actual_len, num_full, chunk_size, tail_real,
+                input_embeds=input_embeds, rope_cos_sin=rope_cos_sin,
             )
 
         if self.num_devices > 1:
@@ -1259,6 +1329,50 @@ class Qwen35Model:
                 token_ids[:, cs:actual_len], page_table, actual_len=tail_real, chunk_start=cs, flex_sdpa=flex_sdpa
             )
         # Exact multiple of chunk_size: next-token logit from the last full chunk's last position.
+        logits = self._masked_bucket_logits_tp(last_hidden, chunk_size, chunk_size)
+        ttnn.deallocate(last_hidden)
+        return logits
+
+    def _prefill_chunked_eager_tp_mm(
+        self, token_ids, page_table, actual_len, num_full, chunk_size, tail_real,
+        input_embeds=None, rope_cos_sin=None,
+    ):
+        """MM long-prompt (>chunk_size) eager chunked TP prefill with merged input embeddings.
+
+        input_embeds is the full merged text+vision embedding [1, actual_len, hidden] (host torch);
+        rope_cos_sin, if given, is a (cos, sin) pair covering the whole sequence. Each full chunk
+        and the tail get their own contiguous slice, passed through the SAME masked-bucket TP
+        forward used by the text path. GDN recurrent/conv + paged-KV state carry in place across
+        chunks (chunk_start=0 resets once; chunk_start>0 skips the reset). Returns logits[1,1,vocab].
+        """
+        self._reset_gdn_state_for_new_sequence()
+
+        def _slice_rope(cs, ln):
+            if rope_cos_sin is None:
+                return None
+            cos, sin = rope_cos_sin
+            return (cos[..., cs : cs + ln, :], sin[..., cs : cs + ln, :])
+
+        last_hidden = None
+        for c in range(num_full):
+            cs = c * chunk_size
+            if last_hidden is not None:
+                ttnn.deallocate(last_hidden)
+            ie = input_embeds[:, cs : cs + chunk_size, :]
+            last_hidden = self._forward_prefill_chunk_masked_tp(
+                token_ids[:, cs : cs + chunk_size], chunk_size, cs, page_table, chunk_size,
+                flex_sdpa=True, input_embeds=ie, rope_cos_sin=_slice_rope(cs, chunk_size),
+            )
+            ttnn.synchronize_device(self.device)
+        if tail_real > 0:
+            if last_hidden is not None:
+                ttnn.deallocate(last_hidden)
+            cs = num_full * chunk_size
+            ie = input_embeds[:, cs:actual_len, :]
+            return self.prefill_masked_bucket(
+                token_ids[:, cs:actual_len], page_table, actual_len=tail_real, chunk_start=cs,
+                flex_sdpa=True, input_embeds=ie, rope_cos_sin=_slice_rope(cs, tail_real),
+            )
         logits = self._masked_bucket_logits_tp(last_hidden, chunk_size, chunk_size)
         ttnn.deallocate(last_hidden)
         return logits

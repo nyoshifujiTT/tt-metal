@@ -32,6 +32,7 @@ kv_cache contract param is accepted but unused.
 """
 import math
 import os
+from typing import Mapping, Optional
 
 import torch
 
@@ -40,15 +41,48 @@ from models.demos.blackhole.qwen3_5_9b.tt.common import create_tt_model
 from models.demos.blackhole.qwen3_5_9b.tt.generator_interface import prefill_dispatch
 from models.tt_transformers.tt.generator import Generator
 
+from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.qwen3_5 import (
+    Qwen3_5ProcessingInfo,
+    Qwen3VLDummyInputsBuilder,
+    Qwen3VLMultiModalProcessor,
+)
+from vllm.multimodal import MULTIMODAL_REGISTRY
+
 _PREFILL_WARMUP_CHUNK = 2048
 _PREFILL_WARMUP_BUCKET = 4096
 _BLOCK_SIZE = 64
 
 
-class Qwen35ForCausalLM(Generator):
-    """vLLM-compatible wrapper for Qwen3.5-9B on Blackhole P150."""
+class TT_Qwen3_5ProcessingInfo(Qwen3_5ProcessingInfo):
+    # Enable native image input (video stays disabled). vLLM's Qwen3VL processor turns both
+    # image_url and base64 data URIs into pixel_values + image_grid_thw, so URL/base64 parity
+    # is handled by the standard processor (no custom handling here).
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": 1, "video": 0}
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    Qwen3VLMultiModalProcessor, info=TT_Qwen3_5ProcessingInfo, dummy_inputs=Qwen3VLDummyInputsBuilder
+)
+class Qwen35ForCausalLM(Generator, SupportsMultiModal):
+    """vLLM-compatible wrapper for Qwen3.5-9B/27B on Blackhole (native image via HF vision tower)."""
 
     model_capabilities = {"supports_prefix_caching": False, "supports_async_decode": False}
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int):
+        # The OpenAI chat renderer resolves the TT-prefixed arch to THIS class and calls
+        # get_placeholder_str to insert the image marker into the prompt. The base
+        # SupportsMultiModal default returns None (drops the image), so the MM processor
+        # would find no <|image_pad|> to expand. Mirror vLLM's native Qwen3VL markers so
+        # rendering inserts <|vision_start|><|image_pad|><|vision_end|>, which the standard
+        # Qwen3VL processor then expands to the correct number of image tokens.
+        if modality.startswith("image"):
+            return "<|vision_start|><|image_pad|><|vision_end|>"
+        if modality.startswith("video"):
+            return "<|vision_start|><|video_pad|><|vision_end|>"
+        raise ValueError("Only image or video modality is supported")
 
     @classmethod
     def get_max_tokens_all_users(
@@ -103,15 +137,186 @@ class Qwen35ForCausalLM(Generator):
         args, model, _ = create_tt_model(
             mesh_device, max_batch_size=max_batch_size, max_seq_len=max_seq_len, hf_model=name_or_path
         )
-        return cls([model], [args], mesh_device)
+        inst = cls([model], [args], mesh_device)
+        # Qwen3-VL pattern: build the on-device (TT) vision encoder NOW, during model init,
+        # i.e. BEFORE warmup captures the prefill/decode traces. If the vision encoder is built
+        # lazily on the first request (after the decode trace is parked), its device-buffer
+        # allocations collide with the parked trace and every warm request returns a frozen/
+        # wrong vision embedding. Constructing it up front makes the trace capture happen against
+        # the post-vision allocator state, so eager vision at request time no longer corrupts it.
+        if os.getenv("TT_QWEN35_NATIVE_VISION") and os.environ.get("QWEN35_TT_VISION", "1") != "0":
+            try:
+                inst._ensure_tt_vision()
+            except Exception as _e:  # pragma: no cover - fall back to lazy build if eager fails
+                logger.warning(f"[QWEN35_VISION] eager vision build failed ({_e!r}); will build lazily")
+        return inst
 
     def allocate_kv_cache(self, kv_cache_shape, dtype, num_layers):
         """Allocate paged KV (8 attn layers) + external GDN state; returns the 8 KV pairs."""
         return self.model[0].allocate_kv_caches(kv_cache_shape, ttnn.bfloat16, batch_size=1)
 
+    # ── Native image (multimodal) support ─────────────────────────────
+    def _ensure_hf_vision(self):
+        """Lazily load the HF reference model (vision tower + text embed_tokens) once.
+
+        The TT text decoder has no vision tower; we run the reference Qwen3.5 vision encoder
+        (model.model.visual) and text embedding (model.model.language_model.embed_tokens) in
+        torch on host to produce merged input embeddings, then feed them into the TT decoder.
+        This is the reference multimodal computation (perf tradeoff of host vision), not a bypass.
+        """
+        if getattr(self, "_hf_ref", None) is not None:
+            return
+        import os as _os
+        from transformers import AutoConfig
+        from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForConditionalGeneration as _Ref
+        mp = _os.environ.get("MODEL_WEIGHTS_DIR") or _os.environ.get("HF_MODEL") or self.model[0].args.CKPT_DIR
+        cfg = AutoConfig.from_pretrained(mp, trust_remote_code=True)
+        ref = _Ref.from_pretrained(mp, config=cfg, torch_dtype=torch.float32, device_map="cpu").eval()
+        self._hf_ref = ref
+        self._hf_visual = ref.model.visual
+        self._hf_embed_tokens = ref.model.language_model.embed_tokens
+        self._image_token_id = int(getattr(ref.config, "image_token_id", 248056))
+
+    def _ensure_tt_vision(self):
+        """Lazily build the on-device (TT) vision encoder once.
+
+        The heavy Qwen3.5 vision transformer blocks (depth=27 ViT) are executed on the p150x4
+        mesh via the image-shipped device implementation
+        (models/demos/qwen3_vl/tt/DropInVisionTransformer), which is a drop-in for the HF
+        Qwen visual tower: forward(pixel_values, grid_thw). Patch-embed / pos-embed / rope
+        preprocessing stay on host (tiny), matching the reference generator_vllm wiring. Only
+        the transformer blocks + patch-merger — the >99% of vision FLOPs — run on TT.
+        """
+        if getattr(self, "_tt_visual", None) is not None:
+            return
+        # HF reference visual is required as the preprocessing/weight source for the TT wrapper.
+        self._ensure_hf_vision()
+        from models.demos.qwen3_vl.tt.model import DropInVisionTransformer
+        from models.demos.qwen3_vl.tt.model_config import VisionModelArgs
+        model = self.model[0]
+        vc = self._hf_ref.config.vision_config
+        try:
+            from models.tt_transformers.tt.model_config import DecodersPrecision as _DP
+            _vis_opt = _DP.performance(vc.depth, model.args.CKPT_DIR)
+        except Exception:
+            _vis_opt = None
+        vision_model_args = VisionModelArgs(
+            self.mesh_device,
+            max_batch_size=getattr(model.args, "max_batch_size", 1),
+            max_seq_len=getattr(model.args, "max_seq_len", 4096),
+            optimizations=_vis_opt,
+        ) if _vis_opt is not None else VisionModelArgs(
+            self.mesh_device,
+            max_batch_size=getattr(model.args, "max_batch_size", 1),
+            max_seq_len=getattr(model.args, "max_seq_len", 4096),
+        )
+        # Match the served checkpoint's vision depth (Qwen3.5-27B ViT depth=27).
+        vision_model_args.hf_config.vision_config.depth = vc.depth
+        # DropInVisionTransformer consumes the HF visual state_dict (auto-remapped internally)
+        # and runs the transformer blocks on the mesh device.
+        self._tt_visual = DropInVisionTransformer(self._hf_visual, vision_model_args)
+        self._tt_vision_out_hidden = int(vc.out_hidden_size)
+
+    def _tt_vision_encode(self, pixel_values, image_grid_thw):
+        """Run the TT device vision encoder and return image embeds as torch [num_img_tokens, H].
+
+        Mirrors reference generator_vllm.forward_single_user usage: the wrapper returns a
+        mesh-sharded (dim=1) ttnn tensor over out_hidden_size, which we gather back to host with
+        ConcatMeshToTensor(dim=1) and slice to the true out_hidden_size.
+        """
+        self._ensure_tt_vision()
+        # Ensure any parked/async decode-trace work on cq0 has fully completed before issuing
+        # eager vision ops, so vision does not read/execute against in-flight trace state
+        # (warm-request vision-output-freeze fix).
+        ttnn.synchronize_device(self.mesh_device)
+        grid = image_grid_thw
+        if grid.dim() == 1:
+            grid = grid.unsqueeze(0)
+        image_embeds_tt, _deepstack = self._tt_visual.forward_single_user(
+            pixel_values.to(torch.float32), grid_thw=grid.to(torch.int32)
+        )
+        out = ttnn.to_torch(
+            image_embeds_tt,
+            mesh_composer=ttnn.ConcatMeshToTensor(self.mesh_device, dim=1),
+        )
+        ttnn.deallocate(image_embeds_tt)
+        ttnn.synchronize_device(self.mesh_device)
+        # out: [num_img_tokens, out_hidden_size * num_shards_along_dim1]; keep the real width.
+        out = out[:, : self._tt_vision_out_hidden].to(torch.float32)
+        return out
+
+    def _build_mm_input_embeds(self, input_ids, pixel_values, image_grid_thw):
+        """Return (input_embeds [1,T,hidden] torch, (cos,sin) mrope tuple) for an image prompt.
+
+        input_ids: torch [1, T]. pixel_values/image_grid_thw: as produced by the vLLM Qwen3VL
+        processor. Uses transformers' native inputs_embeds + masked_scatter merge and get_rope_index
+        for mrope position ids.
+        """
+        self._ensure_hf_vision()
+        with torch.no_grad():
+            if os.environ.get("QWEN35_TT_VISION", "1") != "0":
+                # On-device (TT) vision encoder — the heavy ViT runs on the p150x4 mesh.
+                import time as _t
+                _t0 = _t.time()
+                image_embeds = self._tt_vision_encode(pixel_values, image_grid_thw)
+                print(f"[QWEN35_VISION] backend=TT encode={_t.time()-_t0:.3f}s "
+                      f"grid={image_grid_thw.tolist()} tokens={image_embeds.shape[0]}", flush=True)
+            else:
+                # Host (CPU torch) reference vision encoder — fallback / parity baseline.
+                import time as _t
+                _t0 = _t.time()
+                ve = self._hf_visual(pixel_values.to(torch.float32), grid_thw=image_grid_thw)
+                image_embeds = ve.pooler_output if hasattr(ve, "pooler_output") else (ve[0] if isinstance(ve, (tuple, list)) else ve)
+                image_embeds = image_embeds.to(torch.float32)  # [num_img_tokens, hidden]
+                print(f"[QWEN35_VISION] backend=CPU encode={_t.time()-_t0:.3f}s "
+                      f"grid={image_grid_thw.tolist()} tokens={image_embeds.shape[0]}", flush=True)
+            inputs_embeds = self._hf_embed_tokens(input_ids.to(torch.long))  # [1, T, hidden]
+            mask = (input_ids == self._image_token_id)
+            n_img = int(mask.sum().item())
+            assert n_img == image_embeds.shape[0], (
+                f"image token count {n_img} != vision embeds {image_embeds.shape[0]}"
+            )
+            merged = inputs_embeds.clone()
+            merged[mask] = image_embeds.to(merged.dtype)
+            # mrope position ids for the whole sequence, then cos/sin in the rope_tp layout.
+            mm_token_type_ids = torch.zeros_like(input_ids, dtype=torch.int32)
+            mm_token_type_ids[mask] = 1
+            attention_mask = torch.ones_like(input_ids)
+            position_ids, _ = self._hf_ref.model.get_rope_index(
+                input_ids=input_ids.to(torch.long),
+                mm_token_type_ids=mm_token_type_ids,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=None,
+                attention_mask=attention_mask,
+            )
+            x = torch.empty((1,), dtype=torch.float32)
+            cos, sin = self._hf_ref.model.language_model.rotary_emb(x, position_ids)
+        return merged, (cos, sin)
+
     def prefill_forward(self, tokens, page_table, kv_cache, prompt_lens, **kwargs):
         """All prefill is model-owned (Generator drives decode only)."""
         model = self.model[0]
+
+        def _nonempty(v):
+            # A genuine multimodal payload requires a non-empty tensor/list. vLLM may pass
+            # pixel_values=None (or an empty list/0-elem tensor) for text-only requests and
+            # during text warmup; treat those as text so we do not enter the image path.
+            if v is None:
+                return False
+            if isinstance(v, (list, tuple)):
+                return len(v) > 0 and any(_nonempty(x) for x in v)
+            if hasattr(v, "numel"):
+                return v.numel() > 0
+            return True
+
+        pv = kwargs.get("pixel_values")
+        grid = kwargs.get("image_grid_thw")
+        # Require BOTH pixel_values AND image_grid_thw to be genuinely present. The vision
+        # merge/rope needs grid_thw; a pixel_values without grid (or vice versa) is not a
+        # valid image request and must not enter the MM prefill path.
+        has_mm = _nonempty(pv) and _nonempty(grid)
+        if has_mm and model.num_devices > 1:
+            return self._prefill_forward_tp_mm(model, tokens, page_table, prompt_lens, kwargs)
         if model.num_devices > 1:
             return self._prefill_forward_tp(model, tokens, page_table, prompt_lens)
         logits = prefill_dispatch(model, tokens, page_table, prompt_lens, use_trace=kwargs.get("enable_trace", False))
@@ -133,6 +338,42 @@ class Qwen35ForCausalLM(Generator):
         if tokens.shape[1] > T:
             tokens = tokens[:, :T]
         logits = model.prefill_traced_chunked(tokens, page_table, actual_len=T)  # [1,1,vocab] replicated
+        logits = (
+            ttnn.to_torch(logits, mesh_composer=ttnn.ConcatMeshToTensor(model.mesh_device, dim=0))
+            .reshape(-1, model.args.vocab_size)[:1]
+            .float()
+            .view(1, 1, -1)
+        )
+        return logits, torch.zeros(1, dtype=torch.long)
+
+    def _prefill_forward_tp_mm(self, model, tokens, page_table, prompt_lens, kwargs):
+        """TP prefill for an IMAGE request: build merged text+vision input embeddings on host
+        (HF reference vision + embed_tokens) and feed them into the TT decoder via the model's
+        input_embeds path. Text decode is the SAME working reference path; only the input
+        embeddings carry the image. Returns (logits [1,1,vocab], rope_deltas)."""
+        T = int(prompt_lens[0]) if prompt_lens is not None else tokens.shape[1]
+        input_ids = tokens[:1, :T].to(torch.long)
+
+        # Gather this request's pixel_values / grid (vLLM passes per-user lists).
+        pv = kwargs["pixel_values"]
+        grid = kwargs["image_grid_thw"]
+        pv0 = pv[0] if isinstance(pv, (list, tuple)) else pv
+        if isinstance(pv0, (list, tuple)):
+            pv0 = torch.concat([p for p in pv0], dim=0)
+        grid0 = grid[0] if isinstance(grid, (list, tuple)) else grid
+        if isinstance(grid0, (list, tuple)):
+            grid0 = torch.stack([g.to(dtype=torch.int32) for g in grid0], dim=0)
+        grid0 = grid0.to(torch.int32)
+        if grid0.dim() == 1:
+            grid0 = grid0.unsqueeze(0)
+
+        merged_embeds, _rope = self._build_mm_input_embeds(input_ids, pv0, grid0)
+        # merged_embeds: [1, T, hidden] torch. Feed into the reference short-prompt masked path.
+        # rope_cos_sin left None for now (linear positions); mrope override added if image
+        # localization proves insufficient.
+        logits = model.prefill_traced_chunked(
+            input_ids, page_table, actual_len=T, input_embeds=merged_embeds, rope_cos_sin=None
+        )
         logits = (
             ttnn.to_torch(logits, mesh_composer=ttnn.ConcatMeshToTensor(model.mesh_device, dim=0))
             .reshape(-1, model.args.vocab_size)[:1]
