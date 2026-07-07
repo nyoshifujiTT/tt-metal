@@ -132,9 +132,19 @@ class ModelArgs:
         from huggingface_hub import hf_hub_download
         from huggingface_hub.utils import LocalEntryNotFoundError
         from torch import load as torch_load
-        from transformers import AutoModelForCausalLM
+        from transformers import AutoModel, AutoModelForCausalLM, AutoModelForSequenceClassification
 
-        model = AutoModelForCausalLM.from_pretrained(ckp_point, torch_dtype="auto")
+        # bge-m3 demo code also works for reranker-v2-m3 encoder weights.
+        # Try task-specific loaders first, then fall back to encoder-only.
+        model = None
+        for model_loader in (AutoModelForCausalLM, AutoModelForSequenceClassification, AutoModel):
+            try:
+                model = model_loader.from_pretrained(ckp_point, torch_dtype="auto")
+                break
+            except Exception:
+                continue
+        if model is None:
+            raise RuntimeError(f"Failed to load Hugging Face checkpoint for {ckp_point}")
 
         state_dict = model.state_dict()
 
@@ -142,6 +152,7 @@ class ModelArgs:
         download_repo_id = self.hf_model_name if os.path.isdir(ckp_point) else ckp_point
 
         for file_name in files_to_check:
+            file_path = None
             if os.path.isdir(ckp_point):
                 local_file_path = os.path.join(ckp_point, file_name)
                 if os.path.exists(local_file_path):
@@ -154,9 +165,8 @@ class ModelArgs:
                             local_files_only=True,
                         )
                     except LocalEntryNotFoundError:
-                        file_path = hf_hub_download(repo_id=download_repo_id, filename=file_name)
-                else:
-                    raise FileNotFoundError(f"Missing required file '{file_name}' in local checkpoint '{ckp_point}'")
+                        # Optional for reranker checkpoints that do not ship these heads.
+                        file_path = None
             else:
                 try:
                     file_path = hf_hub_download(
@@ -165,7 +175,11 @@ class ModelArgs:
                         local_files_only=True,
                     )
                 except LocalEntryNotFoundError:
-                    file_path = hf_hub_download(repo_id=ckp_point, filename=file_name)
+                    # Optional for reranker checkpoints that do not ship these heads.
+                    file_path = None
+
+            if file_path is None:
+                continue
 
             model_weights = torch_load(file_path, map_location="cpu")
             name = file_name.split(".")[0]
