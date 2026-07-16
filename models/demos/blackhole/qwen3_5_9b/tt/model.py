@@ -17,6 +17,7 @@ from models.demos.blackhole.qwen3_5_9b.tt.layer import Qwen35DecoderLayer
 from models.demos.blackhole.qwen3_5_9b.tt.model_config import Qwen35ModelArgs
 from models.demos.blackhole.qwen3_5_9b.tt.rope import Qwen35RoPESetup
 from models.tt_transformers.tt.common import Mode, get_block_size, num_blocks_in_seq
+from models.common.sampling.generator import SamplingGenerator
 
 
 class Qwen35Model:
@@ -43,9 +44,48 @@ class Qwen35Model:
         else:
             self.tt_ccl = None
         self.configuration = args  # Generator reads model.configuration.max_seq_len
-        self.sampling = None  # host sampling only (no on-device sampler)
+        # On-device sampling: enable when logits fit per-device 64k limit.
+        # (Set QWEN35_ONDEV_SAMPLING=0 to force host sampling.)
         self.sampling_dp = 1
-        self._supports_on_device_sampling = False
+        _ondev = os.environ.get("QWEN35_ONDEV_SAMPLING", "1") == "1"
+        sampling_splits = self.num_devices if list(self.mesh_device.shape) != [1, 1] else 2
+        self._supports_on_device_sampling = _ondev and (self.args.vocab_size // sampling_splits <= 64 * 1024)
+        if self._supports_on_device_sampling:
+            # TTSampling reads these off `args` (getattr with defaults). The Qwen35 port
+            # does not populate them, so set the sampling contract here before building the
+            # SamplingGenerator. vocab is padded so each device shard is tile-aligned
+            # (nearest multiple of TILE_SIZE * num_devices) and, when the per-device shard
+            # is not a power of two, ttnn.topk is padded up to avoid the single-core regress.
+            import math as _math
+
+            _tile = 32
+            _splits = sampling_splits
+            _padded_vocab = _math.ceil(self.args.vocab_size / (_tile * _splits)) * (_tile * _splits)
+            _per_device = _padded_vocab // _splits
+            self.args.padded_vocab_size = _padded_vocab
+            self.args.max_top_k = getattr(self.args, "max_top_k", 32)
+            self.args.sampling_all_gather_axis = getattr(self.args, "sampling_all_gather_axis", 0)
+            self.args.sampling_dp = 1
+            self.args.pad_logits_to_power_of_2 = (_per_device & (_per_device - 1)) != 0
+            self._sampling_padded_vocab_size = _padded_vocab
+            # enable_internal_trace=False: let the sampling run INSIDE the model's decode trace
+            # (captured by ttnn_decode_forward via _forward_decode + self.sampling.sample), rather
+            # than the generator's split sampling-trace path. The split path
+            # (_capture_decode_trace_text) calls sampling_module.capture_trace(tt_out_tok=
+            # device_inputs[0]) with this port's rank-2 decode token tensor, which violates the
+            # sampling op's rank-4 preallocated-output contract. Folding sampling into the model
+            # trace keeps a single captured decode+sample trace and sidesteps that mismatch.
+            self.sampling = SamplingGenerator(
+                args=args, mesh_device=mesh_device, tt_ccl=self.tt_ccl, enable_internal_trace=False
+            )
+            logger.info(
+                f"On-device sampling ENABLED (splits={_splits}, vocab={self.args.vocab_size}, "
+                f"padded_vocab={_padded_vocab}, per_device={_per_device}, "
+                f"pad_pow2={self.args.pad_logits_to_power_of_2})"
+            )
+        else:
+            self.sampling = None
+            logger.info("On-device sampling disabled (host sampling)")
 
         # Embedding — framework Embedding (mesh-aware: ShardTensor2dMesh(dims=(None,3))
         # replicates the table on a 1-device mesh, identical to the old single-device path).
@@ -111,6 +151,34 @@ class Qwen35Model:
             cache_file_name=tensor_cache_path / "output.weight" if tensor_cache_path else None,
             **(dict(mesh_mapper=ttnn.ReplicateTensorToMesh(mesh_device)) if self.num_devices > 1 else {}),
         )
+
+        # On-device sampling LM head — VOCAB-SHARDED across the mesh (each device owns
+        # padded_vocab_size // num_devices columns). TTSampling expects the decode logits
+        # to be vocab-partitioned so each device runs a local top-k, then all-gather +
+        # per-device offset restores global indices. The replicated head above stays as the
+        # source of truth for prefill and the host-sampling decode path; this extra head is
+        # ONLY consulted in _forward_decode when on-device sampling is active. The columns
+        # are right-padded to padded_vocab_size with a very negative bias so padded slots
+        # never win top-k.
+        if self.num_devices > 1 and self._supports_on_device_sampling:
+            _pv = self._sampling_padded_vocab_size
+            _w = state_dict["output.weight"].T.contiguous()  # [dim, vocab_size]
+            if _pv > _w.shape[1]:
+                _pad = torch.zeros(_w.shape[0], _pv - _w.shape[1], dtype=_w.dtype)
+                _w = torch.cat([_w, _pad], dim=1)  # [dim, padded_vocab]
+            self.lm_head_weight_sampling = ttnn.as_tensor(
+                _w,
+                dtype=ttnn.bfloat8_b,
+                layout=ttnn.TILE_LAYOUT,
+                device=mesh_device,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                cache_file_name=tensor_cache_path / "output.weight.sampling_sharded" if tensor_cache_path else None,
+                mesh_mapper=ttnn.ShardTensor2dMesh(
+                    mesh_device, dims=(None, 1), mesh_shape=tuple(self.args.cluster_shape)
+                ),
+            )
+        else:
+            self.lm_head_weight_sampling = None
 
         self.vocab_size = args.vocab_size
         self._paged_kv_caches = None
@@ -448,7 +516,13 @@ class Qwen35Model:
             else:
                 x = layer.forward(x, mode="decode")
         x = self.norm(x, mode=Mode.DECODE)
-        logits = ttnn.linear(x, self.lm_head_weight)
+        # On-device sampling wants vocab-SHARDED logits (per-device top-k → all-gather).
+        # Use the sharded head when the caller flags sampling; otherwise emit the
+        # replicated full-vocab logits (host-sampling / greedy argmax path unchanged).
+        if getattr(self, "_decode_sampling_on_device", False) and self.lm_head_weight_sampling is not None:
+            logits = ttnn.linear(x, self.lm_head_weight_sampling)  # [1,1,B,padded_vocab/num_devices] per device
+        else:
+            logits = ttnn.linear(x, self.lm_head_weight)  # replicated full vocab (same on all devices)
         ttnn.deallocate(x)
         return logits
 
@@ -1938,18 +2012,60 @@ class Qwen35Model:
         from models.demos.blackhole.qwen3_5_9b.tt.generator_interface import unpack_rope
 
         cos, sin = unpack_rope(rot_mat_idxs)
+        # Flag the decode LM head so it emits vocab-sharded logits for on-device sampling.
+        self._decode_sampling_on_device = bool(sampling_on_device and self.sampling is not None)
         logits = self._forward_decode(tokens, cos, sin, current_pos, page_table)
+        self._decode_sampling_on_device = False
+
+        if sampling_on_device and self.sampling is not None:
+            # generator._capture_decode_trace_text captures the model forward and the sampling
+            # trace SEPARATELY: on the capture pass it asks for the raw (sharded) logits
+            # (capture_sampling_trace=True) and captures sampling itself; on replay it feeds
+            # the trace output back through sampling.sample(). Mirror the tt_transformers
+            # reference contract.
+            # TTSampling / TTPenalties own persistent buffers sized to max_batch_size (32,
+            # tile-aligned) — they broadcast their per-user params against the logits batch
+            # dim and write back in place, so the logits MUST carry batch=32 even though this
+            # port serves a single user (B=1). Pad the batch dim up to 32 before sampling (and
+            # before handing the logits to the generator's separate sampling-trace capture).
+            # _forward_decode returns [1, 1, B, vocab_shard]; pad dim 2 up to 32.
+            sampled_batch = self.sampling.tt_sampling.max_batch_size
+            b = logits.shape[2]
+            if b < sampled_batch:
+                logits = ttnn.pad(
+                    logits,
+                    [(0, 0), (0, 0), (0, sampled_batch - b), (0, 0)],
+                    value=0.0,
+                )
+            if capture_sampling_trace:
+                return logits
+            # tt_out_tok must be a rank-4 [1,1,1,batch] preallocated output (see
+            # sampling_device_operation.cpp). The decode input `tokens` is a different rank/shape,
+            # so let TTSampling allocate the output itself (pass None).
+            tt_toks, tt_log_probs = self.sampling.sample(
+                logits,
+                enable_trace=False,
+            )
+            return tt_toks, tt_log_probs
         return logits, None
 
     def process_output_decode(self, tt_out, B, S=1, is_tokens=False, is_log_probs=False):
         """Convert decode logits from device ttnn to a host float tensor.
 
         Qwen's _forward_decode returns 3D logits [B, 1, vocab_size]; slice accordingly.
-        On-device sampling / log-probs are not supported by this port (host sampling only,
-        ``_supports_on_device_sampling=False``), so the is_tokens / is_log_probs branches the
-        reference handles never fire here. Assert rather than silently return wrong-shaped data.
+        When on-device sampling is active the Generator passes the SAMPLED TOKENS (or log
+        probs) here instead of logits: TTSampling all-gathers each device's local result and
+        replicates it across the mesh, so every device holds the same [1,1,max_batch,1]
+        token tensor — take one replica and slice to B.
         """
-        assert not (is_tokens or is_log_probs), "on-device sampling/log-probs unsupported (host sampling only)"
+        if is_tokens or is_log_probs:
+            # Sampled tokens / log-probs: identical (replicated) on every device after the
+            # sampling all-gather. Read one replica and take the first B entries.
+            if self.num_devices > 1:
+                t = ttnn.to_torch(ttnn.get_device_tensors(tt_out)[0])
+            else:
+                t = ttnn.to_torch(tt_out)
+            return t.reshape(-1)[:B].view(B, S)
         if self.num_devices > 1:
             # TP: logits are replicated (full vocab on every device); gather and take one replica.
             full = ttnn.to_torch(tt_out, mesh_composer=ttnn.ConcatMeshToTensor(self.mesh_device, dim=0)).float()

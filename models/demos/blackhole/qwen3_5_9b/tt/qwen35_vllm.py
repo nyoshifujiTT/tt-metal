@@ -138,6 +138,13 @@ class Qwen35ForCausalLM(Generator, SupportsMultiModal):
             mesh_device, max_batch_size=max_batch_size, max_seq_len=max_seq_len, hf_model=name_or_path
         )
         inst = cls([model], [args], mesh_device)
+        # Disable the generator's SPLIT sampling-trace path. With it on (default), decode_forward
+        # forces sampling_module.enable_internal_trace=True and _capture_decode_trace_text calls
+        # sampling_module.capture_trace(tt_out_tok=device_inputs[0]) — this port's rank-2 decode
+        # token tensor — violating the sampling op's rank-4 preallocated-output contract. With it
+        # off, sampling runs INSIDE the model decode trace (ttnn_decode_forward → sample), which
+        # is what this port implements.
+        inst.enable_split_sampling = False
         # Qwen3-VL pattern: build the on-device (TT) vision encoder NOW, during model init,
         # i.e. BEFORE warmup captures the prefill/decode traces. If the vision encoder is built
         # lazily on the first request (after the decode trace is parked), its device-buffer
@@ -409,6 +416,17 @@ class Qwen35ForCausalLM(Generator, SupportsMultiModal):
             start_pos = args[1] if len(args) > 1 else kwargs.get("start_pos")
             prime_decode_trace(self, self.model[0], tokens, start_pos, kwargs.get("page_table"))
 
+        # On-device sampling rope-freeze guard: this port drives decode rope from HOST-computed
+        # cos/sin passed in per step (prepare_decode_inputs_host), NOT a device rope table with
+        # ttnn.plus_one. The stock Generator._decode_forward_trace_text only re-copies host
+        # inputs when `reset_inputs` is set, and with sampling_on_device=True it computes
+        # reset_inputs = (reset_batch or not sampling_on_device) = False — so cos/sin would
+        # freeze at the captured position and every sampled token would use pos-0 rope. Force a
+        # host-input refresh each sampling step by clearing prev_page_table (the Generator then
+        # takes its `prev_page_table is None` branch and re-copies inputs). Cost is one host->
+        # device copy per step — the same refresh the non-sampling path already does every step.
+        if kwargs.get("sampling_params") is not None and getattr(self.model[0], "sampling", None) is not None:
+            self.prev_page_table = None
         return super().decode_forward(*args, **kwargs)
 
     def warmup_model_prefill(self, kv_cache, enable_trace, *args, **kwargs):
