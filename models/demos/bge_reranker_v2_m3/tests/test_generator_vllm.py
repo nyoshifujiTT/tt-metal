@@ -10,7 +10,7 @@ vLLM-required keyword arguments.
 
 import inspect
 
-from models.demos.wormhole.bge_reranker_v2_m3.demo.generator_vllm import BgeRerankerV2M3
+from models.demos.bge_reranker_v2_m3.demo.generator_vllm import BgeRerankerV2M3
 
 
 def test_cross_encoder_class_flags():

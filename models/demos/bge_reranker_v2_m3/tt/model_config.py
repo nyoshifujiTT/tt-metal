@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import torch
 
-from models.demos.wormhole.bge_reranker_v2_m3.tt.classifier_head import CLASSIFIER_KEYS
+from models.demos.bge_reranker_v2_m3.tt.classifier_head import CLASSIFIER_KEYS
 
 
 def load_reranker_state_dict(model_name: str) -> dict:

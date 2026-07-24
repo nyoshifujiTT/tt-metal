@@ -11,7 +11,7 @@ hidden state. Runs on CPU in fp32 and asserts an exact (tight) match.
 import pytest
 import torch
 
-from models.demos.wormhole.bge_reranker_v2_m3.tt.classifier_head import (
+from models.demos.bge_reranker_v2_m3.tt.classifier_head import (
     CLASSIFIER_KEYS,
     RerankerClassifierHead,
 )

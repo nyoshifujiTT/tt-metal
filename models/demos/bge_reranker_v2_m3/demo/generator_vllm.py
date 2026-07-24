@@ -21,8 +21,8 @@ import ttnn
 from models.common.auto_compose import to_torch_auto_compose
 from models.demos.wormhole.bge_m3.tt.common import create_tt_model
 from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_length
-from models.demos.wormhole.bge_reranker_v2_m3.tt.classifier_head import RerankerClassifierHead
-from models.demos.wormhole.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict
+from models.demos.bge_reranker_v2_m3.tt.classifier_head import RerankerClassifierHead
+from models.demos.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict
 
 
 # Short sequences pad batch to 32 rows; the 8192 long-seq path runs 16-wide.

@@ -14,8 +14,8 @@ import torch
 
 from models.demos.wormhole.bge_m3.tests.test_utils import require_single_device, to_ttnn_ids
 from models.demos.wormhole.bge_m3.tt.common import create_tt_model
-from models.demos.wormhole.bge_reranker_v2_m3.tt.classifier_head import RerankerClassifierHead
-from models.demos.wormhole.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict
+from models.demos.bge_reranker_v2_m3.tt.classifier_head import RerankerClassifierHead
+from models.demos.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict
 
 MODEL_ID = "BAAI/bge-reranker-v2-m3"
 BATCH_SIZE = 1

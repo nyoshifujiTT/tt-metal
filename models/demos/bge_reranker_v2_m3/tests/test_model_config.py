@@ -16,8 +16,8 @@ import types
 import pytest
 import torch
 
-from models.demos.wormhole.bge_reranker_v2_m3.tt import model_config
-from models.demos.wormhole.bge_reranker_v2_m3.tt.classifier_head import CLASSIFIER_KEYS
+from models.demos.bge_reranker_v2_m3.tt import model_config
+from models.demos.bge_reranker_v2_m3.tt.classifier_head import CLASSIFIER_KEYS
 
 
 class _FakeModel:
