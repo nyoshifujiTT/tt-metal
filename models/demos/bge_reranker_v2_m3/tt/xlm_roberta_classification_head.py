@@ -1,13 +1,18 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Sequence-classification head for BAAI/bge-reranker-v2-m3.
+"""XLM-RoBERTa sequence-classification head.
 
-The reranker is an XLM-RoBERTa encoder followed by
-``RobertaClassificationHead``: a dense layer, tanh, then a projection to a
-single logit taken from the ``<s>`` (CLS) position. The head is tiny
-(1024x1024 + 1x1024) and is evaluated on host in fp32 so the relevance
-score matches the Hugging Face reference exactly.
+Reproduces the transformers ``RobertaClassificationHead``: a dense layer,
+tanh, then a projection to ``num_labels`` logits taken from the ``<s>`` (CLS)
+position. The head is tiny (e.g. 1024x1024 + N x1024) and is evaluated on host
+in fp32 so the score matches the Hugging Face reference exactly.
+
+This head is not specific to bge-reranker-v2-m3; it applies to any
+XLM-RoBERTa / RoBERTa ``*ForSequenceClassification`` checkpoint. It currently
+lives under the reranker demo because that is its only user. If a second
+XLM-RoBERTa sequence-classification model is added, promote this module to a
+shared location (e.g. ``models/common``) with an import-only follow-up.
 """
 
 from __future__ import annotations
@@ -22,8 +27,8 @@ CLASSIFIER_KEYS = (
 )
 
 
-class RerankerClassifierHead:
-    """Host-side RoBERTa sequence-classification head (fp32)."""
+class XLMRobertaClassificationHead:
+    """Host-side XLM-RoBERTa sequence-classification head (fp32)."""
 
     def __init__(
         self,
@@ -38,7 +43,7 @@ class RerankerClassifierHead:
         self.out_proj_bias = out_proj_bias.to(torch.float32)
 
     @classmethod
-    def from_state_dict(cls, state_dict: dict) -> "RerankerClassifierHead":
+    def from_state_dict(cls, state_dict: dict) -> "XLMRobertaClassificationHead":
         # Defensive check: a correctly loaded bge-reranker-v2-m3 checkpoint always
         # provides these tensors, so this does not trigger in normal operation. It
         # guards against being handed an embedding-only state_dict (e.g. bge-m3) or

@@ -21,7 +21,7 @@ import ttnn
 from models.common.auto_compose import to_torch_auto_compose
 from models.demos.wormhole.bge_m3.tt.common import create_tt_model
 from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_length
-from models.demos.bge_reranker_v2_m3.tt.classifier_head import RerankerClassifierHead
+from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import XLMRobertaClassificationHead
 from models.demos.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict
 
 
@@ -201,7 +201,7 @@ class BgeRerankerV2M3:
             hf_model_name=self.model_name,
         )
         self.tokenizer = self.model_args.tokenizer
-        self.classifier = RerankerClassifierHead.from_state_dict(self.state_dict)
+        self.classifier = XLMRobertaClassificationHead.from_state_dict(self.state_dict)
         self._is_initialized = True
 
     def _validate_request(self, batch_size: int, padded_seq_len: int) -> None:

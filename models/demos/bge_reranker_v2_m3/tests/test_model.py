@@ -14,7 +14,7 @@ import torch
 
 from models.demos.wormhole.bge_m3.tests.test_utils import require_single_device, to_ttnn_ids
 from models.demos.wormhole.bge_m3.tt.common import create_tt_model
-from models.demos.bge_reranker_v2_m3.tt.classifier_head import RerankerClassifierHead
+from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import XLMRobertaClassificationHead
 from models.demos.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict
 
 MODEL_ID = "BAAI/bge-reranker-v2-m3"
@@ -57,7 +57,7 @@ def test_reranker_logit_matches_hf(device, artifacts, query, doc, reset_seeds):
         state_dict=state_dict,
         hf_model_name=model_id_or_path,
     )
-    classifier = RerankerClassifierHead.from_state_dict(sd)
+    classifier = XLMRobertaClassificationHead.from_state_dict(sd)
 
     input_ids = enc["input_ids"]
     attention_mask = enc["attention_mask"]

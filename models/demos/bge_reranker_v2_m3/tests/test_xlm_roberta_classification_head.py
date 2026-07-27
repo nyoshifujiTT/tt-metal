@@ -3,7 +3,7 @@
 
 """Unit test for the reranker sequence-classification head (host, no device).
 
-Verifies that RerankerClassifierHead reproduces the transformers
+Verifies that XLMRobertaClassificationHead reproduces the transformers
 RobertaClassificationHead numerics: dense -> tanh -> out_proj on the CLS
 hidden state. Runs on CPU in fp32 and asserts an exact (tight) match.
 """
@@ -11,9 +11,9 @@ hidden state. Runs on CPU in fp32 and asserts an exact (tight) match.
 import pytest
 import torch
 
-from models.demos.bge_reranker_v2_m3.tt.classifier_head import (
+from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import (
     CLASSIFIER_KEYS,
-    RerankerClassifierHead,
+    XLMRobertaClassificationHead,
 )
 
 HIDDEN_SIZE = 1024
@@ -29,7 +29,7 @@ def _reference_head(cls_hidden, sd):
 
 
 @pytest.mark.parametrize("batch", [1, 3, 8])
-def test_classifier_head_matches_reference(batch):
+def test_head_matches_reference(batch):
     torch.manual_seed(0)
     sd = {
         "classifier.dense.weight": torch.randn(HIDDEN_SIZE, HIDDEN_SIZE) * 0.02,
@@ -37,7 +37,7 @@ def test_classifier_head_matches_reference(batch):
         "classifier.out_proj.weight": torch.randn(1, HIDDEN_SIZE) * 0.02,
         "classifier.out_proj.bias": torch.randn(1) * 0.02,
     }
-    head = RerankerClassifierHead.from_state_dict(sd)
+    head = XLMRobertaClassificationHead.from_state_dict(sd)
     cls_hidden = torch.randn(batch, HIDDEN_SIZE)
 
     got = head(cls_hidden)
@@ -47,9 +47,9 @@ def test_classifier_head_matches_reference(batch):
     torch.testing.assert_close(got, expected, rtol=0, atol=1e-6)
 
 
-def test_classifier_head_missing_keys_raises():
+def test_head_missing_keys_raises():
     with pytest.raises(KeyError):
-        RerankerClassifierHead.from_state_dict({"classifier.dense.weight": torch.zeros(1)})
+        XLMRobertaClassificationHead.from_state_dict({"classifier.dense.weight": torch.zeros(1)})
 
 
 def test_classifier_keys_constant():
