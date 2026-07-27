@@ -1,18 +1,18 @@
 # Host-side (device-free) frequent model tests for single-card models.
 #
 # These jobs run on a CPU runner (cpu_medium) with NO Tenstorrent device
-# attached. They import ttnn from the build/wheel but never open a device, so
-# they must not consume scarce Wormhole/Blackhole runners. Driven by
-# single-card-ttnn-models-frequent-hostside-tests-impl.yaml.
+# attached (executed via the generic fabric-cpu-only-tests-impl.yaml runner).
+# They import ttnn from the build/wheel but never open a device, so they must
+# not consume scarce Wormhole/Blackhole runners.
 #
-# Each entry: name, cmd ($PYTEST_CMD is set by the impl workflow), model, skus,
-# owner_id, team. For max allowed timeout refer to .github/time_budget.yaml.
+# Each entry: name, cmd (literal; no device), skus, team, arch, owner_id.
+# For max allowed timeout refer to .github/time_budget.yaml (models -> frequent).
 
 - name: bge_reranker_v2_m3 host-side
-  cmd: $PYTEST_CMD tests/nightly/single_card/bge_reranker_v2_m3_hostside
-  model: bge_reranker_v2_m3_hostside
+  cmd: pytest tests/nightly/single_card/bge_reranker_v2_m3_hostside
   skus:
     cpu_medium:
       timeout: 15
-  owner_id: U082LLYBLSW # Gabriel Tobar (CODEOWNERS @gtobarTT)
   team: models
+  arch: blackhole
+  owner_id: U082LLYBLSW # Gabriel Tobar (CODEOWNERS @gtobarTT)

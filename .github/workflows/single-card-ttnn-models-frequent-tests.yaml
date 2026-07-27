@@ -92,12 +92,18 @@ jobs:
       wheel-artifact-name: ${{ needs.build-artifact.outputs.wheel-artifact-name }}
       models-to-run: ${{ inputs.models-to-run || 'all' }}
       enable-ops-recording: ${{ inputs.enable-ops-recording || false }}
+  # Device-free host-side model tests run on a CPU runner via the generic
+  # CPU-only impl (no --device). Reuses fabric-cpu-only-tests-impl.yaml with the
+  # single-card host-side catalog instead of a bespoke workflow.
   single-card-ttnn-models-frequent-hostside-tests:
     needs: [check-harbor, build-artifact]
-    uses: ./.github/workflows/single-card-ttnn-models-frequent-hostside-tests-impl.yaml
+    uses: ./.github/workflows/fabric-cpu-only-tests-impl.yaml
     secrets: inherit
     with:
+      tests-yaml-path: ./tests/pipeline_reorg/single_card_ttnn_models_frequent_hostside_tests.yaml
+      test-category: frequent
+      runs-on-sku: cpu_medium
       docker-image: ${{ needs.build-artifact.outputs.dev-docker-image }}
       build-artifact-name: ${{ needs.build-artifact.outputs.build-artifact-name }}
       wheel-artifact-name: ${{ needs.build-artifact.outputs.wheel-artifact-name }}
-      models-to-run: ${{ inputs.models-to-run || 'all' }}
+      per-test-timeout: 15
