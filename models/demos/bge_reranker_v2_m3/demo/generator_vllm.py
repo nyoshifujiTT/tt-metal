@@ -7,7 +7,7 @@ The model is an XLM-RoBERTa encoder (reused from
 ``models/demos/wormhole/bge_m3``) followed by a sequence-classification head.
 For each (query, document) pair vLLM tokenizes a single concatenated
 sequence; the encoder runs on device via the shared
-``bge_m3.tt.encode.encode_to_last_hidden`` entry point (which owns the device
+``bge_m3.demo.generator_vllm.encode_to_last_hidden`` entry point (which owns the device
 padding/chunking contract), and the classification head
 (``classifier.dense`` -> tanh -> ``classifier.out_proj``) emits one relevance
 logit from the ``<s>`` (CLS) position. The head runs on host in fp32.
@@ -21,7 +21,7 @@ import torch
 
 import ttnn
 from models.demos.wormhole.bge_m3.tt.common import create_tt_model
-from models.demos.wormhole.bge_m3.tt.encode import encode_to_last_hidden
+from models.demos.wormhole.bge_m3.demo.generator_vllm import encode_to_last_hidden
 from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_length
 from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import XLMRobertaClassificationHead
 from models.demos.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict

@@ -140,67 +140,16 @@ class BgeM3ForEmbedding:
         if padded_seq_len > self.max_seq_len:
             raise ValueError(f"Padded sequence length {padded_seq_len} exceeds max_seq_len {self.max_seq_len}")
 
-    def _pad_inputs(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        token_type_ids: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
-        *,
-        padded_batch_size: int,
-    ) -> dict[str, Optional[torch.Tensor]]:
-        padded_seq_len = _get_padded_seq_len(input_ids.shape[1])
-
-        if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids)
-
-        padded_inputs = {
-            "input_ids": _pad_batch_tensor(
-                _pad_tensor(input_ids, padded_seq_len, pad_value=self.tokenizer.pad_token_id),
-                padded_batch_size,
-                pad_value=self.tokenizer.pad_token_id,
-            ),
-            "attention_mask": _pad_batch_tensor(
-                _pad_tensor(attention_mask, padded_seq_len, pad_value=0),
-                padded_batch_size,
-                pad_value=0,
-            ),
-            "token_type_ids": _pad_batch_tensor(
-                _pad_tensor(token_type_ids, padded_seq_len, pad_value=0),
-                padded_batch_size,
-                pad_value=0,
-            )
-            if token_type_ids is not None
-            else None,
-            "position_ids": _pad_batch_tensor(
-                _pad_tensor(position_ids, padded_seq_len, pad_value=self.tokenizer.pad_token_id),
-                padded_batch_size,
-                pad_value=self.tokenizer.pad_token_id,
-            )
-            if position_ids is not None
-            else None,
-        }
-
-        return padded_inputs
-
     def _forward_chunk(
         self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        token_type_ids: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
-        *,
+        padded_inputs: dict[str, Optional[torch.Tensor]],
         chunk_batch_size: int,
     ) -> dict[str, torch.Tensor]:
-        output = self.model(
-            input_ids=to_ttnn_ids(input_ids, device=self.device),
-            attention_mask=to_ttnn_ids(attention_mask, device=self.device),
-            token_type_ids=(to_ttnn_ids(token_type_ids, device=self.device) if token_type_ids is not None else None),
-            position_ids=(to_ttnn_ids(position_ids, device=self.device) if position_ids is not None else None),
-        )
-
-        if output.layout != ttnn.TILE_LAYOUT:
-            output = ttnn.to_layout(output, ttnn.TILE_LAYOUT)
+        # Runs the shared encoder chunk, then applies the bge-m3 embedding pooling
+        # heads on device. Used as the per-chunk callback of encode_in_chunks().
+        input_ids = padded_inputs["input_ids"]
+        attention_mask = padded_inputs["attention_mask"]
+        output = run_encoder_chunk(self.model, self.device, padded_inputs)
 
         return_dict = {}
         if self.return_dense:
@@ -350,32 +299,17 @@ class BgeM3ForEmbedding:
         token_type_ids: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> dict[str, torch.Tensor]:
-        batch_size, seq_len = input_ids.shape
-        padded_seq_len = get_padded_sequence_length(seq_len)
-
-        self._validate_request(batch_size, padded_seq_len)
+        self._validate_request(input_ids.shape[0], get_padded_sequence_length(input_ids.shape[1]))
         self._initialize_model()
 
-        target_padded_batch_size = get_target_padded_batch_size(batch_size, padded_seq_len)
-        chunk_outputs = []
-        for start, end in iter_execution_ranges(batch_size, padded_seq_len):
-            padded_inputs = self._pad_inputs(
-                input_ids=input_ids[start:end],
-                attention_mask=_slice_optional_batch_tensor(attention_mask, start, end),
-                token_type_ids=_slice_optional_batch_tensor(token_type_ids, start, end),
-                position_ids=_slice_optional_batch_tensor(position_ids, start, end),
-                padded_batch_size=target_padded_batch_size,
-            )
-            chunk_outputs.append(
-                self._forward_chunk(
-                    input_ids=padded_inputs["input_ids"],
-                    attention_mask=padded_inputs["attention_mask"],
-                    token_type_ids=padded_inputs["token_type_ids"],
-                    position_ids=padded_inputs["position_ids"],
-                    chunk_batch_size=end - start,
-                )
-            )
-
+        chunk_outputs = encode_in_chunks(
+            input_ids,
+            self._forward_chunk,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            pad_token_id=self.tokenizer.pad_token_id,
+        )
         return _concatenate_chunk_outputs(chunk_outputs)
 
     def get_embedding_dim(self) -> int:
@@ -454,8 +388,140 @@ def iter_execution_ranges(
         yield (start, min(start + chunk, original_batch_size))
 
 
-def _get_padded_seq_len(seq_len: int) -> int:
-    return get_padded_sequence_length(seq_len)
+def _pad_chunk_inputs(
+    input_ids: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    token_type_ids: Optional[torch.Tensor],
+    position_ids: Optional[torch.Tensor],
+    *,
+    padded_seq_len: int,
+    padded_batch_size: int,
+    pad_token_id: int,
+) -> dict[str, Optional[torch.Tensor]]:
+    """Pads one batch slice to (padded_batch_size, padded_seq_len) for the device.
+
+    Shared by every caller of the encoder: applies sequence-length padding
+    (128/1024/2048/8192 alignment) and batch padding to the fixed device width.
+    """
+    if attention_mask is None:
+        attention_mask = torch.ones_like(input_ids)
+
+    return {
+        "input_ids": _pad_batch_tensor(
+            _pad_tensor(input_ids, padded_seq_len, pad_value=pad_token_id),
+            padded_batch_size,
+            pad_value=pad_token_id,
+        ),
+        "attention_mask": _pad_batch_tensor(
+            _pad_tensor(attention_mask, padded_seq_len, pad_value=0),
+            padded_batch_size,
+            pad_value=0,
+        ),
+        "token_type_ids": _pad_batch_tensor(
+            _pad_tensor(token_type_ids, padded_seq_len, pad_value=0),
+            padded_batch_size,
+            pad_value=0,
+        )
+        if token_type_ids is not None
+        else None,
+        "position_ids": _pad_batch_tensor(
+            _pad_tensor(position_ids, padded_seq_len, pad_value=pad_token_id),
+            padded_batch_size,
+            pad_value=pad_token_id,
+        )
+        if position_ids is not None
+        else None,
+    }
+
+
+def run_encoder_chunk(model, device, padded_inputs: dict[str, Optional[torch.Tensor]]) -> ttnn.Tensor:
+    """Runs the TT encoder on one already-padded chunk, returning the ttnn output.
+
+    ``model`` is a BgeM3Model instance callable with ttnn tensors; ``device`` is
+    the mesh device the caller created the model on (BgeM3Model does not store
+    the device, so the owning wrapper passes it in explicitly). The output is
+    forced to TILE_LAYOUT so downstream heads can consume it directly.
+    """
+    token_type_ids = padded_inputs.get("token_type_ids")
+    position_ids = padded_inputs.get("position_ids")
+    output = model(
+        input_ids=to_ttnn_ids(padded_inputs["input_ids"], device=device),
+        attention_mask=to_ttnn_ids(padded_inputs["attention_mask"], device=device),
+        token_type_ids=(to_ttnn_ids(token_type_ids, device=device) if token_type_ids is not None else None),
+        position_ids=(to_ttnn_ids(position_ids, device=device) if position_ids is not None else None),
+    )
+    if output.layout != ttnn.TILE_LAYOUT:
+        output = ttnn.to_layout(output, ttnn.TILE_LAYOUT)
+    return output
+
+
+def encode_in_chunks(
+    input_ids: torch.Tensor,
+    process_chunk,
+    *,
+    attention_mask: Optional[torch.Tensor] = None,
+    token_type_ids: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.Tensor] = None,
+    pad_token_id: int = 0,
+):
+    """Drives the device pad/chunk contract, delegating each chunk to a callback.
+
+    This is the single orchestration point shared by every consumer of the
+    XLM-RoBERTa encoder (bge-m3 embedding pooling and the bge-reranker
+    cross-encoder). It slices the request into device-sized chunks, pads each to
+    the fixed (padded_batch_size, padded_seq_len) device shape, and calls
+    ``process_chunk(padded_inputs, chunk_batch_size)`` for every chunk. The
+    per-chunk results are returned as a list in request order; the caller decides
+    how to combine them (dict concat for bge-m3, tensor concat for the reranker).
+    """
+    batch_size, seq_len = input_ids.shape
+    padded_seq_len = get_padded_sequence_length(seq_len)
+    target_padded_batch_size = get_target_padded_batch_size(batch_size, padded_seq_len)
+
+    chunk_outputs = []
+    for start, end in iter_execution_ranges(batch_size, padded_seq_len):
+        padded_inputs = _pad_chunk_inputs(
+            input_ids[start:end],
+            _slice_optional_batch_tensor(attention_mask, start, end),
+            _slice_optional_batch_tensor(token_type_ids, start, end),
+            _slice_optional_batch_tensor(position_ids, start, end),
+            padded_seq_len=padded_seq_len,
+            padded_batch_size=target_padded_batch_size,
+            pad_token_id=pad_token_id,
+        )
+        chunk_outputs.append(process_chunk(padded_inputs, end - start))
+    return chunk_outputs
+
+
+def encode_to_last_hidden(
+    model,
+    input_ids: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    *,
+    device,
+    pad_token_id: int = 0,
+) -> torch.Tensor:
+    """Runs the encoder and returns the last hidden state [B, S_padded, D] on host.
+
+    Thin wrapper over ``encode_in_chunks`` for consumers (e.g. the bge-reranker
+    cross-encoder) that want the raw encoder output on host rather than a pooled
+    embedding. ``device`` is the mesh device the model was created on.
+    """
+
+    def _chunk_to_host(padded_inputs, chunk_batch_size):
+        output = run_encoder_chunk(model, device, padded_inputs)
+        hidden = to_torch_auto_compose(output, device=device).to(torch.float32)
+        if hidden.dim() == 4 and hidden.shape[1] == 1:
+            hidden = hidden.squeeze(1)  # [B,1,S,D] -> [B,S,D]
+        return hidden[:chunk_batch_size]
+
+    chunks = encode_in_chunks(
+        input_ids,
+        _chunk_to_host,
+        attention_mask=attention_mask,
+        pad_token_id=pad_token_id,
+    )
+    return torch.cat(chunks, dim=0)
 
 
 def _pad_tensor(tensor: torch.Tensor, padded_seq_len: int, pad_value: int = 0) -> torch.Tensor:
