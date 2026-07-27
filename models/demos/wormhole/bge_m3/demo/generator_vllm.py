@@ -11,11 +11,11 @@ import transformers
 import ttnn
 from models.common.auto_compose import to_torch_auto_compose
 from models.demos.wormhole.bge_m3.demo.m3_scores import _get_special_token_ids, _sparse_embedding_scatter_ttnn
-from models.demos.wormhole.bge_m3.tt.common import create_tt_model
 from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_length
+from models.demos.wormhole.bge_m3.demo.vllm_encoder_base import XlmRobertaEncoderVllmModel
 
 
-class BgeM3ForEmbedding:
+class BgeM3ForEmbedding(XlmRobertaEncoderVllmModel):
     """
     vLLM-facing embedding wrapper for direct BGE-M3 encoder execution.
 
@@ -40,105 +40,24 @@ class BgeM3ForEmbedding:
         self.return_sparse = kwargs.pop("return_sparse", False)
         self.return_colbert = kwargs.pop("return_colbert", False)
 
-        del prefix, kwargs
-
-        if vllm_config is not None and device is None:
-            device = vllm_config.device_config.device
-
-        if device is None:
-            raise ValueError("Either 'device' or 'vllm_config' must be provided")
-
-        self.device = device
-        self.max_batch_size = max_batch_size
-        self.max_seq_len = max_seq_len
-        # Accepted for API compatibility; execution stays single-device.
-        self.tt_data_parallel = tt_data_parallel
-        self.dtype = dtype
-        self.model_name = model_name
-
-        if vllm_config is not None:
-            self.vllm_config = vllm_config
+        super().__init__(
+            device=device,
+            max_batch_size=max_batch_size,
+            max_seq_len=max_seq_len,
+            dtype=dtype,
+            model_name=model_name,
+            vllm_config=vllm_config,
+            prefix=prefix,
+            tt_data_parallel=tt_data_parallel,
+            **kwargs,
+        )
 
         self.config = transformers.AutoConfig.from_pretrained(model_name)
-        self.pooler = None
-        self._is_initialized = False
-
-        self.model_args = None
-        self.model = None
         # Compatibility placeholders for callers that probe the newer API.
         self.model_args_list = None
         self.models = None
         self.data_parallel = None
         self.submeshes = None
-        self.state_dict = None
-        self.tokenizer = None
-
-    @classmethod
-    def initialize_vllm_model(
-        cls,
-        hf_config: transformers.PretrainedConfig,
-        mesh_device: ttnn.Device,
-        max_batch_size: int,
-        max_seq_len: Optional[int] = 8192,
-        model_location_generator=None,
-        tt_data_parallel=1,
-        optimizations: Optional[str] = None,
-        vllm_config=None,
-        dtype=ttnn.bfloat16,
-        **kwargs,
-    ) -> "BgeM3ForEmbedding":
-        if optimizations is not None:
-            raise ValueError("Optimizations are not supported for BGE-M3")
-
-        if vllm_config is not None:
-            if (
-                not hasattr(vllm_config.model_config, "override_tt_config")
-                or vllm_config.model_config.override_tt_config is None
-            ):
-                vllm_config.model_config.override_tt_config = {}
-            vllm_config.model_config.override_tt_config["is_embedding_model"] = True
-
-            return cls(
-                device=mesh_device,
-                model_location_generator=model_location_generator,
-                max_batch_size=max_batch_size,
-                max_seq_len=max_seq_len,
-                vllm_config=vllm_config,
-                tt_data_parallel=tt_data_parallel,
-                dtype=dtype,
-                **kwargs,
-            )
-
-        return cls(
-            device=mesh_device,
-            model_location_generator=model_location_generator,
-            max_batch_size=max_batch_size,
-            max_seq_len=max_seq_len,
-            tt_data_parallel=tt_data_parallel,
-            dtype=dtype,
-            **kwargs,
-        )
-
-    def _initialize_model(self) -> None:
-        if self._is_initialized and self.model is not None:
-            return
-
-        self.model_args, self.model, self.state_dict = create_tt_model(
-            mesh_device=self.device,
-            max_batch_size=self.max_batch_size,
-            max_seq_len=self.max_seq_len,
-            dtype=self.dtype,
-            state_dict=self.state_dict,
-            hf_model_name=self.model_name,
-        )
-        self.tokenizer = self.model_args.tokenizer
-        self._is_initialized = True
-
-    def _validate_request(self, batch_size: int, padded_seq_len: int) -> None:
-        if batch_size > self.max_batch_size:
-            raise ValueError(f"Batch size {batch_size} exceeds max_batch_size {self.max_batch_size}")
-        if padded_seq_len > self.max_seq_len:
-            raise ValueError(f"Padded sequence length {padded_seq_len} exceeds max_seq_len {self.max_seq_len}")
 
     def _forward_chunk(
         self,
@@ -315,15 +234,6 @@ class BgeM3ForEmbedding:
     def get_embedding_dim(self) -> int:
         return self.config.hidden_size
 
-    def get_max_seq_len(self) -> int:
-        return self.max_seq_len
-
-    def get_max_batch_size(self) -> int:
-        return self.max_batch_size
-
-    def _init_pooler(self, vllm_config, prefix: str = "") -> None:
-        del vllm_config, prefix
-        self.pooler = None
 
 
 def register_model() -> None:
