@@ -37,6 +37,10 @@ def load_reranker_state_dict(model_name: str) -> dict:
     model = AutoModelForSequenceClassification.from_pretrained(model_name, dtype="auto")
     state_dict = model.state_dict()
 
+    # Defensive check: AutoModelForSequenceClassification on the real
+    # bge-reranker-v2-m3 always yields these tensors, so this does not trigger in
+    # normal operation. It fails loudly if a wrong (non sequence-classification)
+    # checkpoint is configured instead of silently producing bad scores.
     missing = [k for k in CLASSIFIER_KEYS if k not in state_dict]
     if missing:
         raise RuntimeError(

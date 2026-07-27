@@ -39,6 +39,10 @@ class RerankerClassifierHead:
 
     @classmethod
     def from_state_dict(cls, state_dict: dict) -> "RerankerClassifierHead":
+        # Defensive check: a correctly loaded bge-reranker-v2-m3 checkpoint always
+        # provides these tensors, so this does not trigger in normal operation. It
+        # guards against being handed an embedding-only state_dict (e.g. bge-m3) or
+        # one loaded as a plain encoder where the classification head was dropped.
         missing = [k for k in CLASSIFIER_KEYS if k not in state_dict]
         if missing:
             raise KeyError(
