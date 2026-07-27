@@ -235,7 +235,6 @@ class BgeM3ForEmbedding(XlmRobertaEncoderVllmModel):
         return self.config.hidden_size
 
 
-
 def register_model() -> None:
     try:
         from vllm.model_executor.model_loader import ModelRegistry

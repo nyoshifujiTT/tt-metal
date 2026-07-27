@@ -20,14 +20,14 @@ from typing import Optional
 import torch
 
 import ttnn
-from models.demos.wormhole.bge_m3.tt.common import create_tt_model
 from models.demos.wormhole.bge_m3.demo.generator_vllm import encode_to_last_hidden
 from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_length
 from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import XLMRobertaClassificationHead
 from models.demos.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict
+from models.demos.wormhole.bge_m3.demo.vllm_encoder_base import XlmRobertaEncoderVllmModel
 
 
-class BgeRerankerV2M3:
+class BgeRerankerV2M3(XlmRobertaEncoderVllmModel):
     """Cross-encoder execution wrapper for bge-reranker-v2-m3."""
 
     # Declared so vLLM treats this as a pooling / cross-encoder model and routes
@@ -50,98 +50,27 @@ class BgeRerankerV2M3:
         tt_data_parallel: int = 1,
         **kwargs,
     ):
-        del prefix, kwargs
-
-        if vllm_config is not None and device is None:
-            device = vllm_config.device_config.device
-        if device is None:
-            raise ValueError("Either 'device' or 'vllm_config' must be provided")
-
-        self.device = device
-        self.max_batch_size = max_batch_size
-        self.max_seq_len = max_seq_len
-        self.tt_data_parallel = tt_data_parallel
-        self.dtype = dtype
-        self.model_name = model_name
-        if vllm_config is not None:
-            self.vllm_config = vllm_config
-
-        self.pooler = None
-        self._is_initialized = False
-        self.model_args = None
-        self.model = None
-        self.state_dict = None
-        self.tokenizer = None
-        self.classifier = None
-
-    @classmethod
-    def initialize_vllm_model(
-        cls,
-        hf_config,
-        mesh_device: ttnn.Device,
-        max_batch_size: int,
-        max_seq_len: Optional[int] = 8192,
-        model_location_generator=None,
-        tt_data_parallel=1,
-        optimizations: Optional[str] = None,
-        vllm_config=None,
-        dtype=ttnn.bfloat16,
-        **kwargs,
-    ) -> "BgeRerankerV2M3":
-        if optimizations is not None:
-            raise ValueError("Optimizations are not supported for bge-reranker-v2-m3")
-
-        if vllm_config is not None:
-            if (
-                not hasattr(vllm_config.model_config, "override_tt_config")
-                or vllm_config.model_config.override_tt_config is None
-            ):
-                vllm_config.model_config.override_tt_config = {}
-            vllm_config.model_config.override_tt_config["is_embedding_model"] = True
-            return cls(
-                device=mesh_device,
-                max_batch_size=max_batch_size,
-                max_seq_len=max_seq_len,
-                vllm_config=vllm_config,
-                tt_data_parallel=tt_data_parallel,
-                dtype=dtype,
-                **kwargs,
-            )
-
-        return cls(
-            device=mesh_device,
+        super().__init__(
+            device=device,
             max_batch_size=max_batch_size,
             max_seq_len=max_seq_len,
-            tt_data_parallel=tt_data_parallel,
             dtype=dtype,
+            model_name=model_name,
+            vllm_config=vllm_config,
+            prefix=prefix,
+            tt_data_parallel=tt_data_parallel,
             **kwargs,
         )
+        self.classifier = None
 
-    def _initialize_model(self) -> None:
-        if self._is_initialized and self.model is not None:
-            return
-        # Load encoder + classifier weights via the reranker loader, then hand the
-        # state_dict to the shared bge-m3 backbone (which skips its own loader when
-        # a state_dict is provided). This keeps the bge-m3 module untouched.
-        if self.state_dict is None:
-            self.state_dict = load_reranker_state_dict(self.model_name)
-        self.model_args, self.model, self.state_dict = create_tt_model(
-            mesh_device=self.device,
-            max_batch_size=self.max_batch_size,
-            max_seq_len=self.max_seq_len,
-            dtype=self.dtype,
-            state_dict=self.state_dict,
-            hf_model_name=self.model_name,
-        )
-        self.tokenizer = self.model_args.tokenizer
+    # Load encoder + classifier weights via the reranker seq-classification
+    # loader, then hand the state_dict to the shared bge-m3 backbone (which skips
+    # its own loader when a state_dict is provided). This keeps bge-m3 untouched.
+    def _load_state_dict(self):
+        return load_reranker_state_dict(self.model_name)
+
+    def _post_initialize(self) -> None:
         self.classifier = XLMRobertaClassificationHead.from_state_dict(self.state_dict)
-        self._is_initialized = True
-
-    def _validate_request(self, batch_size: int, padded_seq_len: int) -> None:
-        if batch_size > self.max_batch_size:
-            raise ValueError(f"Batch size {batch_size} exceeds max_batch_size {self.max_batch_size}")
-        if padded_seq_len > self.max_seq_len:
-            raise ValueError(f"Padded sequence length {padded_seq_len} exceeds max_seq_len {self.max_seq_len}")
 
     def forward(
         self,
@@ -174,16 +103,6 @@ class BgeRerankerV2M3:
 
     def get_embedding_dim(self) -> int:
         return 1
-
-    def get_max_seq_len(self) -> int:
-        return self.max_seq_len
-
-    def get_max_batch_size(self) -> int:
-        return self.max_batch_size
-
-    def _init_pooler(self, vllm_config, prefix: str = "") -> None:
-        del vllm_config, prefix
-        self.pooler = None
 
 
 def register_model() -> None:
