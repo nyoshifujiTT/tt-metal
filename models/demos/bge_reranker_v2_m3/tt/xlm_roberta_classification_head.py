@@ -3,10 +3,19 @@
 
 """XLM-RoBERTa sequence-classification head.
 
-Reproduces the transformers ``RobertaClassificationHead``: a dense layer,
-tanh, then a projection to ``num_labels`` logits taken from the ``<s>`` (CLS)
-position. The head is tiny (e.g. 1024x1024 + N x1024) and is evaluated on host
+Reproduces the transformers ``XLMRobertaClassificationHead`` (identical to
+``RobertaClassificationHead``): take the ``<s>`` (CLS) position, then
+dropout -> dense -> tanh -> dropout -> ``out_proj`` to ``num_labels`` logits.
+At inference dropout is the identity, so this reduces to dense -> tanh ->
+out_proj. The head is tiny (e.g. 1024x1024 + N x1024) and is evaluated on host
 in fp32 so the score matches the Hugging Face reference exactly.
+
+Reference (transformers, pinned to tag v4.44.2 =
+commit 174890280b340b89c5bfa092f6b4fb0e2dc2d7fc):
+- RobertaClassificationHead:
+  https://github.com/huggingface/transformers/blob/174890280b340b89c5bfa092f6b4fb0e2dc2d7fc/src/transformers/models/roberta/modeling_roberta.py#L1423-L1442
+- XLMRobertaClassificationHead (same implementation):
+  https://github.com/huggingface/transformers/blob/174890280b340b89c5bfa092f6b4fb0e2dc2d7fc/src/transformers/models/xlm_roberta/modeling_xlm_roberta.py#L1438-L1457
 
 This head is not specific to bge-reranker-v2-m3; it applies to any
 XLM-RoBERTa / RoBERTa ``*ForSequenceClassification`` checkpoint. It currently
@@ -64,8 +73,9 @@ class XLMRobertaClassificationHead:
     def __call__(self, cls_hidden: torch.Tensor) -> torch.Tensor:
         """Map [batch, hidden] CLS hidden states to [batch, 1] logits.
 
-        Mirrors transformers RobertaClassificationHead at inference (dropout is
-        identity): dense -> tanh -> out_proj.
+        Mirrors transformers XLMRobertaClassificationHead / RobertaClassificationHead
+        at inference (dropout is identity): dense -> tanh -> out_proj. See the
+        module docstring for the pinned upstream permalinks.
         """
         x = torch.nn.functional.linear(
             cls_hidden.to(torch.float32), self.dense_weight, self.dense_bias
