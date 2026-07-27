@@ -162,6 +162,7 @@ class BgeRerankerV2M3:
             self.model,
             input_ids,
             attention_mask,
+            device=self.device,
             pad_token_id=self.tokenizer.pad_token_id,
         )
         cls_hidden = hidden[:, 0, :]  # <s> (CLS) position

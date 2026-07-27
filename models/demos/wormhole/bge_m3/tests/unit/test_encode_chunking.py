@@ -9,7 +9,9 @@ without a Tenstorrent device. Verifies:
 - sequence length is padded to the expected 128/1024/2048-aligned bucket,
 - batch is padded/chunked per the short-seq (32-row) and long-seq (16-row)
   rules,
-- the concatenated result is sliced back to the real batch size.
+- the concatenated result is sliced back to the real batch size,
+- the caller-supplied ``device`` is threaded through to every encoder call
+  (the encoder model must NOT be required to carry a ``.device`` attribute).
 """
 
 import sys
@@ -36,28 +38,35 @@ from models.demos.wormhole.bge_m3.demo.generator_vllm import (
 )
 
 HIDDEN = 8
+SENTINEL_DEVICE = object()
 
 
 class _StubModel:
-    """Records device-call shapes; returns [B,1,S,H] hidden like the TT model."""
+    """TT-model stand-in with NO ``.device`` attribute.
+
+    Mirrors the real ``BgeM3Model``, which does not store the mesh device: the
+    device must be supplied by the caller and threaded through explicitly. If
+    ``encode_to_last_hidden`` regressed to reading ``model.device`` this stub
+    would raise ``AttributeError`` and fail the test (which is the point).
+    """
 
     def __init__(self):
-        self.device = object()
         self.calls = []
-
-    def __call__(self, input_ids=None, attention_mask=None):
-        # input_ids here is whatever to_ttnn_ids returned; we instead capture via
-        # the monkeypatched _encode_chunk below, so this is unused.
-        raise AssertionError("real __call__ should be bypassed in unit test")
 
 
 @pytest.fixture(autouse=True)
 def _bypass_device(monkeypatch):
-    """Replace _encode_chunk with a host stub that records shapes."""
+    """Replace ``_encode_chunk`` with a host stub that records shapes + device.
+
+    Recording the ``device`` handed to each chunk lets the tests assert that the
+    caller-supplied device (not ``model.device``) is threaded through.
+    """
     calls = []
 
-    def fake_encode_chunk(model, input_ids, attention_mask, *, chunk_batch_size):
-        calls.append((tuple(input_ids.shape), tuple(attention_mask.shape), chunk_batch_size))
+    def fake_encode_chunk(model, input_ids, attention_mask, *, device, chunk_batch_size):
+        calls.append(
+            (tuple(input_ids.shape), tuple(attention_mask.shape), chunk_batch_size, device)
+        )
         padded_batch, padded_seq = input_ids.shape
         hidden = torch.zeros(padded_batch, padded_seq, HIDDEN, dtype=torch.float32)
         return hidden[:chunk_batch_size]
@@ -80,10 +89,10 @@ def _bypass_device(monkeypatch):
 def test_seq_padding_bucket(_bypass_device, batch, seq_len, exp_padded_seq):
     model = _StubModel()
     ids = torch.randint(1, 50, (batch, seq_len), dtype=torch.long)
-    out = encode_mod.encode_to_last_hidden(model, ids, pad_token_id=0)
+    out = encode_mod.encode_to_last_hidden(model, ids, device=SENTINEL_DEVICE, pad_token_id=0)
     calls = _bypass_device
     # every device call uses the padded seq length
-    for in_shape, _, _ in calls:
+    for in_shape, _, _, _ in calls:
         assert in_shape[1] == exp_padded_seq
     # output sliced back to real batch, seq at padded length
     assert out.shape[0] == batch
@@ -93,7 +102,7 @@ def test_seq_padding_bucket(_bypass_device, batch, seq_len, exp_padded_seq):
 def test_short_seq_batch_padding_to_32(_bypass_device):
     model = _StubModel()
     ids = torch.randint(1, 50, (5, 100), dtype=torch.long)  # short seq, B=5
-    encode_mod.encode_to_last_hidden(model, ids, pad_token_id=0)
+    encode_mod.encode_to_last_hidden(model, ids, device=SENTINEL_DEVICE, pad_token_id=0)
     calls = _bypass_device
     # one chunk, padded to 32 rows
     assert len(calls) == 1
@@ -103,11 +112,11 @@ def test_short_seq_batch_padding_to_32(_bypass_device):
 def test_long_seq_chunks_of_16(_bypass_device):
     model = _StubModel()
     ids = torch.randint(1, 50, (20, 8000), dtype=torch.long)  # long seq, B=20
-    out = encode_mod.encode_to_last_hidden(model, ids, pad_token_id=0)
+    out = encode_mod.encode_to_last_hidden(model, ids, device=SENTINEL_DEVICE, pad_token_id=0)
     calls = _bypass_device
     # 20 rows -> chunks of 16 => 2 chunks (16 + 4), each padded to 16 rows
     assert len(calls) == 2
-    for in_shape, _, _ in calls:
+    for in_shape, _, _, _ in calls:
         assert in_shape[0] == BGE_M3_LONG_SEQ_CHUNK
     assert out.shape[0] == 20
 
@@ -115,7 +124,24 @@ def test_long_seq_chunks_of_16(_bypass_device):
 def test_batch_one_no_padding(_bypass_device):
     model = _StubModel()
     ids = torch.randint(1, 50, (1, 100), dtype=torch.long)
-    encode_mod.encode_to_last_hidden(model, ids, pad_token_id=0)
+    encode_mod.encode_to_last_hidden(model, ids, device=SENTINEL_DEVICE, pad_token_id=0)
     calls = _bypass_device
     assert len(calls) == 1
     assert calls[0][0][0] == 1  # B=1 runs a single row, no batch padding
+
+
+def test_caller_device_is_threaded_through(_bypass_device):
+    """Regression guard: encode_to_last_hidden must use the caller's device.
+
+    The stub model deliberately has no ``.device`` attribute, mirroring the real
+    BgeM3Model. Every encoder chunk must receive exactly the device the caller
+    passed in.
+    """
+    model = _StubModel()
+    assert not hasattr(model, "device")
+    ids = torch.randint(1, 50, (20, 8000), dtype=torch.long)  # forces 2 chunks
+    encode_mod.encode_to_last_hidden(model, ids, device=SENTINEL_DEVICE, pad_token_id=0)
+    calls = _bypass_device
+    assert len(calls) == 2
+    for _, _, _, device in calls:
+        assert device is SENTINEL_DEVICE

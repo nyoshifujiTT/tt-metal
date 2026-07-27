@@ -38,15 +38,16 @@ def _encode_chunk(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     *,
+    device,
     chunk_batch_size: int,
 ) -> torch.Tensor:
     output = model(
-        input_ids=to_ttnn_ids(input_ids, device=model.device),
-        attention_mask=to_ttnn_ids(attention_mask, device=model.device),
+        input_ids=to_ttnn_ids(input_ids, device=device),
+        attention_mask=to_ttnn_ids(attention_mask, device=device),
     )
     if output.layout != ttnn.TILE_LAYOUT:
         output = ttnn.to_layout(output, ttnn.TILE_LAYOUT)
-    hidden = to_torch_auto_compose(output, device=model.device).to(torch.float32)
+    hidden = to_torch_auto_compose(output, device=device).to(torch.float32)
     if hidden.dim() == 4 and hidden.shape[1] == 1:
         hidden = hidden.squeeze(1)  # [B,1,S,D] -> [B,S,D]
     return hidden[:chunk_batch_size]
@@ -57,14 +58,17 @@ def encode_to_last_hidden(
     input_ids: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
     *,
+    device,
     pad_token_id: int = 0,
 ) -> torch.Tensor:
     """Run the TT encoder and return last hidden state [B, S_padded, D] on host.
 
     Handles sequence-length padding (128/1024/2048 alignment) and batch
     padding/chunking (short-seq 32-row pad, long-seq 16-row chunks) required by
-    the device. ``model`` is a BgeM3Model instance (has ``.device`` and is
-    callable with ttnn input_ids/attention_mask).
+    the device. ``model`` is a BgeM3Model instance callable with ttnn
+    input_ids/attention_mask; ``device`` is the mesh device the caller created
+    the model on (BgeM3Model itself does not store the device, so the caller
+    that owns the wrapper passes it in explicitly).
     """
     batch_size, seq_len = input_ids.shape
     padded_seq_len = get_padded_sequence_length(seq_len)
@@ -85,6 +89,8 @@ def encode_to_last_hidden(
             target_padded_batch,
             pad_value=0,
         )
-        chunks.append(_encode_chunk(model, ids, mask, chunk_batch_size=end - start))
+        chunks.append(
+            _encode_chunk(model, ids, mask, device=device, chunk_batch_size=end - start)
+        )
 
     return torch.cat(chunks, dim=0)

@@ -58,6 +58,8 @@ def test_forward_extracts_cls_and_returns_logits(monkeypatch):
     model.classifier = _IdentityHead()
     model._is_initialized = True
     model.model = object()
+    sentinel_device = object()
+    model.device = sentinel_device  # forward() forwards this to encode_to_last_hidden
 
     batch, seq, hidden = 3, 7, 4
     fake_hidden = torch.zeros(batch, seq, hidden)
@@ -65,7 +67,13 @@ def test_forward_extracts_cls_and_returns_logits(monkeypatch):
         fake_hidden[r, 0, 0] = r + 1  # CLS marker at position 0
         fake_hidden[r, 1, 0] = -99  # non-CLS position, must be ignored
 
-    monkeypatch.setattr(gen_mod, "encode_to_last_hidden", lambda *a, **k: fake_hidden)
+    seen = {}
+
+    def fake_encode(model_arg, input_ids, attention_mask=None, *, device, pad_token_id):
+        seen["device"] = device
+        return fake_hidden
+
+    monkeypatch.setattr(gen_mod, "encode_to_last_hidden", fake_encode)
     monkeypatch.setattr(gen_mod, "get_padded_sequence_length", lambda s: s)
 
     input_ids = torch.ones(batch, seq, dtype=torch.long)
@@ -74,3 +82,5 @@ def test_forward_extracts_cls_and_returns_logits(monkeypatch):
     assert out.shape == (batch, 1)
     # identity head returns CLS[:, :1] => [1, 2, 3]
     torch.testing.assert_close(out.view(-1), torch.tensor([1.0, 2.0, 3.0]))
+    # forward() must thread its own device through to the shared encoder entry.
+    assert seen["device"] is sentinel_device
