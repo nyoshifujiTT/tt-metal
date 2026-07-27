@@ -46,6 +46,7 @@ jobs:
           # SDXL model requires test run over 30min to successfully execute pcc test on the entire UNet loop
           STABLE='[
             {"model":"bge_m3"},
+            {"model":"bge_reranker_v2_m3"},
             {"model":"common_models"},
             {"model":"resnet50"},
             {"model":"openpdn_mnist"},
