@@ -5,9 +5,11 @@
 
 load_reranker_state_dict() must return a state_dict containing BOTH the
 XLM-RoBERTa encoder tensors (roberta.*) and the sequence-classification head
-(classifier.*), and must raise if the checkpoint has no classifier head.
-transformers is monkeypatched so the test validates the extraction/validation
-logic without downloading weights or touching a device.
+(classifier.*). Validation that the classifier head is present lives in a single
+place downstream (XLMRobertaClassificationHead.from_state_dict); this test checks
+the loader passes the tensors through and that the head is the one guard that
+rejects a classifier-less checkpoint. transformers is monkeypatched so the test
+runs without downloading weights or touching a device.
 """
 
 import sys
@@ -17,7 +19,10 @@ import pytest
 import torch
 
 from models.demos.bge_reranker_v2_m3.tt import model_config
-from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import CLASSIFIER_KEYS
+from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import (
+    CLASSIFIER_KEYS,
+    XLMRobertaClassificationHead,
+)
 
 
 class _FakeModel:
@@ -74,9 +79,13 @@ def test_loader_returns_encoder_and_classifier(monkeypatch):
     assert any(k.startswith("roberta.embeddings.") for k in out)
 
 
-def test_loader_raises_without_classifier(monkeypatch):
+def test_classifier_absence_is_rejected_once_by_the_head(monkeypatch):
+    # The loader is a pass-through: it does not re-check the classifier head.
     sd = _reranker_like_state_dict(with_classifier=False)
     _install_fake_transformers(monkeypatch, sd)
+    out = model_config.load_reranker_state_dict("BAAI/bge-reranker-v2-m3")
+    assert not any(k.startswith("classifier.") for k in out)
 
-    with pytest.raises(RuntimeError, match="classifier head"):
-        model_config.load_reranker_state_dict("BAAI/bge-reranker-v2-m3")
+    # The single validation point is the classification head loader.
+    with pytest.raises(KeyError, match="classifier"):
+        XLMRobertaClassificationHead.from_state_dict(out)

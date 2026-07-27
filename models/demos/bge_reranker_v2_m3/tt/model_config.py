@@ -22,29 +22,17 @@ from __future__ import annotations
 
 import torch
 
-from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import CLASSIFIER_KEYS
-
 
 def load_reranker_state_dict(model_name: str) -> dict:
     """Load the reranker checkpoint as a sequence-classification model.
 
     Returns a state_dict containing both the XLM-RoBERTa encoder weights and
-    the classifier head. Raises RuntimeError if the classifier head is absent
-    (i.e. the checkpoint is not a sequence-classification model).
+    the classifier head. The presence of the classifier head is validated once,
+    downstream, by ``XLMRobertaClassificationHead.from_state_dict`` (which raises
+    if the tensors are missing); this loader intentionally does not repeat that
+    check to avoid a redundant guard on the same condition.
     """
     from transformers import AutoModelForSequenceClassification
 
     model = AutoModelForSequenceClassification.from_pretrained(model_name, dtype="auto")
-    state_dict = model.state_dict()
-
-    # Defensive check: AutoModelForSequenceClassification on the real
-    # bge-reranker-v2-m3 always yields these tensors, so this does not trigger in
-    # normal operation. It fails loudly if a wrong (non sequence-classification)
-    # checkpoint is configured instead of silently producing bad scores.
-    missing = [k for k in CLASSIFIER_KEYS if k not in state_dict]
-    if missing:
-        raise RuntimeError(
-            f"{model_name} is missing sequence-classification head tensors: {missing}. "
-            "bge-reranker-v2-m3 requires a classifier head."
-        )
-    return state_dict
+    return model.state_dict()
