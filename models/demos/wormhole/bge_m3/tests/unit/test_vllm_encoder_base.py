@@ -76,7 +76,7 @@ def test_validate_request_bounds():
         m._validate_request(4, 256)
 
 
-def test_initialize_vllm_model_sets_override_and_rejects_optimizations():
+def test_initialize_vllm_model_builds_from_vllm_config_and_rejects_optimizations():
     dev = object()
     model_config = types.SimpleNamespace(override_tt_config=None)
     vllm_config = types.SimpleNamespace(
@@ -86,7 +86,7 @@ def test_initialize_vllm_model_sets_override_and_rejects_optimizations():
         hf_config=None, mesh_device=dev, max_batch_size=2, vllm_config=vllm_config
     )
     assert isinstance(m, XlmRobertaEncoderVllmModel)
-    assert model_config.override_tt_config["is_embedding_model"] is True
+    assert m.device is dev
 
     with pytest.raises(ValueError):
         XlmRobertaEncoderVllmModel.initialize_vllm_model(

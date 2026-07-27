@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <utility>
 #include <vector>
 #include "impl/context/context_types.hpp"
 
@@ -19,6 +20,10 @@ using ChipId = int;
 namespace tt::tt_metal {
 
 class Buffer;
+class MetalContext;
+
+// True when the host can't pin D2H memory (no 64-bit PCIe addressing and no IOMMU).
+bool d2h_uses_hugepage_fallback(const MetalContext& ctx);
 
 class SystemMemoryManager {
 public:
@@ -105,6 +110,10 @@ public:
 
     uint32_t get_dram_region_bank_id() const;
 
+    std::pair<void*, uint32_t> allocate_region(uint32_t size);
+
+    uint32_t get_channel_offset() const { return channel_offset; }
+
 private:
     bool is_mock_device() const;
 
@@ -131,6 +140,13 @@ private:
     uint32_t bypass_buffer_write_offset = 0;
 
     std::unique_ptr<char[]> dram_region_staging_buffer;
+
+    // Bump-allocated tail of CQ sysmem (after all per-CQ issue/completion buffers). Device and host
+    // addresses are returned together by allocate_region() for PCIe/D2H consumers.
+    uint32_t free_region_start_ = 0;
+    uint32_t free_region_size_ = 0;
+    uint32_t free_region_bump_ = 0;
+    char* free_region_host_ptr_ = nullptr;
 };
 
 }  // namespace tt::tt_metal

@@ -38,7 +38,7 @@ void run_kernel(RUNTIME_PARAMETERS /*params*/)
 #include "cfg_defines.h"
 #include "cmath_common.h"
 #include "llk_math_common.h"
-#include "llk_math_eltwise_unary_sfpu_common.h"
+#include "llk_math_eltwise_unary_sfpu.h"
 #include "llk_srcs.h"
 #include "params.h"
 
@@ -113,7 +113,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
     td_pack.buf_desc_id     = buf_desc_id_pack;
     td_pack.reg_data_format = static_cast<std::uint8_t>(formats.pack_S_src);
     _configure_buf_desc_table_(td_pack.buf_desc_id, td_pack.buf_desc);
-    _llk_pack_hw_configure_<p_pacr::PACK1>(td_pack);
+    _llk_pack_hw_configure_<p_pacr::PACK1, false>(td_pack, ckernel::ReluConfig::none());
 
     // Implied math format disable for SrcS and sfpmem mod selection
     cfg[DISABLE_IMPLIED_SRCS_FORMAT_ADDR32 + TRISC_ID] = !IMPLIED_MATH_FORMAT;
@@ -153,7 +153,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
         });
 
     _llk_pack_srcs_config_for_tile_<PARAM_SRCS_INSTRN_COUNT>(PARAM_SRCS_32BIT_MODE);
-    _llk_math_eltwise_unary_sfpu_init_();
+    _llk_math_eltwise_sfpu_init_();
 
     for (std::uint32_t i = 0; i < num_tiles; ++i)
     {
@@ -176,7 +176,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
             TT_UNPACR2_TILE_INC(0b1 /*SrcS tile inc*/, 0b0 /*no L1 inc*/, buf_desc_id_unpack_0, 0b0 /*no dvalid*/);
             TT_UNPACR2_TILE_INC(0b0 /*no SrcS tile inc*/, 0b1 /*L1 inc*/, buf_desc_id_unpack_1, 0b1 /*Set dvalid*/);
             TT_REPLAY(0, replay_buf_len, 0, 0, 0, 0);
-            _llk_math_eltwise_unary_sfpu_srcs_clear_vlds_<0x1, 0x1>(); // Clears dvalid for SFPU read and write
+            _llk_math_eltwise_sfpu_srcs_clear_vlds_<true, true>(); // Clears dvalid for SFPU read and write
         }
 
         // Remaining SFPU iterations with no unpacker instructions (since they are preloaded)
@@ -184,7 +184,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
         for (std::uint32_t j = 0; j < preload_count; j++)
         {
             TT_REPLAY(0, replay_buf_len, 0, 0, 0, 0);
-            _llk_math_eltwise_unary_sfpu_srcs_clear_vlds_<0x1, 0x1>(); // Clears dvalid for SFPU read and write
+            _llk_math_eltwise_sfpu_srcs_clear_vlds_<true, true>(); // Clears dvalid for SFPU read and write
         }
     }
 

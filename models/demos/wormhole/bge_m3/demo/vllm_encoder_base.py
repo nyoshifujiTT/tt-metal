@@ -84,13 +84,6 @@ class XlmRobertaEncoderVllmModel:
             raise ValueError(f"Optimizations are not supported for {cls.__name__}")
 
         if vllm_config is not None:
-            if (
-                not hasattr(vllm_config.model_config, "override_tt_config")
-                or vllm_config.model_config.override_tt_config is None
-            ):
-                vllm_config.model_config.override_tt_config = {}
-            vllm_config.model_config.override_tt_config["is_embedding_model"] = True
-
             return cls(
                 device=mesh_device,
                 model_location_generator=model_location_generator,
