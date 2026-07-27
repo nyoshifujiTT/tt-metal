@@ -8,9 +8,11 @@ from loguru import logger
 from models.tt_transformers.tt.common import get_hf_tt_cache_path
 
 
-# Runs the bge-reranker-v2-m3 fast-dispatch test suite in CI. Includes the
-# device-free unit tests (classifier head, weight loader, vLLM wiring, encoder
-# padding/chunking) and the single-device end-to-end logit test.
+# Runs the bge-reranker-v2-m3 single-device fast-dispatch tests in CI (Blackhole
+# nightly-bh-models job). This entry is device-only: the end-to-end logit-vs-HF
+# test. The device-free unit tests live in the sibling ``bge_reranker_v2_m3_hostside``
+# suite, which runs on a CPU runner (no Tenstorrent device) so it does not spend
+# scarce Blackhole time -- see fast-dispatch-hostside-models.
 @pytest.mark.parametrize(
     "model_weights",
     [
@@ -27,12 +29,6 @@ def test_ci_dispatch(model_weights):
 
     exit_code = pytest.main(
         [
-            # device-free unit tests
-            "models/demos/bge_reranker_v2_m3/tests/test_xlm_roberta_classification_head.py",
-            "models/demos/bge_reranker_v2_m3/tests/test_model_config.py",
-            "models/demos/bge_reranker_v2_m3/tests/test_generator_vllm.py",
-            "models/demos/wormhole/bge_m3/tests/unit/test_encode_in_chunks.py",
-            "models/demos/wormhole/bge_m3/tests/unit/test_vllm_encoder_base.py",
             # single-device end-to-end logit vs HF reference
             "models/demos/bge_reranker_v2_m3/tests/test_model.py",
         ]

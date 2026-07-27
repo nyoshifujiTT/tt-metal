@@ -35,6 +35,8 @@ jobs:
       stable_ci_v2_count: ${{ steps.ctm.outputs.stable_ci_v2_count }}
       stable_bh_ci_v2_matrix: ${{ steps.ctm.outputs.stable_bh_ci_v2_matrix }}
       stable_bh_ci_v2_count: ${{ steps.ctm.outputs.stable_bh_ci_v2_count }}
+      hostside_matrix: ${{ steps.ctm.outputs.hostside_matrix }}
+      hostside_count: ${{ steps.ctm.outputs.hostside_count }}
     steps:
       - id: ctm
         shell: bash
@@ -80,6 +82,12 @@ jobs:
             {"model":"stable_diffusion_xl_base","timeout":120}
           ]'
 
+          # Host-side (device-free) set. Runs on a CPU runner with no Tenstorrent
+          # device attached; imports ttnn but never opens a device.
+          HOSTSIDE='[
+            {"model":"bge_reranker_v2_m3_hostside"}
+          ]'
+
           SEL='${{ inputs.models-to-run }}'
           echo "SEL raw: ${SEL}"
           echo "${SEL}" | jq -e type && echo "Looks like valid JSON" || echo "Not JSON"
@@ -107,6 +115,8 @@ jobs:
 
             STABLE_BH_CIv2_OUT="${STABLE_BH_CIv2}"
 
+            HOSTSIDE_OUT="${HOSTSIDE}"
+
           else
             STABLE_OUT=$(jq --argjson sel "$SEL_ARR" '[.[] | select(.model | IN($sel[]))]' <<< "$STABLE")
 
@@ -114,19 +124,24 @@ jobs:
 
             STABLE_BH_CIv2_OUT="$(jq --argjson sel "${SEL_ARR}" '[.[] | select(.model | IN($sel[]))]' <<< "${STABLE_BH_CIv2}")"
 
+            HOSTSIDE_OUT="$(jq --argjson sel "${SEL_ARR}" '[.[] | select(.model | IN($sel[]))]' <<< "${HOSTSIDE}")"
+
           fi
 
           STABLE_COUNT="$(jq 'length' <<< "${STABLE_OUT}")"
           STABLE_CIv2_COUNT="$(jq 'length' <<< "${STABLE_CIv2_OUT}")"
           STABLE_BH_CIv2_COUNT="$(jq 'length' <<< "${STABLE_BH_CIv2_OUT}")"
+          HOSTSIDE_COUNT="$(jq 'length' <<< "${HOSTSIDE_OUT}")"
 
           echo "stable_matrix=$(echo $STABLE_OUT | tr -d '\n')" >> "$GITHUB_OUTPUT"
           echo "stable_ci_v2_matrix=$(echo $STABLE_CIv2_OUT | tr -d '\n')" >> "$GITHUB_OUTPUT"
           echo "stable_bh_ci_v2_matrix=$(echo $STABLE_BH_CIv2_OUT | tr -d '\n')" >> "$GITHUB_OUTPUT"
+          echo "hostside_matrix=$(echo $HOSTSIDE_OUT | tr -d '\n')" >> "$GITHUB_OUTPUT"
 
           echo "stable_count=${STABLE_COUNT}"     >> "$GITHUB_OUTPUT"
           echo "stable_ci_v2_count=${STABLE_CIv2_COUNT}" >> "$GITHUB_OUTPUT"
           echo "stable_bh_ci_v2_count=${STABLE_BH_CIv2_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "hostside_count=${HOSTSIDE_COUNT}" >> "$GITHUB_OUTPUT"
 
   nightly-wh-models:
     needs: create-test-matrix
@@ -342,6 +357,57 @@ jobs:
         with:
           path: /work/generated/profiler/reports
           prefix: "tracy_ops_${{ matrix.test-config.model }}_P150b_"
+      - uses: tenstorrent/tt-metal/.github/actions/upload-artifact-with-job-uuid@main
+        timeout-minutes: 10
+        if: ${{ !cancelled() }}
+        with:
+          path: /work/generated/test_reports/
+          prefix: "test_reports_"
+
+  nightly-hostside-models:
+    needs: create-test-matrix
+    if: ${{ needs.create-test-matrix.outputs.hostside_count != '0' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        test-config: ${{ fromJSON(needs.create-test-matrix.outputs.hostside_matrix) }}
+    name: Nightly host-side ${{ matrix.test-config.model }}
+    # CPU-only runner: no Tenstorrent device is attached. The host-side tests
+    # import ttnn (from the build/wheel) but never open a device, so they must
+    # not consume a Wormhole/Blackhole runner.
+    runs-on: tt-ubuntu-2204-large-stable
+    container:
+      image: ${{ inputs.docker-image || 'docker-image-unresolved!' }}
+      env:
+        TT_METAL_HOME: /work
+        PYTHONPATH: /work
+        LD_LIBRARY_PATH: /work/build/lib
+        ARCH_NAME: blackhole
+        GTEST_OUTPUT: xml:/work/generated/test_reports/
+      volumes:
+        - ${{ github.workspace }}/docker-job:/work # Subdir to workaround https://github.com/actions/runner/issues/691
+      # No --device /dev/tenstorrent: this job runs purely on host.
+      options: "-e TT_GH_CI_INFRA"
+    defaults:
+      run:
+        shell: bash
+        working-directory: /work # https://github.com/actions/runner/issues/878
+    steps:
+      - name: 🧬 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          path: docker-job
+      - name: ⬇️  Setup Job
+        uses: ./docker-job/.github/actions/setup-job
+        timeout-minutes: 10
+        with:
+          build-artifact-name: ${{ inputs.build-artifact-name }}
+          wheel-artifact-name: ${{ inputs.wheel-artifact-name }}
+      - name: Run host-side (device-free) tests
+        timeout-minutes: ${{ matrix.test-config.timeout || 15 }}
+        run: |
+          pytest tests/nightly/single_card/${{ matrix.test-config.model }}
       - uses: tenstorrent/tt-metal/.github/actions/upload-artifact-with-job-uuid@main
         timeout-minutes: 10
         if: ${{ !cancelled() }}
