@@ -6,92 +6,25 @@
 The model is an XLM-RoBERTa encoder (reused from
 ``models/demos/wormhole/bge_m3``) followed by a sequence-classification head.
 For each (query, document) pair vLLM tokenizes a single concatenated
-sequence; the encoder runs on device, and the classification head
+sequence; the encoder runs on device via the shared
+``bge_m3.tt.encode.encode_to_last_hidden`` entry point (which owns the device
+padding/chunking contract), and the classification head
 (``classifier.dense`` -> tanh -> ``classifier.out_proj``) emits one relevance
 logit from the ``<s>`` (CLS) position. The head runs on host in fp32.
 """
 
 from __future__ import annotations
 
-from typing import Iterator, Optional
+from typing import Optional
 
 import torch
 
 import ttnn
-from models.common.auto_compose import to_torch_auto_compose
 from models.demos.wormhole.bge_m3.tt.common import create_tt_model
+from models.demos.wormhole.bge_m3.tt.encode import encode_to_last_hidden
 from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_length
 from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import XLMRobertaClassificationHead
 from models.demos.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict
-
-
-# Short sequences pad batch to 32 rows; the 8192 long-seq path runs 16-wide.
-# These match the encoder kernels' safe program-config shapes.
-LONG_SEQ_LEN = 8192
-LONG_SEQ_CHUNK = 16
-SHORT_SEQ_PADDED_BATCH = 32
-
-
-def _is_long_seq(padded_seq_len: int) -> bool:
-    return padded_seq_len == LONG_SEQ_LEN
-
-
-def _target_padded_batch(original_batch_size: int, padded_seq_len: int) -> int:
-    if _is_long_seq(padded_seq_len):
-        return LONG_SEQ_CHUNK
-    if original_batch_size == 1:
-        return 1
-    return SHORT_SEQ_PADDED_BATCH
-
-
-def _execution_chunk(original_batch_size: int, padded_seq_len: int) -> int:
-    if _is_long_seq(padded_seq_len):
-        return LONG_SEQ_CHUNK
-    if original_batch_size == 1:
-        return 1
-    return SHORT_SEQ_PADDED_BATCH
-
-
-def _iter_ranges(original_batch_size: int, padded_seq_len: int) -> Iterator[tuple[int, int]]:
-    chunk = _execution_chunk(original_batch_size, padded_seq_len)
-    for start in range(0, original_batch_size, chunk):
-        yield (start, min(start + chunk, original_batch_size))
-
-
-def _pad_seq(tensor: torch.Tensor, padded_seq_len: int, pad_value: int = 0) -> torch.Tensor:
-    seq_len = tensor.shape[1]
-    if seq_len == padded_seq_len:
-        return tensor
-    pad = torch.full(
-        (tensor.shape[0], padded_seq_len - seq_len),
-        fill_value=pad_value,
-        dtype=tensor.dtype,
-        device=tensor.device,
-    )
-    return torch.cat([tensor, pad], dim=1)
-
-
-def _pad_batch(tensor: torch.Tensor, padded_batch_size: int, pad_value: int = 0) -> torch.Tensor:
-    batch_size = tensor.shape[0]
-    if batch_size == padded_batch_size:
-        return tensor
-    padded = torch.full(
-        (padded_batch_size, *tensor.shape[1:]),
-        fill_value=pad_value,
-        dtype=tensor.dtype,
-        device=tensor.device,
-    )
-    padded[:batch_size] = tensor
-    return padded
-
-
-def _to_ttnn_ids(ids: torch.Tensor, *, device: ttnn.Device) -> ttnn.Tensor:
-    return ttnn.from_torch(
-        ids.to(torch.int32),
-        device=device,
-        dtype=ttnn.uint32,
-        layout=ttnn.ROW_MAJOR_LAYOUT,
-    )
 
 
 class BgeRerankerV2M3:
@@ -210,35 +143,6 @@ class BgeRerankerV2M3:
         if padded_seq_len > self.max_seq_len:
             raise ValueError(f"Padded sequence length {padded_seq_len} exceeds max_seq_len {self.max_seq_len}")
 
-    def _encoder_last_hidden(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        output = self.model(
-            input_ids=_to_ttnn_ids(input_ids, device=self.device),
-            attention_mask=_to_ttnn_ids(attention_mask, device=self.device),
-        )
-        if output.layout != ttnn.TILE_LAYOUT:
-            output = ttnn.to_layout(output, ttnn.TILE_LAYOUT)
-        hidden = to_torch_auto_compose(output, device=self.device)
-        # Normalize [B,1,S,D] -> [B,S,D].
-        if hidden.dim() == 4 and hidden.shape[1] == 1:
-            hidden = hidden.squeeze(1)
-        return hidden.to(torch.float32)
-
-    def _forward_chunk(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        *,
-        chunk_batch_size: int,
-    ) -> torch.Tensor:
-        hidden = self._encoder_last_hidden(input_ids, attention_mask)  # [B,S,D]
-        cls_hidden = hidden[:, 0, :]  # CLS token
-        logits = self.classifier(cls_hidden)  # [B,1]
-        return logits[:chunk_batch_size]
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -249,31 +153,19 @@ class BgeRerankerV2M3:
     ) -> torch.Tensor:
         del positions, token_type_ids, position_ids
         batch_size, seq_len = input_ids.shape
-        padded_seq_len = get_padded_sequence_length(seq_len)
-        self._validate_request(batch_size, padded_seq_len)
+        self._validate_request(batch_size, get_padded_sequence_length(seq_len))
         self._initialize_model()
 
-        if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids)
-
-        target_padded_batch = _target_padded_batch(batch_size, padded_seq_len)
-        chunk_logits = []
-        for start, end in _iter_ranges(batch_size, padded_seq_len):
-            ids = _pad_batch(
-                _pad_seq(input_ids[start:end], padded_seq_len, pad_value=self.tokenizer.pad_token_id),
-                target_padded_batch,
-                pad_value=self.tokenizer.pad_token_id,
-            )
-            mask = _pad_batch(
-                _pad_seq(attention_mask[start:end], padded_seq_len, pad_value=0),
-                target_padded_batch,
-                pad_value=0,
-            )
-            chunk_logits.append(
-                self._forward_chunk(ids, mask, chunk_batch_size=end - start)
-            )
-
-        return torch.cat(chunk_logits, dim=0)  # [batch, 1]
+        # Shared backbone entry point owns the device padding/chunking contract
+        # and returns the encoder last hidden state [B, S_padded, D] on host.
+        hidden = encode_to_last_hidden(
+            self.model,
+            input_ids,
+            attention_mask,
+            pad_token_id=self.tokenizer.pad_token_id,
+        )
+        cls_hidden = hidden[:, 0, :]  # <s> (CLS) position
+        return self.classifier(cls_hidden)  # [batch, 1] relevance logits
 
     # ---- vLLM interface helpers ----
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
