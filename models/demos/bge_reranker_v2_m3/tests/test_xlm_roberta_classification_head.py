@@ -52,6 +52,28 @@ def test_head_missing_keys_raises():
         XLMRobertaClassificationHead.from_state_dict({"classifier.dense.weight": torch.zeros(1)})
 
 
+def test_head_known_vector_regression():
+    # Hand-set 2-dim weights so the expected logit is computed by hand, pinning
+    # the exact formula (dense -> tanh -> out_proj). Guards against silent
+    # changes to the head math.
+    sd = {
+        "classifier.dense.weight": torch.tensor([[1.0, 0.0], [0.0, 1.0]]),
+        "classifier.dense.bias": torch.tensor([0.0, 0.0]),
+        "classifier.out_proj.weight": torch.tensor([[1.0, -1.0]]),
+        "classifier.out_proj.bias": torch.tensor([0.5]),
+    }
+    head = XLMRobertaClassificationHead.from_state_dict(sd)
+    cls_hidden = torch.tensor([[0.5, -0.25]])
+    # dense -> [0.5, -0.25]; tanh -> [tanh(0.5), tanh(-0.25)];
+    # out_proj -> tanh(0.5) - tanh(-0.25) + 0.5
+    import math
+
+    expected = math.tanh(0.5) - math.tanh(-0.25) + 0.5
+    got = head(cls_hidden)
+    assert got.shape == (1, 1)
+    torch.testing.assert_close(got.view(-1), torch.tensor([expected], dtype=torch.float32), rtol=0, atol=1e-6)
+
+
 def test_classifier_keys_constant():
     assert CLASSIFIER_KEYS == (
         "classifier.dense.weight",
