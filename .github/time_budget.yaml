@@ -295,7 +295,6 @@ models:
     wh_n150_civ2: 30
     wh_n300_civ2: 30
     bh_p150b_civ2: 120
-    cpu_medium: 15  # host-side (device-free) reranker unit tests on a CPU runner
   stress:
     wh_galaxy_perf: 500
   e2e:
@@ -329,6 +328,10 @@ models:
   unit:
     wh_llmbox: 100
     wh_galaxy_perf: 10
+    # First device-free (host-side) models unit budget: the bge-reranker-v2-m3
+    # host-side suite runs on a CPU runner (cpu_medium, no Tenstorrent device).
+    # No prior models test ran on CPU, so this cpu_medium key is introduced here.
+    cpu_medium: 15
   # Per-tier unit budgets. Consumed by the tiered model pipelines; the plain `unit`
   # key is used for the non-tiered pipelines (galaxy-unit, t3000-unit).
   unit_tier1:

@@ -1,12 +1,13 @@
-# Host-side (device-free) frequent model tests for single-card models.
+# Host-side (device-free) unit tests for single-card models.
 #
 # These jobs run on a CPU runner (cpu_medium) with NO Tenstorrent device
 # attached (executed via the generic fabric-cpu-only-tests-impl.yaml runner).
 # They import ttnn from the build/wheel but never open a device, so they must
-# not consume scarce Wormhole/Blackhole runners.
+# not consume scarce Wormhole/Blackhole runners. The caller passes
+# test-category: unit, so budgets are looked up under models -> unit.
 #
 # Each entry: name, cmd (literal; no device), skus, team, arch, owner_id.
-# For max allowed timeout refer to .github/time_budget.yaml (models -> frequent).
+# For max allowed timeout refer to .github/time_budget.yaml (models -> unit).
 
 - name: bge_reranker_v2_m3 host-side
   cmd: pytest tests/nightly/single_card/bge_reranker_v2_m3_hostside

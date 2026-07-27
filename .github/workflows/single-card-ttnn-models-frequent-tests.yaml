@@ -101,7 +101,7 @@ jobs:
     secrets: inherit
     with:
       tests-yaml-path: ./tests/pipeline_reorg/single_card_ttnn_models_frequent_hostside_tests.yaml
-      test-category: frequent
+      test-category: unit
       runs-on-sku: cpu_medium
       docker-image: ${{ needs.build-artifact.outputs.dev-docker-image }}
       build-artifact-name: ${{ needs.build-artifact.outputs.build-artifact-name }}
