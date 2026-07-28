@@ -26,7 +26,7 @@ import ttnn
 from models.demos.wormhole.bge_m3.tt.common import create_tt_model
 
 
-class XlmRobertaEncoderVllmModel:
+class XlmRobertaEncoder:
     """Common vLLM plumbing for TT XLM-RoBERTa encoder models (single device)."""
 
     def __init__(

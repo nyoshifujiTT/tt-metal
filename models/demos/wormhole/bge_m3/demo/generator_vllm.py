@@ -12,10 +12,10 @@ import ttnn
 from models.common.auto_compose import to_torch_auto_compose
 from models.demos.wormhole.bge_m3.demo.m3_scores import _get_special_token_ids, _sparse_embedding_scatter_ttnn
 from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_length
-from models.demos.wormhole.bge_m3.demo.vllm_encoder_base import XlmRobertaEncoderVllmModel
+from models.demos.wormhole.bge_m3.demo.xlm_roberta_encoder import XlmRobertaEncoder
 
 
-class BgeM3ForEmbedding(XlmRobertaEncoderVllmModel):
+class BgeM3ForEmbedding(XlmRobertaEncoder):
     """
     vLLM-facing embedding wrapper for direct BGE-M3 encoder execution.
 

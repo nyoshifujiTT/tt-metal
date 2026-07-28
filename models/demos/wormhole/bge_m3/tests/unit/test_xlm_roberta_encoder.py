@@ -22,8 +22,8 @@ if "ttnn" not in sys.modules:
     ttnn_stub.bfloat16 = object()
     sys.modules["ttnn"] = ttnn_stub
 
-from models.demos.wormhole.bge_m3.demo import vllm_encoder_base as base_mod
-from models.demos.wormhole.bge_m3.demo.vllm_encoder_base import XlmRobertaEncoderVllmModel
+from models.demos.wormhole.bge_m3.demo import xlm_roberta_encoder as base_mod
+from models.demos.wormhole.bge_m3.demo.xlm_roberta_encoder import XlmRobertaEncoder
 
 
 class _FakeModelArgs:
@@ -47,12 +47,12 @@ def _stub_create_tt_model(monkeypatch):
 
 def test_requires_device_or_vllm_config():
     with pytest.raises(ValueError):
-        XlmRobertaEncoderVllmModel()
+        XlmRobertaEncoder()
 
 
 def test_device_and_defaults():
     dev = object()
-    m = XlmRobertaEncoderVllmModel(device=dev, max_batch_size=8, max_seq_len=1024)
+    m = XlmRobertaEncoder(device=dev, max_batch_size=8, max_seq_len=1024)
     assert m.device is dev
     assert m.get_max_batch_size() == 8
     assert m.get_max_seq_len() == 1024
@@ -63,12 +63,12 @@ def test_device_and_defaults():
 def test_device_resolved_from_vllm_config():
     dev = object()
     vllm_config = types.SimpleNamespace(device_config=types.SimpleNamespace(device=dev))
-    m = XlmRobertaEncoderVllmModel(vllm_config=vllm_config)
+    m = XlmRobertaEncoder(vllm_config=vllm_config)
     assert m.device is dev
 
 
 def test_validate_request_bounds():
-    m = XlmRobertaEncoderVllmModel(device=object(), max_batch_size=4, max_seq_len=128)
+    m = XlmRobertaEncoder(device=object(), max_batch_size=4, max_seq_len=128)
     m._validate_request(4, 128)  # ok at the boundary
     with pytest.raises(ValueError):
         m._validate_request(5, 128)
@@ -82,14 +82,14 @@ def test_initialize_vllm_model_builds_from_vllm_config_and_rejects_optimizations
     vllm_config = types.SimpleNamespace(
         model_config=model_config, device_config=types.SimpleNamespace(device=dev)
     )
-    m = XlmRobertaEncoderVllmModel.initialize_vllm_model(
+    m = XlmRobertaEncoder.initialize_vllm_model(
         hf_config=None, mesh_device=dev, max_batch_size=2, vllm_config=vllm_config
     )
-    assert isinstance(m, XlmRobertaEncoderVllmModel)
+    assert isinstance(m, XlmRobertaEncoder)
     assert m.device is dev
 
     with pytest.raises(ValueError):
-        XlmRobertaEncoderVllmModel.initialize_vllm_model(
+        XlmRobertaEncoder.initialize_vllm_model(
             hf_config=None, mesh_device=dev, max_batch_size=2, optimizations="perf"
         )
 
@@ -98,7 +98,7 @@ def test_initialize_model_runs_hooks_in_order(_stub_create_tt_model):
     """_load_state_dict feeds create_tt_model; _post_initialize runs after."""
     events = []
 
-    class _Sub(XlmRobertaEncoderVllmModel):
+    class _Sub(XlmRobertaEncoder):
         def _load_state_dict(self):
             events.append("load")
             return {"reranker": True}
@@ -123,7 +123,7 @@ def test_initialize_model_runs_hooks_in_order(_stub_create_tt_model):
 
 def test_initialize_model_default_hook_lets_backbone_load(_stub_create_tt_model):
     """Default _load_state_dict returns None so the backbone loads its own weights."""
-    m = XlmRobertaEncoderVllmModel(device=object(), model_name="BAAI/bge-m3")
+    m = XlmRobertaEncoder(device=object(), model_name="BAAI/bge-m3")
     m._initialize_model()
     assert _stub_create_tt_model["state_dict"] is None
     assert m._is_initialized is True

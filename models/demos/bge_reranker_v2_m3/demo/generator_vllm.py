@@ -24,10 +24,10 @@ from models.demos.wormhole.bge_m3.demo.generator_vllm import encode_to_last_hidd
 from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_length
 from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import XLMRobertaClassificationHead
 from models.demos.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict
-from models.demos.wormhole.bge_m3.demo.vllm_encoder_base import XlmRobertaEncoderVllmModel
+from models.demos.wormhole.bge_m3.demo.xlm_roberta_encoder import XlmRobertaEncoder
 
 
-class BgeRerankerV2M3(XlmRobertaEncoderVllmModel):
+class BgeRerankerV2M3(XlmRobertaEncoder):
     """Cross-encoder execution wrapper for bge-reranker-v2-m3."""
 
     # Declared so vLLM treats this as a pooling / cross-encoder model and routes

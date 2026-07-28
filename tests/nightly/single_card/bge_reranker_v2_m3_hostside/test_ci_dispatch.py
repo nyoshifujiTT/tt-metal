@@ -21,7 +21,7 @@ def test_ci_dispatch():
             "models/demos/bge_reranker_v2_m3/tests/test_model_config.py",
             "models/demos/bge_reranker_v2_m3/tests/test_generator_vllm.py",
             "models/demos/wormhole/bge_m3/tests/unit/test_encode_in_chunks.py",
-            "models/demos/wormhole/bge_m3/tests/unit/test_vllm_encoder_base.py",
+            "models/demos/wormhole/bge_m3/tests/unit/test_xlm_roberta_encoder.py",
         ]
         + ["-x"]  # Fail if one of the tests fails
     )
