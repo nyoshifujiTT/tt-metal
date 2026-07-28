@@ -21,8 +21,8 @@ Verifies:
 import pytest
 import torch
 
-from models.demos.wormhole.bge_m3.demo import generator_vllm as gen_mod
-from models.demos.wormhole.bge_m3.demo.generator_vllm import (
+from models.demos.wormhole.bge_m3.demo import xlm_roberta_encoder as enc_mod
+from models.demos.wormhole.bge_m3.demo.xlm_roberta_encoder import (
     BGE_M3_LONG_SEQ_CHUNK,
     BGE_M3_SHORT_SEQ_PADDED_BATCH,
     encode_in_chunks,
@@ -101,13 +101,13 @@ def test_encode_to_last_hidden_slices_and_threads_device(monkeypatch):
 
     # to_torch_auto_compose would move a ttnn tensor to host; here the stub
     # already returns a torch tensor, so make it an identity that ignores device.
-    monkeypatch.setattr(gen_mod, "run_encoder_chunk", fake_run_encoder_chunk)
-    monkeypatch.setattr(gen_mod, "to_torch_auto_compose", lambda t, *, device: t)
+    monkeypatch.setattr(enc_mod, "run_encoder_chunk", fake_run_encoder_chunk)
+    monkeypatch.setattr(enc_mod, "to_torch_auto_compose", lambda t, *, device: t)
 
     model = _StubModel()
     assert not hasattr(model, "device")
     ids = torch.randint(1, 50, (20, 8000), dtype=torch.long)  # forces 2 chunks
-    out = gen_mod.encode_to_last_hidden(model, ids, device=SENTINEL_DEVICE, pad_token_id=0)
+    out = enc_mod.encode_to_last_hidden(model, ids, device=SENTINEL_DEVICE, pad_token_id=0)
 
     assert out.shape[0] == 20  # sliced back to real batch
     assert out.shape[1] == 8192  # padded seq length
