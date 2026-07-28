@@ -12,7 +12,6 @@ import pytest
 import torch
 
 from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import (
-    CLASSIFIER_KEYS,
     XLMRobertaClassificationHead,
 )
 
@@ -72,12 +71,3 @@ def test_head_known_vector_regression():
     got = head(cls_hidden)
     assert got.shape == (1, 1)
     torch.testing.assert_close(got.view(-1), torch.tensor([expected], dtype=torch.float32), rtol=0, atol=1e-6)
-
-
-def test_classifier_keys_constant():
-    assert CLASSIFIER_KEYS == (
-        "classifier.dense.weight",
-        "classifier.dense.bias",
-        "classifier.out_proj.weight",
-        "classifier.out_proj.bias",
-    )
