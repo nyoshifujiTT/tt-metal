@@ -42,9 +42,10 @@ class Qwen3ForEmbedding:
         max_seq_len: int = 8192,  # Qwen3-Embedding supports up to 8192
         act_dtype=ttnn.bfloat16,
         weight_dtype=ttnn.bfloat8_b,
-        model_name: str = "Qwen/Qwen3-Embedding-8B",
+        model_name: Optional[str] = None,
         vllm_config=None,
         prefix: str = "",
+        hf_config: Optional[transformers.PretrainedConfig] = None,
         **kwargs,
     ):
         """
@@ -57,9 +58,16 @@ class Qwen3ForEmbedding:
             max_seq_len: Maximum sequence length (default 8192 for Qwen3-Embedding)
             act_dtype: Activation data type
             weight_dtype: Weight data type
-            model_name: HuggingFace model name
+            model_name: HuggingFace model id or local path. Only used to load the
+                config when ``hf_config`` is not supplied (e.g. direct/metal-only
+                instantiation). Standard HuggingFace resolution applies, so a local
+                cache or pre-staged directory is honoured. There is no hardcoded
+                default: callers that do not pass ``hf_config`` must name the model.
             vllm_config: vLLM configuration (passed by vLLM wrapper)
             prefix: Model prefix (passed by vLLM wrapper)
+            hf_config: Config already resolved by the caller (vLLM / tt-inference-
+                server pass ``model_config.hf_config`` here). When present it is used
+                as-is; the model is never re-fetched.
             **kwargs: Additional arguments passed by vLLM wrapper
         """
         # Extract device from vllm_config if provided (vLLM wrapper case)
@@ -81,8 +89,23 @@ class Qwen3ForEmbedding:
         if vllm_config is not None:
             self.vllm_config = vllm_config
 
-        # Load config
-        self.config = transformers.AutoConfig.from_pretrained(model_name)
+        # Resolve the model config. Prefer the config the caller already resolved
+        # and handed in (vLLM / tt-inference-server pass model_config.hf_config into
+        # initialize_vllm_model). Re-fetching it here would (1) redundantly download
+        # a config the caller already has, and (2) force a hardcoded repo id, which
+        # ignores a pre-staged local directory and cannot serve a different
+        # checkpoint (0.6B vs 8B) or run offline. When no config is handed in
+        # (direct / metal-only instantiation), load it from the explicitly named
+        # model via standard HuggingFace resolution (local cache honoured).
+        if hf_config is not None:
+            self.config = hf_config
+        elif model_name is not None:
+            self.config = transformers.AutoConfig.from_pretrained(model_name)
+        else:
+            raise ValueError(
+                "Qwen3ForEmbedding requires either 'hf_config' (passed by vLLM / "
+                "tt-inference-server) or an explicit 'model_name' to load the config."
+            )
 
         # Initialize model and generator (will be set up during first forward pass)
         self.model = None
@@ -141,6 +164,7 @@ class Qwen3ForEmbedding:
                 max_batch_size=max_batch_size,
                 max_seq_len=max_seq_len,
                 vllm_config=vllm_config,
+                hf_config=hf_config,
             )
         else:
             # Fallback for direct instantiation (not wrapped)
@@ -149,6 +173,7 @@ class Qwen3ForEmbedding:
                 model_location_generator=model_location_generator,
                 max_batch_size=max_batch_size,
                 max_seq_len=max_seq_len,
+                hf_config=hf_config,
             )
 
     def _initialize_model(self, batch_size: int, sequence_length: int):
