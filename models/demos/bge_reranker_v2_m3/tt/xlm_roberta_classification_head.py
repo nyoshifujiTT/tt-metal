@@ -28,16 +28,18 @@ from __future__ import annotations
 
 import torch
 
-CLASSIFIER_KEYS = (
-    "classifier.dense.weight",
-    "classifier.dense.bias",
-    "classifier.out_proj.weight",
-    "classifier.out_proj.bias",
-)
-
 
 class XLMRobertaClassificationHead:
     """Host-side XLM-RoBERTa sequence-classification head (fp32)."""
+
+    # The state_dict tensors this head consumes. Scoped to the class because the
+    # only user is from_state_dict (below); not a module-level constant.
+    CLASSIFIER_KEYS = (
+        "classifier.dense.weight",
+        "classifier.dense.bias",
+        "classifier.out_proj.weight",
+        "classifier.out_proj.bias",
+    )
 
     def __init__(
         self,
@@ -57,7 +59,7 @@ class XLMRobertaClassificationHead:
         # provides these tensors, so this does not trigger in normal operation. It
         # guards against being handed an embedding-only state_dict (e.g. bge-m3) or
         # one loaded as a plain encoder where the classification head was dropped.
-        missing = [k for k in CLASSIFIER_KEYS if k not in state_dict]
+        missing = [k for k in cls.CLASSIFIER_KEYS if k not in state_dict]
         if missing:
             raise KeyError(
                 "state_dict is missing reranker classifier tensors: "

@@ -20,7 +20,6 @@ import torch
 
 from models.demos.bge_reranker_v2_m3.tt import model_config
 from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import (
-    CLASSIFIER_KEYS,
     XLMRobertaClassificationHead,
 )
 
@@ -72,7 +71,7 @@ def test_loader_returns_encoder_and_classifier(monkeypatch):
     out = model_config.load_reranker_state_dict("BAAI/bge-reranker-v2-m3")
 
     # classifier head present
-    for k in CLASSIFIER_KEYS:
+    for k in XLMRobertaClassificationHead.CLASSIFIER_KEYS:
         assert k in out
     # encoder backbone tensors present (consumed by the bge-m3 encoder)
     assert any(k.startswith("roberta.encoder.layer.") for k in out)
