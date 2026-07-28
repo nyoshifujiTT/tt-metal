@@ -2463,7 +2463,18 @@ class ModelArgs:
                 "Phi-3-mini-128k-instruct": {"N150": 32, "N300": 64, "T3K": 128, "TG": 128, "P150x4": 128},
                 "QwQ-32B": {"N150": None, "N300": None, "T3K": 64, "TG": 128, "P150x4": 128},
                 "Qwen3-32B": {"N150": None, "N300": None, "T3K": 64, "TG": 128, "P150x4": 128},
-                "Qwen3-Embedding-8B": {"N150": 4, "N300": 64, "T3K": 128, "TG": 128, "P150x4": 128},
+                # Single-card P150 chunk size = 8 (=8192) so the whole 8192 context
+                # is prefilled as a SINGLE chunk. This is a CORRECTNESS requirement
+                # for embeddings, not a perf knob: on the chunked path (e.g. the
+                # default fallback of 4 => 4096, giving 4096x2) the per-chunk
+                # last-token hidden state does not match the single-shot reference
+                # and silently yields a wrong embedding (cos ~0.85). The companion
+                # generator change hard-fails embeddings on the chunked path, so a
+                # single P150 must prefill 8192 in one chunk. Verified on p150x1 for
+                # both sizes: 8192 single-chunk (non-trace) fits L1, no OOM, cos=1.0
+                # vs the reference (0.6B and 8B).
+                "Qwen3-Embedding-8B": {"N150": 4, "N300": 64, "T3K": 128, "TG": 128, "P150": 8, "P150x4": 128},
+                "Qwen3-Embedding-0.6B": {"P150": 8},
                 "Phi-4": {"N150": 4, "N300": 64, "T3K": 128, "TG": 128, "P150x4": 128},
                 "Mistral-Small-3.1-24B": {"N150": 8, "N300": 128, "T3K": 128, "TG": 128, "P150x4": 128},
                 "gemma-2-2b": {

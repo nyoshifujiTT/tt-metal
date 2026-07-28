@@ -1469,6 +1469,23 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         seq_len = tokens.shape[-1]
         use_chunked_prefill = seq_len > self.model_args[model_id].max_prefill_chunk_size
         use_prefix_caching = num_cached_tokens > 0
+        if return_hidden_states and (use_chunked_prefill or use_prefix_caching):
+            # Embedding (last-token hidden-states) extraction is only correct for a
+            # single, non-chunked prefill. On the chunked / prefix-caching path the
+            # last-token hidden state is produced per chunk with a self-generated
+            # page table, which does NOT match the single-shot reference and yields
+            # a silently wrong embedding (observed cos ~0.85 vs the reference on the
+            # 4096x2 chunked path). Fail loud instead of returning a corrupt vector.
+            # To serve longer inputs as a single chunk, raise max_prefill_chunk_size
+            # (e.g. the MAX_PREFILL_CHUNK_SIZES_DIV1024 catalog entry, or the
+            # MAX_PREFILL_CHUNK_SIZE env) so seq_len <= max_prefill_chunk_size.
+            raise NotImplementedError(
+                "return_hidden_states=True (embedding) is not supported on the chunked / "
+                "prefix-caching prefill path: seq_len="
+                f"{seq_len} > max_prefill_chunk_size={self.model_args[model_id].max_prefill_chunk_size} "
+                f"(or num_cached_tokens={num_cached_tokens} > 0). Increase max_prefill_chunk_size so the "
+                "request is prefilled as a single chunk."
+            )
         if use_chunked_prefill or use_prefix_caching:
             """
             Chunked prefill requires paged attention. There are some strange constraints which we must meet:
