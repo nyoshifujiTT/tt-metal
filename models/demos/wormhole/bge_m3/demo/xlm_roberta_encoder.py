@@ -154,6 +154,88 @@ class XlmRobertaEncoder:
         del vllm_config, prefix
         self.pooler = None
 
+    # ---- shared encoder execution (uses self.model / self.device) ----
+    def _run_encoder_chunk(self, padded_inputs: dict[str, Optional[torch.Tensor]]) -> ttnn.Tensor:
+        """Runs the TT encoder on one already-padded chunk, returning the ttnn output.
+
+        Uses ``self.model`` (a BgeM3Model) and ``self.device`` (the mesh device
+        this wrapper created the model on; BgeM3Model does not store it). The
+        output is forced to TILE_LAYOUT so downstream heads can consume it.
+        """
+        device = self.device
+        token_type_ids = padded_inputs.get("token_type_ids")
+        position_ids = padded_inputs.get("position_ids")
+        output = self.model(
+            input_ids=to_ttnn_ids(padded_inputs["input_ids"], device=device),
+            attention_mask=to_ttnn_ids(padded_inputs["attention_mask"], device=device),
+            token_type_ids=(to_ttnn_ids(token_type_ids, device=device) if token_type_ids is not None else None),
+            position_ids=(to_ttnn_ids(position_ids, device=device) if position_ids is not None else None),
+        )
+        if output.layout != ttnn.TILE_LAYOUT:
+            output = ttnn.to_layout(output, ttnn.TILE_LAYOUT)
+        return output
+
+    def _encode_in_chunks(
+        self,
+        input_ids: torch.Tensor,
+        process_chunk,
+        *,
+        attention_mask: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+    ):
+        """Drives the device pad/chunk contract, delegating each chunk to a callback.
+
+        Single orchestration point shared by both consumers of the XLM-RoBERTa
+        encoder (bge-m3 embedding pooling and the bge-reranker cross-encoder). It
+        slices the request into device-sized chunks, pads each to the fixed
+        (padded_batch_size, padded_seq_len) device shape, and calls
+        ``process_chunk(padded_inputs, chunk_batch_size)`` for every chunk. The
+        per-chunk results are returned as a list in request order; the caller
+        combines them (dict concat for bge-m3, tensor concat for the reranker).
+        """
+        pad_token_id = self.tokenizer.pad_token_id
+        batch_size, seq_len = input_ids.shape
+        padded_seq_len = get_padded_sequence_length(seq_len)
+        target_padded_batch_size = get_target_padded_batch_size(batch_size, padded_seq_len)
+
+        chunk_outputs = []
+        for start, end in iter_execution_ranges(batch_size, padded_seq_len):
+            padded_inputs = _pad_chunk_inputs(
+                input_ids[start:end],
+                _slice_optional_batch_tensor(attention_mask, start, end),
+                _slice_optional_batch_tensor(token_type_ids, start, end),
+                _slice_optional_batch_tensor(position_ids, start, end),
+                padded_seq_len=padded_seq_len,
+                padded_batch_size=target_padded_batch_size,
+                pad_token_id=pad_token_id,
+            )
+            chunk_outputs.append(process_chunk(padded_inputs, end - start))
+        return chunk_outputs
+
+    def _encode_to_last_hidden(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Runs the encoder and returns the last hidden state [B, S_padded, D] on host.
+
+        Thin wrapper over ``_encode_in_chunks`` for consumers (e.g. the
+        bge-reranker cross-encoder) that want the raw encoder output on host
+        rather than a pooled embedding.
+        """
+        device = self.device
+
+        def _chunk_to_host(padded_inputs, chunk_batch_size):
+            output = self._run_encoder_chunk(padded_inputs)
+            hidden = to_torch_auto_compose(output, device=device).to(torch.float32)
+            if hidden.dim() == 4 and hidden.shape[1] == 1:
+                hidden = hidden.squeeze(1)  # [B,1,S,D] -> [B,S,D]
+            return hidden[:chunk_batch_size]
+
+        chunks = self._encode_in_chunks(input_ids, _chunk_to_host, attention_mask=attention_mask)
+        return torch.cat(chunks, dim=0)
+
 
 ########################################################
 # ENCODER PAD / CHUNK / EXECUTION HELPERS
@@ -302,92 +384,3 @@ def _pad_chunk_inputs(
         else None,
     }
 
-
-def encode_in_chunks(
-    input_ids: torch.Tensor,
-    process_chunk,
-    *,
-    attention_mask: Optional[torch.Tensor] = None,
-    token_type_ids: Optional[torch.Tensor] = None,
-    position_ids: Optional[torch.Tensor] = None,
-    pad_token_id: int = 0,
-):
-    """Drives the device pad/chunk contract, delegating each chunk to a callback.
-
-    This is the single orchestration point shared by every consumer of the
-    XLM-RoBERTa encoder (bge-m3 embedding pooling and the bge-reranker
-    cross-encoder). It slices the request into device-sized chunks, pads each to
-    the fixed (padded_batch_size, padded_seq_len) device shape, and calls
-    ``process_chunk(padded_inputs, chunk_batch_size)`` for every chunk. The
-    per-chunk results are returned as a list in request order; the caller decides
-    how to combine them (dict concat for bge-m3, tensor concat for the reranker).
-    """
-    batch_size, seq_len = input_ids.shape
-    padded_seq_len = get_padded_sequence_length(seq_len)
-    target_padded_batch_size = get_target_padded_batch_size(batch_size, padded_seq_len)
-
-    chunk_outputs = []
-    for start, end in iter_execution_ranges(batch_size, padded_seq_len):
-        padded_inputs = _pad_chunk_inputs(
-            input_ids[start:end],
-            _slice_optional_batch_tensor(attention_mask, start, end),
-            _slice_optional_batch_tensor(token_type_ids, start, end),
-            _slice_optional_batch_tensor(position_ids, start, end),
-            padded_seq_len=padded_seq_len,
-            padded_batch_size=target_padded_batch_size,
-            pad_token_id=pad_token_id,
-        )
-        chunk_outputs.append(process_chunk(padded_inputs, end - start))
-    return chunk_outputs
-
-
-def run_encoder_chunk(model, device, padded_inputs: dict[str, Optional[torch.Tensor]]) -> ttnn.Tensor:
-    """Runs the TT encoder on one already-padded chunk, returning the ttnn output.
-
-    ``model`` is a BgeM3Model instance callable with ttnn tensors; ``device`` is
-    the mesh device the caller created the model on (BgeM3Model does not store
-    the device, so the owning wrapper passes it in explicitly). The output is
-    forced to TILE_LAYOUT so downstream heads can consume it directly.
-    """
-    token_type_ids = padded_inputs.get("token_type_ids")
-    position_ids = padded_inputs.get("position_ids")
-    output = model(
-        input_ids=to_ttnn_ids(padded_inputs["input_ids"], device=device),
-        attention_mask=to_ttnn_ids(padded_inputs["attention_mask"], device=device),
-        token_type_ids=(to_ttnn_ids(token_type_ids, device=device) if token_type_ids is not None else None),
-        position_ids=(to_ttnn_ids(position_ids, device=device) if position_ids is not None else None),
-    )
-    if output.layout != ttnn.TILE_LAYOUT:
-        output = ttnn.to_layout(output, ttnn.TILE_LAYOUT)
-    return output
-
-
-def encode_to_last_hidden(
-    model,
-    input_ids: torch.Tensor,
-    attention_mask: Optional[torch.Tensor] = None,
-    *,
-    device,
-    pad_token_id: int = 0,
-) -> torch.Tensor:
-    """Runs the encoder and returns the last hidden state [B, S_padded, D] on host.
-
-    Thin wrapper over ``encode_in_chunks`` for consumers (e.g. the bge-reranker
-    cross-encoder) that want the raw encoder output on host rather than a pooled
-    embedding. ``device`` is the mesh device the model was created on.
-    """
-
-    def _chunk_to_host(padded_inputs, chunk_batch_size):
-        output = run_encoder_chunk(model, device, padded_inputs)
-        hidden = to_torch_auto_compose(output, device=device).to(torch.float32)
-        if hidden.dim() == 4 and hidden.shape[1] == 1:
-            hidden = hidden.squeeze(1)  # [B,1,S,D] -> [B,S,D]
-        return hidden[:chunk_batch_size]
-
-    chunks = encode_in_chunks(
-        input_ids,
-        _chunk_to_host,
-        attention_mask=attention_mask,
-        pad_token_id=pad_token_id,
-    )
-    return torch.cat(chunks, dim=0)

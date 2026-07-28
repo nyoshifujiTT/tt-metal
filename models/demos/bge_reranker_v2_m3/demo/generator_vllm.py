@@ -20,7 +20,6 @@ from typing import Optional
 import torch
 
 import ttnn
-from models.demos.wormhole.bge_m3.demo.xlm_roberta_encoder import encode_to_last_hidden
 from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_length
 from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import XLMRobertaClassificationHead
 from models.demos.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict
@@ -87,13 +86,7 @@ class BgeRerankerV2M3(XlmRobertaEncoder):
 
         # Shared backbone entry point owns the device padding/chunking contract
         # and returns the encoder last hidden state [B, S_padded, D] on host.
-        hidden = encode_to_last_hidden(
-            self.model,
-            input_ids,
-            attention_mask,
-            device=self.device,
-            pad_token_id=self.tokenizer.pad_token_id,
-        )
+        hidden = self._encode_to_last_hidden(input_ids, attention_mask)
         cls_hidden = hidden[:, 0, :]  # <s> (CLS) position
         return self.classifier(cls_hidden)  # [batch, 1] relevance logits
 

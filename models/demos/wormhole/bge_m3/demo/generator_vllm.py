@@ -12,11 +12,7 @@ import ttnn
 from models.common.auto_compose import to_torch_auto_compose
 from models.demos.wormhole.bge_m3.demo.m3_scores import _get_special_token_ids, _sparse_embedding_scatter_ttnn
 from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_length
-from models.demos.wormhole.bge_m3.demo.xlm_roberta_encoder import (
-    XlmRobertaEncoder,
-    encode_in_chunks,
-    run_encoder_chunk,
-)
+from models.demos.wormhole.bge_m3.demo.xlm_roberta_encoder import XlmRobertaEncoder
 
 
 class BgeM3ForEmbedding(XlmRobertaEncoder):
@@ -69,10 +65,10 @@ class BgeM3ForEmbedding(XlmRobertaEncoder):
         chunk_batch_size: int,
     ) -> dict[str, torch.Tensor]:
         # Runs the shared encoder chunk, then applies the bge-m3 embedding pooling
-        # heads on device. Used as the per-chunk callback of encode_in_chunks().
+        # heads on device. Used as the per-chunk callback of self._encode_in_chunks().
         input_ids = padded_inputs["input_ids"]
         attention_mask = padded_inputs["attention_mask"]
-        output = run_encoder_chunk(self.model, self.device, padded_inputs)
+        output = self._run_encoder_chunk(padded_inputs)
 
         return_dict = {}
         if self.return_dense:
@@ -225,13 +221,12 @@ class BgeM3ForEmbedding(XlmRobertaEncoder):
         self._validate_request(input_ids.shape[0], get_padded_sequence_length(input_ids.shape[1]))
         self._initialize_model()
 
-        chunk_outputs = encode_in_chunks(
+        chunk_outputs = self._encode_in_chunks(
             input_ids,
             self._forward_chunk,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
             position_ids=position_ids,
-            pad_token_id=self.tokenizer.pad_token_id,
         )
         return _concatenate_chunk_outputs(chunk_outputs)
 

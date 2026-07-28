@@ -14,7 +14,7 @@ import torch
 
 from models.demos.wormhole.bge_m3.tt.common import create_tt_model
 from models.demos.wormhole.bge_m3.tests.test_utils import require_single_device
-from models.demos.wormhole.bge_m3.demo.xlm_roberta_encoder import encode_to_last_hidden
+from models.demos.wormhole.bge_m3.demo.xlm_roberta_encoder import XlmRobertaEncoder
 from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import XLMRobertaClassificationHead
 from models.demos.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict
 
@@ -62,9 +62,13 @@ def test_reranker_logit_matches_hf(device, artifacts, query, doc, reset_seeds):
 
     input_ids = enc["input_ids"]
     attention_mask = enc["attention_mask"]
-    hidden = encode_to_last_hidden(
-        tt_model, input_ids, attention_mask, device=device, pad_token_id=tokenizer.pad_token_id
-    )
+    # Drive the shared encoder via a bare XlmRobertaEncoder wired to this tt_model
+    # (the same method the reranker wrapper uses at runtime).
+    encoder = XlmRobertaEncoder.__new__(XlmRobertaEncoder)
+    encoder.model = tt_model
+    encoder.device = device
+    encoder.tokenizer = tokenizer
+    hidden = encoder._encode_to_last_hidden(input_ids, attention_mask)
     cls_hidden = hidden[:, 0, :][:BATCH_SIZE]
     tt_logit = classifier(cls_hidden).view(-1)
 

@@ -48,9 +48,9 @@ class _IdentityHead:
 
 
 def test_forward_extracts_cls_and_returns_logits(monkeypatch):
-    # Device-free: stub encode_to_last_hidden to return a known [B,S,D] tensor and
-    # verify forward() takes the CLS (position 0) hidden and runs the classifier,
-    # returning one logit per input row [B,1].
+    # Device-free: stub the shared _encode_to_last_hidden to return a known
+    # [B,S,D] tensor and verify forward() takes the CLS (position 0) hidden and
+    # runs the classifier, returning one logit per input row [B,1].
     model = BgeRerankerV2M3.__new__(BgeRerankerV2M3)
     model.max_batch_size = 32
     model.max_seq_len = 8192
@@ -58,8 +58,7 @@ def test_forward_extracts_cls_and_returns_logits(monkeypatch):
     model.classifier = _IdentityHead()
     model._is_initialized = True
     model.model = object()
-    sentinel_device = object()
-    model.device = sentinel_device  # forward() forwards this to encode_to_last_hidden
+    model.device = object()
 
     batch, seq, hidden = 3, 7, 4
     fake_hidden = torch.zeros(batch, seq, hidden)
@@ -69,11 +68,12 @@ def test_forward_extracts_cls_and_returns_logits(monkeypatch):
 
     seen = {}
 
-    def fake_encode(model_arg, input_ids, attention_mask=None, *, device, pad_token_id):
-        seen["device"] = device
+    def fake_encode(self, input_ids, attention_mask=None):
+        # Bound method: records that forward() delegated to the instance.
+        seen["self"] = self
         return fake_hidden
 
-    monkeypatch.setattr(gen_mod, "encode_to_last_hidden", fake_encode)
+    monkeypatch.setattr(BgeRerankerV2M3, "_encode_to_last_hidden", fake_encode)
     monkeypatch.setattr(gen_mod, "get_padded_sequence_length", lambda s: s)
 
     input_ids = torch.ones(batch, seq, dtype=torch.long)
@@ -82,5 +82,5 @@ def test_forward_extracts_cls_and_returns_logits(monkeypatch):
     assert out.shape == (batch, 1)
     # identity head returns CLS[:, :1] => [1, 2, 3]
     torch.testing.assert_close(out.view(-1), torch.tensor([1.0, 2.0, 3.0]))
-    # forward() must thread its own device through to the shared encoder entry.
-    assert seen["device"] is sentinel_device
+    # forward() must delegate to the instance's shared encoder entry point.
+    assert seen["self"] is model
