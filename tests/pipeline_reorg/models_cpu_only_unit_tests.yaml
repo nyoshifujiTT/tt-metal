@@ -1,0 +1,26 @@
+# CPU-only (device-free) model unit tests.
+#
+# These jobs run on a CPU runner (cpu_medium) with NO Tenstorrent device
+# attached, via the generic fabric-cpu-only-tests-impl.yaml runner (which does
+# not pass --device). The tests import ttnn from the build/wheel but never open
+# a device, so they must not consume scarce Wormhole/Blackhole runners. Named
+# after the fabric_cpu_only_unit_tests.yaml convention (cpu_only + unit) so the
+# catalog name matches the test-category (unit); no device/single-card wrapper.
+#
+# Each entry: name, cmd (literal pytest paths; no device), skus, team, arch,
+# owner_id. For max allowed timeout refer to .github/time_budget.yaml
+# (models -> unit).
+
+- name: bge_reranker_v2_m3 cpu-only unit tests
+  cmd: |
+    pytest models/demos/bge_reranker_v2_m3/tests/test_xlm_roberta_classification_head.py \
+           models/demos/bge_reranker_v2_m3/tests/test_model_config.py \
+           models/demos/bge_reranker_v2_m3/tests/test_generator_vllm.py \
+           models/demos/wormhole/bge_m3/tests/unit/test_encode_in_chunks.py \
+           models/demos/wormhole/bge_m3/tests/unit/test_xlm_roberta_encoder.py
+  skus:
+    cpu_medium:
+      timeout: 15
+  team: models
+  arch: blackhole
+  owner_id: U082LLYBLSW # Gabriel Tobar (CODEOWNERS @gtobarTT)

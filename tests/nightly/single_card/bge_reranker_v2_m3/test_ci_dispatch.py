@@ -10,9 +10,9 @@ from models.tt_transformers.tt.common import get_hf_tt_cache_path
 
 # Runs the bge-reranker-v2-m3 single-device fast-dispatch tests in CI (Blackhole
 # nightly-bh-models job). This entry is device-only: the end-to-end logit-vs-HF
-# test. The device-free unit tests live in the sibling ``bge_reranker_v2_m3_hostside``
-# suite, which runs on a CPU runner (no Tenstorrent device) so it does not spend
-# scarce Blackhole time -- see fast-dispatch-hostside-models.
+# test. The device-free unit tests are registered separately in
+# tests/pipeline_reorg/models_cpu_only_unit_tests.yaml, which runs on a CPU
+# runner (no Tenstorrent device) so it does not spend scarce Blackhole time.
 @pytest.mark.parametrize(
     "model_weights",
     [
