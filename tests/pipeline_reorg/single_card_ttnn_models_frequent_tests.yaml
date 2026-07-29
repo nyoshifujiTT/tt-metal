@@ -33,7 +33,14 @@
   skus:
     bh_p150b_civ2:
       timeout: 30
-  owner_id: U082LLYBLSW # Gabriel Tobar (CODEOWNERS @gtobarTT)
+  # owner_id here is the Slack notify target on failure and is independent of
+  # CODEOWNERS (it is not derived from it). models/demos/bge_reranker_v2_m3 has no
+  # dedicated CODEOWNERS entry, so it falls back to the models/demos catch-all
+  # (@uaydonat @yieldthought @cglagovichTT). Point failures at that catch-all for
+  # now.
+  # TODO(owner): assign a real reranker owner -- add a CODEOWNERS line for
+  # models/demos/bge_reranker_v2_m3 and update this owner_id to match.
+  owner_id: U06UEFWB4P9 # Colman Glagovich (@cglagovichTT, models/demos catch-all)
   team: models
 - name: common_models nightly
   cmd: $PYTEST_CMD tests/nightly/single_card/common_models
