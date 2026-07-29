@@ -94,7 +94,6 @@ jobs:
       env:
         ARCH_NAME: ${{ matrix.test-group.arch }}
         LOGURU_LEVEL: INFO
-        TT_LOGGER_LEVEL: warn
         LD_LIBRARY_PATH: /work/build/lib
         PYTHONPATH: /work
         TT_METAL_HOME: /work
@@ -118,7 +117,6 @@ jobs:
         with:
           build-artifact-name: ${{ inputs.build-artifact-name }}
           wheel-artifact-name: ${{ inputs.wheel-artifact-name }}
-          hang-detection-timeout: 20.0
       - name: ${{ matrix.test-group.name }}
         timeout-minutes: ${{ matrix.test-group.timeout }}
         run: |
