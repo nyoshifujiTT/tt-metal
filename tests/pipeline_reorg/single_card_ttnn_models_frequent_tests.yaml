@@ -24,9 +24,16 @@
       timeout: 30
   owner_id: U082LLYBLSW # Gabriel Tobar (CODEOWNERS @gtobarTT)
   team: models
-# bge-reranker-v2-m3 was brought up and verified on Blackhole (p150) only, so its
-# single-device logit test runs on the BH P150b SKU. The device-free unit tests
-# run separately on a CPU runner -- see single_card_ttnn_models_frequent_hostside_tests.yaml.
+# bge-reranker-v2-m3 shares the bge-m3 model family (same XLM-RoBERTa encoder
+# backbone), so for now it is registered alongside bge-m3 in this legacy
+# single-card frequent pipeline to keep the two siblings together. It was brought
+# up and verified on Blackhole (p150) only, so its single-device logit test runs
+# on the BH P150b SKU. The device-free unit tests run separately on a CPU runner
+# -- see tests/pipeline_reorg/models_cpu_only_unit_tests.yaml.
+# TODO(migrate): per models/MIGRATING_TO_TIERED_CI.md the single-card pipeline is
+# legacy and models should move to the 3-tier CI (models_unit_tests.yaml /
+# models_e2e_tests.yaml). bge-m3 has not migrated yet; move bge-reranker-v2-m3
+# together with bge-m3 when it does.
 - name: bge_reranker_v2_m3 nightly
   cmd: $PYTEST_CMD tests/nightly/single_card/bge_reranker_v2_m3
   model: bge_reranker_v2_m3

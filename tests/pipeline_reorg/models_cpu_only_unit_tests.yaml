@@ -11,6 +11,13 @@
 # owner_id. For max allowed timeout refer to .github/time_budget.yaml
 # (models -> unit).
 
+# bge-reranker-v2-m3 shares the bge-m3 model family (same XLM-RoBERTa encoder
+# backbone); its device suite is registered alongside bge-m3 in the legacy
+# single-card frequent pipeline, and these device-free unit tests run here on a
+# CPU runner.
+# TODO(migrate): per models/MIGRATING_TO_TIERED_CI.md, models should move to the
+# 3-tier CI once bge-m3 migrates off the legacy single-card pipeline; revisit
+# this CPU-only registration together with that move.
 - name: bge_reranker_v2_m3 cpu-only unit tests
   cmd: |
     pytest models/demos/bge_reranker_v2_m3/tests/test_xlm_roberta_classification_head.py \
