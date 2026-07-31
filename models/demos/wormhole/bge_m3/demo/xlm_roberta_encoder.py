@@ -26,7 +26,6 @@ from typing import Iterator, Optional
 import torch
 
 import ttnn
-from models.common.auto_compose import to_torch_auto_compose
 from models.demos.wormhole.bge_m3.tt.common import create_tt_model
 from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_length
 
@@ -250,21 +249,17 @@ class XlmRobertaEncoder(abc.ABC):
             chunk_outputs.append(self._forward_chunk(padded_inputs, end - start))
         return chunk_outputs
 
+    @abc.abstractmethod
     def _forward_chunk(self, padded_inputs: dict[str, Optional[torch.Tensor]], chunk_batch_size: int):
         """Per-chunk primitive of the ``_encode_in_chunks`` template method.
 
-        Overridable step that turns one already-padded device chunk into this
-        model's per-chunk result. The default runs the encoder and returns the
-        raw last hidden state ``[chunk_batch_size, S_padded, D]`` on host, which
-        is what the bge-reranker cross-encoder consumes (via
-        ``_encode_to_last_hidden``). The bge-m3 embedding wrapper overrides this
-        to apply its pooling heads and return the per-chunk embedding dict.
+        Turns one already-padded device chunk (the ttnn output of
+        ``_run_encoder_chunk``) into this model's per-chunk result. This is where
+        the two models genuinely diverge, so there is no meaningful shared
+        default: the bge-m3 embedding wrapper pools on device and returns a
+        per-chunk embedding dict, while the bge-reranker cross-encoder transfers
+        the raw last hidden state to host. Each subclass therefore implements it.
         """
-        output = self._run_encoder_chunk(padded_inputs)
-        hidden = to_torch_auto_compose(output, device=self.device).to(torch.float32)
-        if hidden.dim() == 4 and hidden.shape[1] == 1:
-            hidden = hidden.squeeze(1)  # [B,1,S,D] -> [B,S,D]
-        return hidden[:chunk_batch_size]
 
 
 ########################################################

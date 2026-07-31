@@ -13,8 +13,8 @@ contract can be validated on CPU.
 
 import torch
 
-from models.demos.wormhole.bge_m3.demo import xlm_roberta_encoder as enc_mod
 from models.demos.wormhole.bge_m3.demo.xlm_roberta_encoder import XlmRobertaEncoder
+from models.demos.bge_reranker_v2_m3.demo import generator_vllm as rr_mod
 from models.demos.bge_reranker_v2_m3.demo.generator_vllm import BgeRerankerV2M3
 
 HIDDEN = 8
@@ -37,7 +37,9 @@ def test_encode_to_last_hidden_slices_and_uses_self(monkeypatch):
         return torch.zeros(padded_batch, padded_seq, HIDDEN, dtype=torch.float32)
 
     monkeypatch.setattr(XlmRobertaEncoder, "_run_encoder_chunk", fake_run_encoder_chunk)
-    monkeypatch.setattr(enc_mod, "to_torch_auto_compose", lambda t, *, device: t)
+    # _forward_chunk (host transfer) now lives on the reranker; patch its module's
+    # to_torch_auto_compose so the fake ttnn output passes through unchanged.
+    monkeypatch.setattr(rr_mod, "to_torch_auto_compose", lambda t, *, device: t)
 
     sentinel_device = object()
     enc = BgeRerankerV2M3.__new__(BgeRerankerV2M3)

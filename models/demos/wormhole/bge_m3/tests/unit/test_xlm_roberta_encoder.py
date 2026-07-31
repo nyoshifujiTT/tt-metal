@@ -28,13 +28,16 @@ from models.demos.wormhole.bge_m3.demo.xlm_roberta_encoder import XlmRobertaEnco
 
 class _ConcreteEncoder(XlmRobertaEncoder):
     """Minimal concrete subclass so the abstract base's shared plumbing can be
-    instantiated in tests. The two abstract primitives are stubbed."""
+    instantiated in tests. The three abstract primitives are stubbed."""
 
     def forward(self, input_ids, *args, **kwargs):  # pragma: no cover - not exercised
         raise NotImplementedError
 
     def get_embedding_dim(self) -> int:
         return 1
+
+    def _forward_chunk(self, padded_inputs, chunk_batch_size):  # pragma: no cover - not exercised
+        raise NotImplementedError
 
 
 class _FakeModelArgs:

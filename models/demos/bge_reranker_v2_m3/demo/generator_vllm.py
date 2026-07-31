@@ -20,6 +20,7 @@ from typing import Optional
 import torch
 
 import ttnn
+from models.common.auto_compose import to_torch_auto_compose
 from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_length
 from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import XLMRobertaClassificationHead
 from models.demos.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict
@@ -70,6 +71,22 @@ class BgeRerankerV2M3(XlmRobertaEncoder):
 
     def _post_initialize(self) -> None:
         self.classifier = XLMRobertaClassificationHead.from_state_dict(self.state_dict)
+
+    def _forward_chunk(self, padded_inputs: dict[str, Optional[torch.Tensor]], chunk_batch_size: int) -> torch.Tensor:
+        """Per-chunk primitive for the cross-encoder: run the encoder on one
+        already-padded chunk and return its raw last hidden state
+        ``[chunk_batch_size, S_padded, D]`` on host.
+
+        The reranker needs the full hidden states (it takes the <s>/CLS row and
+        runs the classifier head on host), so unlike the bge-m3 embedding wrapper
+        it does not pool on device -- it transfers the encoder output to host as
+        is. Called by the shared ``_encode_in_chunks`` template method.
+        """
+        output = self._run_encoder_chunk(padded_inputs)
+        hidden = to_torch_auto_compose(output, device=self.device).to(torch.float32)
+        if hidden.dim() == 4 and hidden.shape[1] == 1:
+            hidden = hidden.squeeze(1)  # [B,1,S,D] -> [B,S,D]
+        return hidden[:chunk_batch_size]
 
     def _encode_to_last_hidden(
         self,

@@ -32,14 +32,18 @@ class _Tokenizer:
 
 class _ConcreteEncoder(XlmRobertaEncoder):
     """Concrete subclass implementing the base's abstract primitives so the
-    shared encode plumbing can be instantiated in tests. _forward_chunk keeps the
-    base default (raw last hidden); only forward/get_embedding_dim are stubbed."""
+    shared encode plumbing can be instantiated in tests. The tests that need a
+    real _forward_chunk subclass it and override that method; here the three
+    abstract methods are stubbed just enough to instantiate."""
 
     def forward(self, input_ids, *args, **kwargs):  # pragma: no cover - not exercised
         raise NotImplementedError
 
     def get_embedding_dim(self) -> int:
         return 1
+
+    def _forward_chunk(self, padded_inputs, chunk_batch_size):  # pragma: no cover - overridden
+        raise NotImplementedError
 
 
 def _record_chunks(input_ids, **kwargs):
