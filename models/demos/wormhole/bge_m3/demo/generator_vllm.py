@@ -218,7 +218,9 @@ class BgeM3ForEmbedding(XlmRobertaEncoder):
         token_type_ids: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> dict[str, torch.Tensor]:
-        self._validate_request(input_ids.shape[0], get_padded_sequence_length(input_ids.shape[1]))
+        batch_size, seq_len = input_ids.shape
+        padded_seq_len = get_padded_sequence_length(seq_len)
+        self._validate_request(batch_size, padded_seq_len)
         self._initialize_model()
 
         chunk_outputs = self._encode_in_chunks(
