@@ -34,11 +34,15 @@ class BgeM3ForEmbedding(XlmRobertaEncoder):
         tt_data_parallel: int = 1,
         **kwargs,
     ):
-        self.sentence_pooling_method = kwargs.pop("sentence_pooling_method", "mean")
-        self.normalize_embeddings = kwargs.pop("normalize_embeddings", False)
-        self.return_dense = kwargs.pop("return_dense", True)
-        self.return_sparse = kwargs.pop("return_sparse", False)
-        self.return_colbert = kwargs.pop("return_colbert", False)
+        # Pop the embedding-specific options out of kwargs *before* calling super
+        # so they are not forwarded to the base __init__, but hold them in locals
+        # and assign them to self only after super().__init__() has run (the base
+        # initializer must be the first thing to touch self).
+        sentence_pooling_method = kwargs.pop("sentence_pooling_method", "mean")
+        normalize_embeddings = kwargs.pop("normalize_embeddings", False)
+        return_dense = kwargs.pop("return_dense", True)
+        return_sparse = kwargs.pop("return_sparse", False)
+        return_colbert = kwargs.pop("return_colbert", False)
 
         super().__init__(
             device=device,
@@ -51,6 +55,12 @@ class BgeM3ForEmbedding(XlmRobertaEncoder):
             tt_data_parallel=tt_data_parallel,
             **kwargs,
         )
+
+        self.sentence_pooling_method = sentence_pooling_method
+        self.normalize_embeddings = normalize_embeddings
+        self.return_dense = return_dense
+        self.return_sparse = return_sparse
+        self.return_colbert = return_colbert
 
         self.config = transformers.AutoConfig.from_pretrained(model_name)
         # Compatibility placeholders for callers that probe the newer API.
