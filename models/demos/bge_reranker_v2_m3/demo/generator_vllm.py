@@ -71,6 +71,22 @@ class BgeRerankerV2M3(XlmRobertaEncoder):
     def _post_initialize(self) -> None:
         self.classifier = XLMRobertaClassificationHead.from_state_dict(self.state_dict)
 
+    def _encode_to_last_hidden(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Runs the encoder and returns the last hidden state [B, S_padded, D] on host.
+
+        Thin wrapper over ``_encode_in_chunks`` for consumers (e.g. the
+        bge-reranker cross-encoder) that want the raw encoder output on host
+        rather than a pooled embedding. Relies on the default ``_forward_chunk``
+        (raw last hidden); models that override ``_forward_chunk`` for pooling
+        (bge-m3) do not use this path.
+        """
+        chunks = self._encode_in_chunks(input_ids, attention_mask=attention_mask)
+        return torch.cat(chunks, dim=0)
+
     def forward(
         self,
         input_ids: torch.Tensor,

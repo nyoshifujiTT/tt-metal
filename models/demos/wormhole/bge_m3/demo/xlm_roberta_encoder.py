@@ -266,22 +266,6 @@ class XlmRobertaEncoder(abc.ABC):
             hidden = hidden.squeeze(1)  # [B,1,S,D] -> [B,S,D]
         return hidden[:chunk_batch_size]
 
-    def _encode_to_last_hidden(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Runs the encoder and returns the last hidden state [B, S_padded, D] on host.
-
-        Thin wrapper over ``_encode_in_chunks`` for consumers (e.g. the
-        bge-reranker cross-encoder) that want the raw encoder output on host
-        rather than a pooled embedding. Relies on the default ``_forward_chunk``
-        (raw last hidden); models that override ``_forward_chunk`` for pooling
-        (bge-m3) do not use this path.
-        """
-        chunks = self._encode_in_chunks(input_ids, attention_mask=attention_mask)
-        return torch.cat(chunks, dim=0)
-
 
 ########################################################
 # ENCODER PAD / CHUNK / EXECUTION HELPERS

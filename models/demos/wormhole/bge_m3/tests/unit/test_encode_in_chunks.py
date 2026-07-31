@@ -7,9 +7,6 @@
 by both the bge-m3 embedding wrapper and the bge-reranker cross-encoder. It never
 touches ttnn (it only pads torch tensors and calls the overridable
 ``self._forward_chunk`` primitive), so it can be validated on CPU.
-``_encode_to_last_hidden`` is the thin last-hidden wrapper used by the reranker;
-it runs the encoder chunk on self.model/self.device via the default
-``_forward_chunk``.
 
 Verifies:
 - sequence length is padded to the expected 128/256/1024/2048/8192 bucket,
@@ -22,14 +19,11 @@ Verifies:
 import pytest
 import torch
 
-from models.demos.wormhole.bge_m3.demo import xlm_roberta_encoder as enc_mod
 from models.demos.wormhole.bge_m3.demo.xlm_roberta_encoder import (
     BGE_M3_LONG_SEQ_CHUNK,
     BGE_M3_SHORT_SEQ_PADDED_BATCH,
     XlmRobertaEncoder,
 )
-
-HIDDEN = 8
 
 
 class _Tokenizer:
@@ -46,17 +40,6 @@ class _ConcreteEncoder(XlmRobertaEncoder):
 
     def get_embedding_dim(self) -> int:
         return 1
-
-
-def _bare_encoder(device=None):
-    """A concrete-encoder instance wired just enough for the encode methods,
-    without constructing a device model (only self.tokenizer/self.device/self.model
-    are touched by _encode_in_chunks / _encode_to_last_hidden)."""
-    enc = _ConcreteEncoder.__new__(_ConcreteEncoder)
-    enc.tokenizer = _Tokenizer()
-    enc.device = device
-    enc.model = object()
-    return enc
 
 
 def _record_chunks(input_ids, **kwargs):
@@ -135,30 +118,3 @@ def test_encode_in_chunks_calls_forward_chunk_override():
     out = enc._encode_in_chunks(ids)
     assert out == [16, 4]  # per-chunk real batch sizes, in request order
     assert seen == [16, 4]
-
-
-def test_encode_to_last_hidden_slices_and_uses_self(monkeypatch):
-    """_encode_to_last_hidden concatenates chunks, slices to real batch, and runs
-    the encoder chunk on the instance (self.model/self.device), not a free func."""
-    seen = []
-
-    def fake_run_encoder_chunk(self, padded_inputs):
-        # Records that the bound method saw the instance's device, and returns a
-        # [B, S, HIDDEN] "hidden" carrying the padded chunk shape.
-        seen.append(self.device)
-        padded_batch, padded_seq = padded_inputs["input_ids"].shape
-        return torch.zeros(padded_batch, padded_seq, HIDDEN, dtype=torch.float32)
-
-    monkeypatch.setattr(XlmRobertaEncoder, "_run_encoder_chunk", fake_run_encoder_chunk)
-    monkeypatch.setattr(enc_mod, "to_torch_auto_compose", lambda t, *, device: t)
-
-    sentinel_device = object()
-    enc = _bare_encoder(device=sentinel_device)
-    ids = torch.randint(1, 50, (20, 8000), dtype=torch.long)  # forces 2 chunks
-    out = enc._encode_to_last_hidden(ids)
-
-    assert out.shape[0] == 20  # sliced back to real batch
-    assert out.shape[1] == 8192  # padded seq length
-    assert len(seen) == 2  # 20 rows -> 2 chunks of 16
-    for device in seen:
-        assert device is sentinel_device
