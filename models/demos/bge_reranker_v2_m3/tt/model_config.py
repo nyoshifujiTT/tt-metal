@@ -20,8 +20,6 @@ state_dict is provided.
 
 from __future__ import annotations
 
-import torch
-
 
 def load_reranker_state_dict(model_name: str) -> dict:
     """Load the reranker checkpoint as a sequence-classification model.
