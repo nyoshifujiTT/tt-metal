@@ -7,7 +7,7 @@ The model is an XLM-RoBERTa encoder (reused from
 ``models/demos/wormhole/bge_m3``) followed by a sequence-classification head.
 For each (query, document) pair vLLM tokenizes a single concatenated
 sequence; the encoder runs on device via the shared
-``bge_m3.demo.generator_vllm.encode_to_last_hidden`` entry point (which owns the device
+``XlmRobertaEncoder._encode_to_last_hidden`` method (which owns the device
 padding/chunking contract), and the classification head
 (``classifier.dense`` -> tanh -> ``classifier.out_proj``) emits one relevance
 logit from the ``<s>`` (CLS) position. The head runs on host in fp32.
