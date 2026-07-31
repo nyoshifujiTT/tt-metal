@@ -232,6 +232,7 @@ class BgeM3ForEmbedding(XlmRobertaEncoder):
     ) -> dict[str, torch.Tensor]:
         batch_size, seq_len = input_ids.shape
         padded_seq_len = get_padded_sequence_length(seq_len)
+
         self._validate_request(batch_size, padded_seq_len)
         self._initialize_model()
 
