@@ -34,10 +34,14 @@ from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_len
 class XlmRobertaEncoder(abc.ABC):
     """Common vLLM plumbing for TT XLM-RoBERTa encoder models.
 
-    Execution is currently single-device: ``mesh_device`` is accepted for API
+    Execution is single-device only. ``mesh_device`` is accepted for API
     compatibility, but the encoder builds and runs exactly one model on one
-    device and has no data-parallel execution path. ``tt_data_parallel > 1`` is
-    therefore rejected rather than silently ignored.
+    device. It implements neither data parallelism nor any other multi-device
+    mode (tensor parallelism, etc.): the only parallelism-related argument it
+    takes is ``tt_data_parallel``, and no tensor-parallel or sharding argument
+    exists, so no other multi-device path can even be requested. ``__init__``
+    therefore only needs to reject ``tt_data_parallel > 1`` (the one way a caller
+    could ask for multiple devices) rather than silently running single-device.
 
     TODO(data-parallel): add a real multi-device execution path and lift the
     ``tt_data_parallel > 1`` guard in __init__ once it is implemented and tested.
@@ -70,8 +74,10 @@ class XlmRobertaEncoder(abc.ABC):
     ):
         del prefix, kwargs
 
-        # Execution is single-device only (see class docstring). Reject a
-        # data-parallel request instead of silently running single-device.
+        # Execution is single-device only (see class docstring). tt_data_parallel
+        # is the only parallelism knob accepted (there is no tensor-parallel/
+        # sharding argument), so rejecting tt_data_parallel != 1 is sufficient to
+        # rule out every multi-device request rather than silently downgrading it.
         if tt_data_parallel != 1:
             raise NotImplementedError(
                 f"{type(self).__name__} only supports single-device execution "
