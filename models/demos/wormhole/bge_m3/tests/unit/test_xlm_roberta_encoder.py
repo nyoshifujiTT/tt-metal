@@ -6,7 +6,7 @@
 The base owns the vLLM plumbing shared by bge-m3 and the bge-reranker
 cross-encoder: device / vllm_config resolution, initialize_vllm_model,
 lazy model construction (with the _load_state_dict / _post_initialize hooks),
-request validation and the get_max_* / pooler helpers. All of this is checked
+request validation and the get_max_* helpers. All of this is checked
 without a device by stubbing create_tt_model.
 """
 
@@ -73,7 +73,6 @@ def test_device_and_defaults():
     assert m.device is dev
     assert m.get_max_batch_size() == 8
     assert m.get_max_seq_len() == 1024
-    assert m.pooler is None
     assert m._is_initialized is False
 
 

@@ -6,7 +6,7 @@
 Both the bge-m3 embedding wrapper and the bge-reranker-v2-m3 cross-encoder run
 the same XLM-RoBERTa encoder backbone (``create_tt_model``) and expose the same
 vLLM plumbing: device/vllm_config resolution, ``initialize_vllm_model``, lazy
-model construction, request validation and the ``get_max_*`` / pooler helpers.
+model construction, request validation and the ``get_max_*`` helpers.
 
 That plumbing lives here so each model only implements what actually differs:
 its ``forward`` (pooling vs classification), ``get_embedding_dim`` and any extra
@@ -101,7 +101,6 @@ class XlmRobertaEncoder(abc.ABC):
         if vllm_config is not None:
             self.vllm_config = vllm_config
 
-        self.pooler = None
         self._is_initialized = False
         self.model_args = None
         self.model = None
@@ -190,10 +189,6 @@ class XlmRobertaEncoder(abc.ABC):
 
     def get_max_batch_size(self) -> int:
         return self.max_batch_size
-
-    def _init_pooler(self, vllm_config, prefix: str = "") -> None:
-        del vllm_config, prefix
-        self.pooler = None
 
     # ---- shared encoder execution (uses self.model / self.device) ----
     def _run_encoder_chunk(self, padded_inputs: dict[str, Optional[torch.Tensor]]) -> ttnn.Tensor:
