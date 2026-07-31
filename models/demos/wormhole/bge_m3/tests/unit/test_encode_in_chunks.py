@@ -36,11 +36,23 @@ class _Tokenizer:
     pad_token_id = 0
 
 
+class _ConcreteEncoder(XlmRobertaEncoder):
+    """Concrete subclass implementing the base's abstract primitives so the
+    shared encode plumbing can be instantiated in tests. _process_chunk keeps the
+    base default (raw last hidden); only forward/get_embedding_dim are stubbed."""
+
+    def forward(self, input_ids, *args, **kwargs):  # pragma: no cover - not exercised
+        raise NotImplementedError
+
+    def get_embedding_dim(self) -> int:
+        return 1
+
+
 def _bare_encoder(device=None):
-    """An XlmRobertaEncoder instance wired just enough for the encode methods,
+    """A concrete-encoder instance wired just enough for the encode methods,
     without constructing a device model (only self.tokenizer/self.device/self.model
     are touched by _encode_in_chunks / _encode_to_last_hidden)."""
-    enc = XlmRobertaEncoder.__new__(XlmRobertaEncoder)
+    enc = _ConcreteEncoder.__new__(_ConcreteEncoder)
     enc.tokenizer = _Tokenizer()
     enc.device = device
     enc.model = object()
@@ -52,7 +64,7 @@ def _record_chunks(input_ids, **kwargs):
     chunk shapes (the template-method primitive subclasses override)."""
     calls = []
 
-    class _Recorder(XlmRobertaEncoder):
+    class _Recorder(_ConcreteEncoder):
         def _process_chunk(self, padded_inputs, chunk_batch_size):
             calls.append((tuple(padded_inputs["input_ids"].shape), chunk_batch_size))
             return padded_inputs["input_ids"]
@@ -110,7 +122,7 @@ def test_encode_in_chunks_calls_process_chunk_override():
     self._process_chunk primitive, not a passed-in callback."""
     seen = []
 
-    class _Sub(XlmRobertaEncoder):
+    class _Sub(_ConcreteEncoder):
         def _process_chunk(self, padded_inputs, chunk_batch_size):
             seen.append(chunk_batch_size)
             return chunk_batch_size

@@ -20,6 +20,7 @@ location if a third XLM-RoBERTa encoder model appears.
 
 from __future__ import annotations
 
+import abc
 from typing import Iterator, Optional
 
 import torch
@@ -30,7 +31,7 @@ from models.demos.wormhole.bge_m3.tt.common import create_tt_model
 from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_length
 
 
-class XlmRobertaEncoder:
+class XlmRobertaEncoder(abc.ABC):
     """Common vLLM plumbing for TT XLM-RoBERTa encoder models.
 
     Execution is currently single-device: ``mesh_device`` is accepted for API
@@ -41,6 +42,19 @@ class XlmRobertaEncoder:
     TODO(data-parallel): add a real multi-device execution path and lift the
     ``tt_data_parallel > 1`` guard in __init__ once it is implemented and tested.
     """
+
+    # ---- pure-virtual model interface (subclasses must implement) ----
+    @abc.abstractmethod
+    def forward(self, input_ids: torch.Tensor, *args, **kwargs):
+        """Run the model on a tokenized request and return its output.
+
+        The two subclasses differ here: the bge-m3 wrapper pools into an
+        embedding dict, the reranker cross-encoder returns relevance logits.
+        """
+
+    @abc.abstractmethod
+    def get_embedding_dim(self) -> int:
+        """Output width vLLM should expect from ``forward``."""
 
     def __init__(
         self,
@@ -136,6 +150,9 @@ class XlmRobertaEncoder:
 
     def _post_initialize(self) -> None:
         """Hook run after the encoder is built (e.g. to build a classifier head)."""
+        # Optional hook: no-op by default (an overridable "do nothing", not an
+        # abstract method -- bge-m3 deliberately does not override it).
+        return None
 
     def _initialize_model(self) -> None:
         if self._is_initialized and self.model is not None:
