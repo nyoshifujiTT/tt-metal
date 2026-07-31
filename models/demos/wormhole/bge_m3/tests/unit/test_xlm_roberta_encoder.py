@@ -67,6 +67,18 @@ def test_device_resolved_from_vllm_config():
     assert m.device is dev
 
 
+def test_data_parallel_gt_one_is_rejected():
+    # Execution is single-device only; a data-parallel request must fail loudly
+    # instead of silently running on one device.
+    with pytest.raises(NotImplementedError):
+        XlmRobertaEncoder(device=object(), tt_data_parallel=2)
+
+
+def test_data_parallel_one_is_accepted():
+    m = XlmRobertaEncoder(device=object(), tt_data_parallel=1)
+    assert m.tt_data_parallel == 1
+
+
 def test_validate_request_bounds():
     m = XlmRobertaEncoder(device=object(), max_batch_size=4, max_seq_len=128)
     m._validate_request(4, 128)  # ok at the boundary

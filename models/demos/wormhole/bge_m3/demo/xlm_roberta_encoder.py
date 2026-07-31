@@ -31,7 +31,16 @@ from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_len
 
 
 class XlmRobertaEncoder:
-    """Common vLLM plumbing for TT XLM-RoBERTa encoder models (single device)."""
+    """Common vLLM plumbing for TT XLM-RoBERTa encoder models.
+
+    Execution is currently single-device: ``mesh_device`` is accepted for API
+    compatibility, but the encoder builds and runs exactly one model on one
+    device and has no data-parallel execution path. ``tt_data_parallel > 1`` is
+    therefore rejected rather than silently ignored.
+
+    TODO(data-parallel): add a real multi-device execution path and lift the
+    ``tt_data_parallel > 1`` guard in __init__ once it is implemented and tested.
+    """
 
     def __init__(
         self,
@@ -47,6 +56,14 @@ class XlmRobertaEncoder:
     ):
         del prefix, kwargs
 
+        # Execution is single-device only (see class docstring). Reject a
+        # data-parallel request instead of silently running single-device.
+        if tt_data_parallel != 1:
+            raise NotImplementedError(
+                f"{type(self).__name__} only supports single-device execution "
+                f"(tt_data_parallel=1); got tt_data_parallel={tt_data_parallel}"
+            )
+
         if vllm_config is not None and device is None:
             device = vllm_config.device_config.device
         if device is None:
@@ -55,7 +72,8 @@ class XlmRobertaEncoder:
         self.device = device
         self.max_batch_size = max_batch_size
         self.max_seq_len = max_seq_len
-        # Accepted for API compatibility; execution stays single-device.
+        # Accepted for API compatibility; execution stays single-device (values
+        # other than 1 are rejected above).
         self.tt_data_parallel = tt_data_parallel
         self.dtype = dtype
         self.model_name = model_name
@@ -383,4 +401,3 @@ def _pad_chunk_inputs(
         if position_ids is not None
         else None,
     }
-
