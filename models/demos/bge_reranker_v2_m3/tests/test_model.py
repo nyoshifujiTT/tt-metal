@@ -16,7 +16,6 @@ from models.demos.wormhole.bge_m3.tt.common import create_tt_model
 from models.demos.wormhole.bge_m3.tests.test_utils import require_single_device
 from models.demos.bge_reranker_v2_m3.demo.generator_vllm import BgeRerankerV2M3
 from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import XLMRobertaClassificationHead
-from models.demos.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict
 
 MODEL_ID = "BAAI/bge-reranker-v2-m3"
 BATCH_SIZE = 1
