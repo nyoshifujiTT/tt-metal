@@ -6,10 +6,10 @@
 ``XlmRobertaEncoder._encode_in_chunks`` owns the device pad/chunk contract used
 by both the bge-m3 embedding wrapper and the bge-reranker cross-encoder. It never
 touches ttnn (it only pads torch tensors and calls the overridable
-``self._process_chunk`` primitive), so it can be validated on CPU.
+``self._forward_chunk`` primitive), so it can be validated on CPU.
 ``_encode_to_last_hidden`` is the thin last-hidden wrapper used by the reranker;
 it runs the encoder chunk on self.model/self.device via the default
-``_process_chunk``.
+``_forward_chunk``.
 
 Verifies:
 - sequence length is padded to the expected 128/256/1024/2048/8192 bucket,
@@ -38,7 +38,7 @@ class _Tokenizer:
 
 class _ConcreteEncoder(XlmRobertaEncoder):
     """Concrete subclass implementing the base's abstract primitives so the
-    shared encode plumbing can be instantiated in tests. _process_chunk keeps the
+    shared encode plumbing can be instantiated in tests. _forward_chunk keeps the
     base default (raw last hidden); only forward/get_embedding_dim are stubbed."""
 
     def forward(self, input_ids, *args, **kwargs):  # pragma: no cover - not exercised
@@ -60,12 +60,12 @@ def _bare_encoder(device=None):
 
 
 def _record_chunks(input_ids, **kwargs):
-    """Runs _encode_in_chunks with a _process_chunk override that records padded
+    """Runs _encode_in_chunks with a _forward_chunk override that records padded
     chunk shapes (the template-method primitive subclasses override)."""
     calls = []
 
     class _Recorder(_ConcreteEncoder):
-        def _process_chunk(self, padded_inputs, chunk_batch_size):
+        def _forward_chunk(self, padded_inputs, chunk_batch_size):
             calls.append((tuple(padded_inputs["input_ids"].shape), chunk_batch_size))
             return padded_inputs["input_ids"]
 
@@ -117,13 +117,13 @@ def test_batch_one_no_padding():
     assert calls[0][0][0] == 1  # B=1 runs a single row, no batch padding
 
 
-def test_encode_in_chunks_calls_process_chunk_override():
+def test_encode_in_chunks_calls_forward_chunk_override():
     """_encode_in_chunks is a template method: it invokes the overridable
-    self._process_chunk primitive, not a passed-in callback."""
+    self._forward_chunk primitive, not a passed-in callback."""
     seen = []
 
     class _Sub(_ConcreteEncoder):
-        def _process_chunk(self, padded_inputs, chunk_batch_size):
+        def _forward_chunk(self, padded_inputs, chunk_batch_size):
             seen.append(chunk_batch_size)
             return chunk_batch_size
 

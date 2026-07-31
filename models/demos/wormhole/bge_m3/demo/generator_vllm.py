@@ -69,7 +69,7 @@ class BgeM3ForEmbedding(XlmRobertaEncoder):
         self.data_parallel = None
         self.submeshes = None
 
-    def _process_chunk(
+    def _forward_chunk(
         self,
         padded_inputs: dict[str, Optional[torch.Tensor]],
         chunk_batch_size: int,

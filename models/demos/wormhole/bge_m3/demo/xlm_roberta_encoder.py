@@ -220,13 +220,13 @@ class XlmRobertaEncoder(abc.ABC):
         position_ids: Optional[torch.Tensor] = None,
     ):
         """Drives the device pad/chunk contract, delegating each chunk to
-        ``self._process_chunk``.
+        ``self._forward_chunk``.
 
         Template method shared by both consumers of the XLM-RoBERTa encoder
         (bge-m3 embedding pooling and the bge-reranker cross-encoder). It slices
         the request into device-sized chunks, pads each to the fixed
         (padded_batch_size, padded_seq_len) device shape, and calls the
-        overridable primitive ``self._process_chunk(padded_inputs,
+        overridable primitive ``self._forward_chunk(padded_inputs,
         chunk_batch_size)`` for every chunk. The per-chunk results are returned as
         a list in request order; the caller combines them (dict concat for
         bge-m3, tensor concat for the reranker).
@@ -247,10 +247,10 @@ class XlmRobertaEncoder(abc.ABC):
                 padded_batch_size=target_padded_batch_size,
                 pad_token_id=pad_token_id,
             )
-            chunk_outputs.append(self._process_chunk(padded_inputs, end - start))
+            chunk_outputs.append(self._forward_chunk(padded_inputs, end - start))
         return chunk_outputs
 
-    def _process_chunk(self, padded_inputs: dict[str, Optional[torch.Tensor]], chunk_batch_size: int):
+    def _forward_chunk(self, padded_inputs: dict[str, Optional[torch.Tensor]], chunk_batch_size: int):
         """Per-chunk primitive of the ``_encode_in_chunks`` template method.
 
         Overridable step that turns one already-padded device chunk into this
@@ -275,8 +275,8 @@ class XlmRobertaEncoder(abc.ABC):
 
         Thin wrapper over ``_encode_in_chunks`` for consumers (e.g. the
         bge-reranker cross-encoder) that want the raw encoder output on host
-        rather than a pooled embedding. Relies on the default ``_process_chunk``
-        (raw last hidden); models that override ``_process_chunk`` for pooling
+        rather than a pooled embedding. Relies on the default ``_forward_chunk``
+        (raw last hidden); models that override ``_forward_chunk`` for pooling
         (bge-m3) do not use this path.
         """
         chunks = self._encode_in_chunks(input_ids, attention_mask=attention_mask)
