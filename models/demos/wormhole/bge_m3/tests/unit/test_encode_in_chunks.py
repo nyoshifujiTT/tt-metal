@@ -5,9 +5,11 @@
 
 ``XlmRobertaEncoder._encode_in_chunks`` owns the device pad/chunk contract used
 by both the bge-m3 embedding wrapper and the bge-reranker cross-encoder. It never
-touches ttnn (it only pads torch tensors and calls back a per-chunk callable), so
-it can be validated on CPU. ``_encode_to_last_hidden`` is the thin last-hidden
-wrapper used by the reranker; it runs the encoder chunk on self.model/self.device.
+touches ttnn (it only pads torch tensors and calls the overridable
+``self._process_chunk`` primitive), so it can be validated on CPU.
+``_encode_to_last_hidden`` is the thin last-hidden wrapper used by the reranker;
+it runs the encoder chunk on self.model/self.device via the default
+``_process_chunk``.
 
 Verifies:
 - sequence length is padded to the expected 128/256/1024/2048/8192 bucket,
@@ -46,14 +48,20 @@ def _bare_encoder(device=None):
 
 
 def _record_chunks(input_ids, **kwargs):
-    """Runs _encode_in_chunks with a callback that records padded chunk shapes."""
+    """Runs _encode_in_chunks with a _process_chunk override that records padded
+    chunk shapes (the template-method primitive subclasses override)."""
     calls = []
 
-    def process_chunk(padded_inputs, chunk_batch_size):
-        calls.append((tuple(padded_inputs["input_ids"].shape), chunk_batch_size))
-        return padded_inputs["input_ids"]
+    class _Recorder(XlmRobertaEncoder):
+        def _process_chunk(self, padded_inputs, chunk_batch_size):
+            calls.append((tuple(padded_inputs["input_ids"].shape), chunk_batch_size))
+            return padded_inputs["input_ids"]
 
-    _bare_encoder()._encode_in_chunks(input_ids, process_chunk, **kwargs)
+    enc = _Recorder.__new__(_Recorder)
+    enc.tokenizer = _Tokenizer()
+    enc.device = None
+    enc.model = object()
+    enc._encode_in_chunks(input_ids, **kwargs)
     return calls
 
 
@@ -95,6 +103,26 @@ def test_batch_one_no_padding():
     calls = _record_chunks(ids)
     assert len(calls) == 1
     assert calls[0][0][0] == 1  # B=1 runs a single row, no batch padding
+
+
+def test_encode_in_chunks_calls_process_chunk_override():
+    """_encode_in_chunks is a template method: it invokes the overridable
+    self._process_chunk primitive, not a passed-in callback."""
+    seen = []
+
+    class _Sub(XlmRobertaEncoder):
+        def _process_chunk(self, padded_inputs, chunk_batch_size):
+            seen.append(chunk_batch_size)
+            return chunk_batch_size
+
+    enc = _Sub.__new__(_Sub)
+    enc.tokenizer = _Tokenizer()
+    enc.device = None
+    enc.model = object()
+    ids = torch.randint(1, 50, (20, 8000), dtype=torch.long)  # 2 chunks of 16
+    out = enc._encode_in_chunks(ids)
+    assert out == [16, 4]  # per-chunk real batch sizes, in request order
+    assert seen == [16, 4]
 
 
 def test_encode_to_last_hidden_slices_and_uses_self(monkeypatch):

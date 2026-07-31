@@ -69,13 +69,15 @@ class BgeM3ForEmbedding(XlmRobertaEncoder):
         self.data_parallel = None
         self.submeshes = None
 
-    def _forward_chunk(
+    def _process_chunk(
         self,
         padded_inputs: dict[str, Optional[torch.Tensor]],
         chunk_batch_size: int,
     ) -> dict[str, torch.Tensor]:
-        # Runs the shared encoder chunk, then applies the bge-m3 embedding pooling
-        # heads on device. Used as the per-chunk callback of self._encode_in_chunks().
+        # Overrides the base _encode_in_chunks per-chunk primitive: runs the
+        # shared encoder chunk, then applies the bge-m3 embedding pooling heads on
+        # device and returns the per-chunk embedding dict (instead of the base's
+        # raw last-hidden tensor).
         input_ids = padded_inputs["input_ids"]
         attention_mask = padded_inputs["attention_mask"]
         output = self._run_encoder_chunk(padded_inputs)
@@ -235,7 +237,6 @@ class BgeM3ForEmbedding(XlmRobertaEncoder):
 
         chunk_outputs = self._encode_in_chunks(
             input_ids,
-            self._forward_chunk,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
             position_ids=position_ids,
