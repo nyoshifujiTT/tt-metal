@@ -508,10 +508,19 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         """Run the prefill body for a prepared trace variant.
 
         Shared verbatim by the compile pass and the capture pass so the two can never drift.
+
+        ``prepared["embed_terminal"]``, when set, is a callable taking the raw
+        prefill hidden states and returning the finished per-request embedding. It
+        is applied here, i.e. inside the traced body, so the whole embedding tail
+        (last-token slice + final norm + L2 normalize) is captured and one
+        execute_trace replays the entire embedding in a single device dispatch.
+        Running it here rather than at the capture site also keeps the compile pass
+        and the capture pass over the identical op set, which is the invariant this
+        method exists to guarantee.
         """
         model_id = prepared["model_id"]
         transformed_inputs = self.model[model_id].transform_and_embed_prefill_inputs_device(*device_inputs)
-        return self.model[model_id].ttnn_prefill_forward(
+        tt_out = self.model[model_id].ttnn_prefill_forward(
             x=transformed_inputs[0],
             rot_mats_global=prepared["rot_mats_global"],
             rot_mats_local=prepared["rot_mats_local"],
@@ -521,6 +530,10 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
             kv_cache=prepared["kv_cache"],
             **prepared["forward_kwargs"],
         )
+        embed_terminal = prepared.get("embed_terminal")
+        if embed_terminal is not None:
+            tt_out = embed_terminal(self.model[model_id], tt_out)
+        return tt_out
 
     def _prepare_trace_prefill(
         self,
@@ -533,6 +546,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         batch_size=1,
         user_id=0,
         start_pos=0,
+        embed_terminal=None,
     ):
         """Phase 1 of prefill trace setup: run the compile pass and allocate the persistent trace inputs.
 
@@ -556,10 +570,15 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
             prefill_kwargs["global_user_id"] = global_user_id
 
         host_inputs = self.model[model_id].prepare_prefill_inputs_trace(prefill_ids, **prefill_kwargs)
+        assert (
+            embed_terminal is None or batch_size == 1
+        ), "embed_terminal is only supported for single-user prefill"
         prepared = {
             "model_id": model_id,
             "kv_cache": kv_cache,
             "forward_kwargs": forward_kwargs,
+            # Applied inside the traced body; see _prefill_trace_forward.
+            "embed_terminal": embed_terminal,
             # These matrices will actually be pointing to the whole cos_matrix and sin_matrix that was allocated on device in the RotarySetup class
             "rot_mats_global": host_inputs[1],
             "rot_mats_local": host_inputs[2],
@@ -717,11 +736,16 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         prefill_seq_len=None,
         batch_size=1,
         num_cached_tokens=0,
+        embed_terminal=None,
         **kwargs,
     ):
         global_user_id = kwargs.get("global_user_id", None)
         use_start_pos = "sp1" if num_cached_tokens > 0 else "sp0"
-        trace_key = f"{prefill_seq_len}_{model_id}_{batch_size}_{use_start_pos}"
+        # Distinct trace_key for the single-trace embedding variant: it captures a
+        # different op set (forward + tail) than the plain forward trace, so the two
+        # must not share a cache entry.
+        embed_tag = "_embed" if embed_terminal is not None else ""
+        trace_key = f"{prefill_seq_len}_{model_id}_{batch_size}_{use_start_pos}{embed_tag}"
 
         use_prefix_caching = num_cached_tokens > 0
         chunk_start_idx = num_cached_tokens
@@ -758,6 +782,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                 batch_size=batch_size,
                 user_id=user_id,
                 start_pos=chunk_start_idx,
+                embed_terminal=embed_terminal,
             )
 
             trace_id, tt_out_trace, *device_inputs = self._record_trace_prefill(prepared)
@@ -854,6 +879,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         start_pos: list[int] = None,  # Cached prefixes lengths
         return_hidden_states=False,
         return_full_hidden_states=False,
+        embed_single_trace=False,
         warmup_prefill=True,
         **kwargs,
     ):
@@ -1176,6 +1202,18 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                 )
 
             if enable_trace_current_prompt:
+                embed_terminal = None
+                if embed_single_trace and not use_batched_prefill:
+                    # Fold the embedding tail (last-token slice + final norm + L2
+                    # normalize) into the prefill trace so execute_trace replays the
+                    # whole embedding in one device dispatch. last_token_idx is fixed
+                    # for this (prefill_seq_len) trace, so it is baked into the slice.
+                    _lti = last_token_idx
+
+                    def embed_terminal(model, hidden):
+                        normed = model.process_hidden_states_after_prefill_trace(hidden, _lti)
+                        return model.l2_normalize_hidden(normed)
+
                 logits = self._easy_trace_prefill(
                     prefill_ids,
                     page_table=page_table_user,
@@ -1187,6 +1225,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     prefill_seq_len=prefill_seq_len,
                     batch_size=padded_batch if use_batched_prefill else 1,
                     num_cached_tokens=0 if use_batched_prefill else num_cached_tokens,
+                    embed_terminal=embed_terminal,
                     **local_kwargs,
                 )
             else:
@@ -1330,6 +1369,21 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     last_token_idx_for_trace = last_token_idx - num_cached_tokens
 
                 if return_hidden_states:
+                    if embed_single_trace:
+                        # The trace already applied slice + final norm + L2 normalize
+                        # in-device; ``logits`` is the finished, normalized embedding
+                        # block. Do NOT re-run the tail -- just carry it to host.
+                        prefill_results.append(
+                            {
+                                "idx": idx,
+                                "model_id": model_id,
+                                "last_token_idx": last_token_idx,
+                                "hidden_states": logits.cpu(blocking=False),
+                                "embed_single_trace": True,
+                                "seq_len": seq_len,
+                            }
+                        )
+                        continue
                     if return_full_hidden_states:
                         hidden_states = self.model[model_id].process_full_hidden_states_after_prefill_trace(logits)
                     else:

@@ -268,6 +268,7 @@ class Qwen3ForEmbedding:
         token_type_ids: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         return_full_hidden_states: bool = False,
+        embed_single_trace: bool = False,
     ) -> torch.Tensor:
         """
         Forward pass for embedding generation (prefill-only).
@@ -392,6 +393,7 @@ class Qwen3ForEmbedding:
             enable_trace=True,  # Explicitly enable trace for best performance
             return_hidden_states=True,  # Return hidden states before LM head, not logits
             return_full_hidden_states=return_full_hidden_states,
+            embed_single_trace=embed_single_trace,
         )
 
         if return_full_hidden_states:
@@ -401,6 +403,15 @@ class Qwen3ForEmbedding:
             # concatenated on the token axis in request order.
             per_user = [h for h in hidden_states if h is not None]
             return torch.cat(per_user, dim=0)
+
+        if embed_single_trace:
+            # prefill_forward_text folded slice + final norm + L2 normalize into the
+            # prefill trace, so hidden_states is already the finished, normalized
+            # embedding [batch, dim]. Return it as-is (no host pooling / normalize).
+            embeddings = hidden_states
+            if embeddings.dim() == 1:
+                embeddings = embeddings.unsqueeze(0)
+            return embeddings
 
         # hidden_states shape: [batch_size, hidden_size]
         # This is the last token's hidden state after layer norm, before LM head
