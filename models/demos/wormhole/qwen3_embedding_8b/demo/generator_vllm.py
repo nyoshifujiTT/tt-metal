@@ -267,6 +267,7 @@ class Qwen3ForEmbedding:
         attention_mask: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
+        return_full_hidden_states: bool = False,
     ) -> torch.Tensor:
         """
         Forward pass for embedding generation (prefill-only).
@@ -283,8 +284,17 @@ class Qwen3ForEmbedding:
             token_type_ids: Optional token type IDs tensor (not used for Qwen3)
             position_ids: Optional position IDs tensor
 
+        Args (cont.):
+            return_full_hidden_states: when True, return the per-token hidden
+                states ``[total_tokens, hidden]`` (final norm applied, no last-token
+                slice) instead of the pooled ``[batch, hidden]``. This is the flat
+                layout the upstream-conforming vLLM pooling runner feeds to the
+                model's ``Pooler``; the default (False) keeps the legacy pooled
+                output for the plain-vLLM / demo path.
+
         Returns:
-            Embeddings tensor of shape (batch_size, embedding_dim)
+            Embeddings tensor of shape (batch_size, embedding_dim), or -- when
+            ``return_full_hidden_states`` -- the per-token ``[total_tokens, hidden]``.
         """
         batch_size, seq_len = input_ids.shape
         logger.debug(f"Qwen3-Embedding forward: processing batch_size={batch_size}, seq_len={seq_len}")
@@ -381,7 +391,16 @@ class Qwen3ForEmbedding:
             prompt_lens=[original_seq_len] * batch_size,  # Use original_seq_len, not padded seq_len!
             enable_trace=True,  # Explicitly enable trace for best performance
             return_hidden_states=True,  # Return hidden states before LM head, not logits
+            return_full_hidden_states=return_full_hidden_states,
         )
+
+        if return_full_hidden_states:
+            # prefill_forward_text returned a per-user list of [seq_i, hidden]
+            # tensors (final norm applied, no last-token slice). For the flat
+            # pooling contract every scheduled request's real tokens are
+            # concatenated on the token axis in request order.
+            per_user = [h for h in hidden_states if h is not None]
+            return torch.cat(per_user, dim=0)
 
         # hidden_states shape: [batch_size, hidden_size]
         # This is the last token's hidden state after layer norm, before LM head
