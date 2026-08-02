@@ -46,6 +46,39 @@ def test_vllm_interface_methods_present():
         assert hasattr(BgeRerankerV2M3, name)
 
 
+def test_initialize_vllm_model_uses_served_checkpoint_path(monkeypatch):
+    # vLLM points the model at a resolved checkpoint (hf_config._name_or_path);
+    # the reranker must load weights from there, not the hardcoded HF id, so the
+    # seq-classification loader works from a local dir / offline.
+    captured = {}
+
+    class _StubBase:
+        @classmethod
+        def initialize_vllm_model(cls, hf_config, *args, **kwargs):
+            captured["model_name"] = kwargs.get("model_name")
+            return "stub-model"
+
+    # Patch the base initialize_vllm_model that BgeRerankerV2M3 delegates to via
+    # super(); use the MRO parent (XlmRobertaEncoder).
+    monkeypatch.setattr(
+        gen_mod.XlmRobertaEncoder,
+        "initialize_vllm_model",
+        _StubBase.initialize_vllm_model,
+    )
+
+    class _HfCfg:
+        _name_or_path = "/weights/bge-reranker-v2-m3"
+
+    out = BgeRerankerV2M3.initialize_vllm_model(_HfCfg(), object(), 32)
+    assert out == "stub-model"
+    assert captured["model_name"] == "/weights/bge-reranker-v2-m3"
+
+    # An explicit model_name wins over the checkpoint path.
+    captured.clear()
+    BgeRerankerV2M3.initialize_vllm_model(_HfCfg(), object(), 32, model_name="explicit")
+    assert captured["model_name"] == "explicit"
+
+
 class _StubTokenizer:
     pad_token_id = 1
 

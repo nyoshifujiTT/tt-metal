@@ -89,6 +89,22 @@ class BgeRerankerV2M3(XlmRobertaEncoder):
     def _load_state_dict(self):
         return load_reranker_state_dict(self.model_name)
 
+    @classmethod
+    def initialize_vllm_model(cls, hf_config, *args, **kwargs):
+        """Load classifier weights from the checkpoint vLLM was pointed at.
+
+        The shared base does not thread the served model path into the wrapper,
+        so ``model_name`` would otherwise stay the class-default HF id and the
+        seq-classification loader (``from_pretrained(model_name)``) would try to
+        fetch from the Hub. vLLM passes the resolved checkpoint location in
+        ``hf_config._name_or_path`` (a local dir or an HF id), so use it as
+        ``model_name`` unless the caller set one explicitly.
+        """
+        name_or_path = getattr(hf_config, "_name_or_path", None)
+        if name_or_path and "model_name" not in kwargs:
+            kwargs["model_name"] = name_or_path
+        return super().initialize_vllm_model(hf_config, *args, **kwargs)
+
     def _post_initialize(self) -> None:
         # Device (ttnn) head: CLS extraction + dense->tanh->out_proj run on
         # device in fp32, so the reranker score is computed end-to-end on device.
