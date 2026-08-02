@@ -40,47 +40,34 @@ class _StubTokenizer:
     pad_token_id = 1
 
 
-class _IdentityHead:
-    """Returns the first hidden dim as the logit so forward output is checkable."""
-
-    def __call__(self, cls_hidden):
-        return cls_hidden[:, :1]
-
-
-def test_forward_extracts_cls_and_returns_logits(monkeypatch):
-    # Device-free: stub the shared _encode_to_last_hidden to return a known
-    # [B,S,D] tensor and verify forward() takes the CLS (position 0) hidden and
-    # runs the classifier, returning one logit per input row [B,1].
+def test_forward_concatenates_per_chunk_logits(monkeypatch):
+    # Device-free: forward() now delegates the encoder + device CLS/head to the
+    # shared _encode_in_chunks template (which calls _forward_chunk per chunk and
+    # returns a [chunk, 1] logit per chunk). Stub _encode_in_chunks to return
+    # known per-chunk logits and verify forward() concatenates them into [B, 1].
     model = BgeRerankerV2M3.__new__(BgeRerankerV2M3)
     model.max_batch_size = 32
     model.max_seq_len = 8192
     model.tokenizer = _StubTokenizer()
-    model.classifier = _IdentityHead()
     model._is_initialized = True
     model.model = object()
     model.device = object()
 
-    batch, seq, hidden = 3, 7, 4
-    fake_hidden = torch.zeros(batch, seq, hidden)
-    for r in range(batch):
-        fake_hidden[r, 0, 0] = r + 1  # CLS marker at position 0
-        fake_hidden[r, 1, 0] = -99  # non-CLS position, must be ignored
-
     seen = {}
+    per_chunk = [torch.tensor([[1.0], [2.0]]), torch.tensor([[3.0]])]
 
-    def fake_encode(self, input_ids, attention_mask=None):
-        # Bound method: records that forward() delegated to the instance.
+    def fake_encode_in_chunks(self, input_ids, attention_mask=None):
         seen["self"] = self
-        return fake_hidden
+        return per_chunk
 
-    monkeypatch.setattr(BgeRerankerV2M3, "_encode_to_last_hidden", fake_encode)
+    monkeypatch.setattr(BgeRerankerV2M3, "_encode_in_chunks", fake_encode_in_chunks)
     monkeypatch.setattr(gen_mod, "get_padded_sequence_length", lambda s: s)
 
-    input_ids = torch.ones(batch, seq, dtype=torch.long)
+    input_ids = torch.ones(3, 7, dtype=torch.long)
     out = model.forward(input_ids=input_ids)
 
-    assert out.shape == (batch, 1)
-    # identity head returns CLS[:, :1] => [1, 2, 3]
+    # Concatenated per-chunk logits: [[1],[2]] + [[3]] -> [B=3, 1].
+    assert out.shape == (3, 1)
     torch.testing.assert_close(out.view(-1), torch.tensor([1.0, 2.0, 3.0]))
-    # forward() must delegate to the instance's shared encoder entry point.
+    # forward() must delegate to the instance's shared chunking entry point.
     assert seen["self"] is model

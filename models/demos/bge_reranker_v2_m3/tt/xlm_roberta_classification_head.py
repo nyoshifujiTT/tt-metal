@@ -7,8 +7,14 @@ Reproduces the transformers ``XLMRobertaClassificationHead`` (identical to
 ``RobertaClassificationHead``): take the ``<s>`` (CLS) position, then
 dropout -> dense -> tanh -> dropout -> ``out_proj`` to ``num_labels`` logits.
 At inference dropout is the identity, so this reduces to dense -> tanh ->
-out_proj. The head is tiny (e.g. 1024x1024 + N x1024) and is evaluated on host
-in fp32 so the score matches the Hugging Face reference exactly.
+out_proj. The head is tiny (e.g. 1024x1024 + N x1024) and runs on host in fp32.
+
+At runtime the reranker scores on device via
+``xlm_roberta_classification_head_tt.XLMRobertaClassificationHeadTT``. This host
+fp32 head is retained as (1) the numerical reference the device head is checked
+against (see ``test_xlm_roberta_classification_head_tt``), and (2) the owner of
+``CLASSIFIER_KEYS`` / ``from_state_dict``, which validate that a checkpoint
+carries the classification head (used by the weight-loader test).
 
 Reference (transformers, pinned to tag v4.44.2 =
 commit 174890280b340b89c5bfa092f6b4fb0e2dc2d7fc):
