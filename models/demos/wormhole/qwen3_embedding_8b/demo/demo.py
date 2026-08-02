@@ -90,6 +90,26 @@ def _tt_embedding(generator_model: Qwen3ForEmbedding, tokenizer, prompt: str) ->
     return F.normalize(tt_hidden, p=2, dim=1)
 
 
+def _tt_embedding_from_full_hidden(generator_model: Qwen3ForEmbedding, tokenizer, prompt: str) -> torch.Tensor:
+    """TT device path via the FLAT per-token contract.
+
+    Requests ``return_full_hidden_states=True`` (the layout the vLLM pooling
+    runner feeds to ``model.pooler``), then does host-side LAST pooling + L2
+    normalize -- exactly what the standard vLLM embed Pooler does. Must match the
+    pooled last-token path bit-for-bit, proving the flat forward preserves the
+    embedding numerics.
+    """
+    batch = tokenizer([prompt], padding=False, truncation=True, max_length=DEFAULT_SEQUENCE_LENGTH, return_tensors="pt")
+    full_hidden = generator_model.forward(
+        input_ids=batch["input_ids"],
+        attention_mask=batch["attention_mask"],
+        return_full_hidden_states=True,
+    ).to(torch.float32)
+    # full_hidden: [total_tokens, hidden]; LAST pooling picks the final token.
+    last_token = full_hidden[-1:, :]
+    return F.normalize(last_token, p=2, dim=1)
+
+
 def run_qwen3_embedding_demo(device, prompts, model_name, sequence_length, model_location_generator):
     _require_single_device(device)
     resolved_model_name = _resolve_model_name(model_name, model_location_generator)
@@ -132,3 +152,33 @@ def run_qwen3_embedding_demo(device, prompts, model_name, sequence_length, model
 @pytest.mark.parametrize("model_name, sequence_length", [(DEFAULT_MODEL_NAME, DEFAULT_SEQUENCE_LENGTH)])
 def test_qwen3_embedding_demo(device, model_name, sequence_length, model_location_generator):
     run_qwen3_embedding_demo(device, prompts, model_name, sequence_length, model_location_generator)
+
+
+def run_qwen3_embedding_flat_contract(device, prompts, model_name, sequence_length, model_location_generator):
+    """Verify the flat per-token forward (vLLM pooling contract) preserves numerics.
+
+    For each prompt the pooled last-token path and the flat-then-LAST-pool path
+    must produce the same L2-normalized embedding, and both must match the HF
+    reference. This guards the ``return_full_hidden_states`` layout the pooling
+    runner relies on against any last-token / norm regression.
+    """
+    _require_single_device(device)
+    resolved_model_name = _resolve_model_name(model_name, model_location_generator)
+    tokenizer = AutoTokenizer.from_pretrained(resolved_model_name, padding_side="left")
+    generator_model = Qwen3ForEmbedding(
+        device=device, max_batch_size=1, max_seq_len=sequence_length, model_name=resolved_model_name
+    )
+    for prompt in prompts:
+        pooled = _tt_embedding(generator_model, tokenizer, prompt)
+        flat = _tt_embedding_from_full_hidden(generator_model, tokenizer, prompt)
+        reference = _reference_embedding(resolved_model_name, tokenizer, prompt)
+        cos_pooled_flat = float(F.cosine_similarity(pooled, flat).mean())
+        cos_flat_hf = float(F.cosine_similarity(flat, reference).mean())
+        logger.info(f"flat-contract: cos(pooled, flat)={cos_pooled_flat:.6f} cos(flat, HF)={cos_flat_hf:.4f}")
+        assert cos_pooled_flat > 0.9999, f"flat forward diverged from pooled path (cos {cos_pooled_flat:.6f})"
+        assert cos_flat_hf > 0.95, f"flat embedding does not match HF (cos {cos_flat_hf:.4f})"
+
+
+@pytest.mark.parametrize("model_name, sequence_length", [(DEFAULT_MODEL_NAME, DEFAULT_SEQUENCE_LENGTH)])
+def test_qwen3_embedding_flat_contract(device, model_name, sequence_length, model_location_generator):
+    run_qwen3_embedding_flat_contract(device, prompts, model_name, sequence_length, model_location_generator)
