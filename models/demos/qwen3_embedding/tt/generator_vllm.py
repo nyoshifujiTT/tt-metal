@@ -45,6 +45,35 @@ class Qwen3EmbeddingForTTvLLM(Qwen3ForEmbedding):
     # enumerates the "embed" task only when it is truthy.
     is_pooling_model = True
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Give the model a real vLLM Pooler so the upstream-conforming pooling
+        # runner can delegate to ``model.pooler(hidden_states, pooling_metadata)``
+        # exactly as it does for every other vLLM pooling model
+        # (``VllmModelForPooling.pooler`` is a required, non-Optional member).
+        # The base wrapper leaves ``self.pooler = None`` because the *legacy* TT
+        # runner did the last-token slice + L2 normalize itself; the standard
+        # runner instead hands the flat per-token hidden to ``model.pooler``,
+        # which resolves LAST pooling + normalize from the served ``PoolerConfig``.
+        # All pooling directives therefore live in the Pooler layer, not here.
+        self.pooler = self._build_embed_pooler()
+
+    def _build_embed_pooler(self):
+        """Standard vLLM embed Pooler from the served config, or None off-vLLM.
+
+        Imported lazily so this adapter still imports in a plain-vLLM / metal-only
+        environment without ``vllm.model_executor.layers.pooler``; there the
+        pooler stays None (only the plugin pooling runner needs it).
+        """
+        vllm_config = getattr(self, "vllm_config", None)
+        if vllm_config is None:
+            return None
+        try:
+            from vllm.model_executor.layers.pooler import Pooler
+        except Exception:
+            return None
+        return Pooler.for_embed(vllm_config.model_config.pooler_config)
+
     # vLLM is_vllm_model introspection hook. The real embedding is produced on
     # the prefill path inside forward(); this only needs to exist.
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -58,5 +87,12 @@ class Qwen3EmbeddingForTTvLLM(Qwen3ForEmbedding):
     ) -> torch.Tensor:
         # positions is accepted only so vLLM's _check_vllm_model_forward
         # signature check passes; the pooling runner does not pass it and the base
-        # forward does not use it. All numerics stay in the base implementation.
-        return super().forward(input_ids, **kwargs)
+        # forward does not use it.
+        #
+        # Return the FLAT per-token hidden ``[total_tokens, hidden]`` (not the
+        # pooled last-token vector): the upstream-conforming pooling runner hands
+        # this whole tensor to ``model.pooler``, whose LastPool selects each
+        # request's final token and whose EmbeddingPoolerHead L2-normalizes. All
+        # embedding numerics stay in the base implementation; we only switch it to
+        # the flat layout the standard Pooler contract requires.
+        return super().forward(input_ids, return_full_hidden_states=True, **kwargs)
