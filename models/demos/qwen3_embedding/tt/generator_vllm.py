@@ -65,12 +65,25 @@ class Qwen3EmbeddingForTTvLLM(Qwen3ForEmbedding):
         environment without ``vllm.model_executor.layers.pooler``; there the
         pooler stays None (only the plugin pooling runner needs it).
         """
-        vllm_config = getattr(self, "vllm_config", None)
-        if vllm_config is None:
-            return None
+        # Prefer the vllm_config handed to the wrapper; fall back to vLLM's
+        # current-config context. The TT model loader calls initialize_vllm_model
+        # WITHOUT forwarding vllm_config, so self.vllm_config is usually unset even
+        # under vLLM -- but the engine has already installed the config in context
+        # (this is exactly how the standard Pooler heads read pooler_config), so
+        # get_current_vllm_config() resolves it. Only a true metal-only run (no
+        # vLLM in the process) leaves the pooler None.
         try:
+            from vllm.config import get_current_vllm_config
             from vllm.model_executor.layers.pooler import Pooler
         except Exception:
+            return None
+        vllm_config = getattr(self, "vllm_config", None)
+        if vllm_config is None:
+            try:
+                vllm_config = get_current_vllm_config()
+            except Exception:
+                return None
+        if vllm_config is None or vllm_config.model_config is None:
             return None
         return Pooler.for_embed(vllm_config.model_config.pooler_config)
 
