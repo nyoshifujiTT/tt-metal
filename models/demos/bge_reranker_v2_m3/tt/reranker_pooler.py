@@ -121,13 +121,19 @@ class RerankerClassifierPooler(_PoolerBase):
     scoring to it exactly like an upstream vLLM pooler: it advertises the
     ``classify`` / ``score`` tasks and turns encoder hidden states into one raw
     relevance logit per request, all on device.
+
+    The device classification head is built lazily by the model (in
+    ``_post_initialize``, on first forward), whereas the runner queries
+    ``get_supported_tasks`` right after load. So the pooler holds the model and
+    reads ``model.classifier`` / ``model.device`` at scoring time rather than
+    capturing them at construction: ``get_supported_tasks`` (static) works
+    before the head exists, and ``forward`` sees the head once it is built.
     """
 
-    def __init__(self, classifier, device):
+    def __init__(self, model):
         if _HAS_VLLM_POOLER:
             super().__init__()
-        self.classifier = classifier
-        self.device = device
+        self._model = model
 
     def get_supported_tasks(self):
         # Cross-encoder scoring: /score and /rerank both route through the
@@ -145,20 +151,22 @@ class RerankerClassifierPooler(_PoolerBase):
         ``[B, 1]`` logit is moved to host, returned as a per-request list (a
         valid ``PoolerOutput``).
         """
+        classifier = self._model.classifier
+        device = self._model.device
         if isinstance(hidden_states, RerankerChunkedHidden):
             per_chunk = []
             for output, attention_mask, chunk_batch_size in hidden_states.chunks:
                 b, s = attention_mask.shape
-                logits_tt = score_cls_on_device(output, self.classifier, b, s)
+                logits_tt = score_cls_on_device(output, classifier, b, s)
                 chunk_logits = to_torch_auto_compose(
-                    logits_tt, device=self.device
+                    logits_tt, device=device
                 ).to(torch.float32)
                 per_chunk.append(chunk_logits.reshape(-1, 1)[:chunk_batch_size])
             logits = torch.cat(per_chunk, dim=0)
         else:
-            logits_tt = score_cls_on_device(hidden_states, self.classifier)
+            logits_tt = score_cls_on_device(hidden_states, classifier)
             logits = (
-                to_torch_auto_compose(logits_tt, device=self.device)
+                to_torch_auto_compose(logits_tt, device=device)
                 .to(torch.float32)
                 .reshape(-1, 1)
             )

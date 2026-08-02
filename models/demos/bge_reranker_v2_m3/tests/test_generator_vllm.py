@@ -123,13 +123,28 @@ def test_forward_full_hidden_returns_chunked_device_hidden(monkeypatch):
     assert model._collect_hidden is False
 
 
-def test_post_initialize_sets_classifier_pooler(monkeypatch):
-    # model.pooler must be a TT-native ClassifierPooler advertising classify/
-    # score so the canonical runner can delegate scoring to it.
+def test_pooler_available_before_first_forward():
+    # The canonical runner queries model.pooler right after load, BEFORE the
+    # first forward builds the device head. So the pooler must exist from
+    # construction and advertise classify/score without a head.
+    model = BgeRerankerV2M3.__new__(BgeRerankerV2M3)
+    # Simulate the parts of __init__ that install the pooler (no device / super).
     from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import (
         RerankerClassifierPooler,
     )
 
+    model.classifier = None
+    model.pooler = RerankerClassifierPooler(model)
+    model._collect_hidden = False
+
+    assert isinstance(model.pooler, RerankerClassifierPooler)
+    # get_supported_tasks works with no head built yet (static classify/score).
+    assert model.pooler.get_supported_tasks() == {"classify", "score"}
+
+
+def test_post_initialize_builds_device_head(monkeypatch):
+    # _post_initialize builds the device classification head that the pooler
+    # reads lazily at scoring time.
     model = BgeRerankerV2M3.__new__(BgeRerankerV2M3)
     model.device = object()
     model.state_dict = {"unused": 0}
@@ -143,6 +158,4 @@ def test_post_initialize_sets_classifier_pooler(monkeypatch):
 
     model._post_initialize()
 
-    assert isinstance(model.pooler, RerankerClassifierPooler)
-    assert model.pooler.get_supported_tasks() == {"classify", "score"}
-    assert model._collect_hidden is False
+    assert model.classifier is sentinel_head

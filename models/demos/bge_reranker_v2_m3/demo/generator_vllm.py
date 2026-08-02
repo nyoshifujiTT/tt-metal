@@ -72,6 +72,16 @@ class BgeRerankerV2M3(XlmRobertaEncoder):
             **kwargs,
         )
         self.classifier = None
+        # The pooling runner queries model.pooler right after load (before the
+        # first forward that builds the device head), so install the pooler now;
+        # it reads self.classifier / self.device lazily at scoring time (the head
+        # is built in _post_initialize). Its get_supported_tasks (classify/score)
+        # is static and needs no head.
+        self.pooler = RerankerClassifierPooler(self)
+        # Per-call toggle for the two-track forward (see forward): False = score
+        # each chunk to a logit (fork path); True = keep the chunk's un-pooled
+        # ttnn hidden for model.pooler (canonical path). Reset in forward.
+        self._collect_hidden = False
 
     # Load encoder + classifier weights via the reranker seq-classification
     # loader, then hand the state_dict to the shared bge-m3 backbone (which skips
@@ -83,16 +93,10 @@ class BgeRerankerV2M3(XlmRobertaEncoder):
         # Device (ttnn) head: CLS extraction + dense->tanh->out_proj run on
         # device in fp32, so the reranker score is computed end-to-end on device.
         self.classifier = XLMRobertaClassificationHeadTT.from_state_dict(self.device, self.state_dict)
-        # Per-call toggle for the two-track forward: False = score each chunk to
-        # a logit (fork path); True = keep the chunk's un-pooled ttnn hidden for
-        # model.pooler (canonical path). Set/reset within forward.
-        self._collect_hidden = False
-        # Expose a TT-native ClassifierPooler as ``model.pooler`` so the
-        # canonical pooling runner can delegate scoring to it (upstream contract:
-        # every vLLM pooling model carries a pooler). It reuses the same device
-        # head, so the fork path (per-chunk logit) and the canonical path
-        # (runner -> model.pooler) score identically.
-        self.pooler = RerankerClassifierPooler(self.classifier, self.device)
+        # model.pooler was installed in __init__ (the runner queries it before
+        # the first forward); it reads this freshly-built classifier at scoring
+        # time, so both the fork path (per-chunk logit) and the canonical path
+        # (runner -> model.pooler) use the same device head and score identically.
 
     def _score_chunk_on_device(self, output: ttnn.Tensor, attention_mask: torch.Tensor) -> ttnn.Tensor:
         """Extract the ``<s>`` (CLS) hidden and run the device head on one chunk.
