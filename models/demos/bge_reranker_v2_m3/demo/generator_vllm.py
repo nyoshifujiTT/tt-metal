@@ -28,9 +28,9 @@ from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_len
 from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head_tt import (
     XLMRobertaClassificationHeadTT,
 )
+from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import score_cls_on_device
 from models.demos.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict
 from models.demos.wormhole.bge_m3.demo.xlm_roberta_encoder import XlmRobertaEncoder
-from models.demos.wormhole.bge_m3.demo.generator_vllm import _crop_hidden_state_ttnn
 
 
 class BgeRerankerV2M3(XlmRobertaEncoder):
@@ -89,16 +89,10 @@ class BgeRerankerV2M3(XlmRobertaEncoder):
         full hidden state never leaves the device.
         """
         batch_size, seq_len = attention_mask.shape
-        tt_hidden = _crop_hidden_state_ttnn(output, batch_size, seq_len)
-        if len(tt_hidden.shape) == 3:
-            tt_hidden = ttnn.unsqueeze(tt_hidden, dim=1)  # [B,S,D] -> [B,1,S,D]
-        tt_hidden = ttnn.to_memory_config(tt_hidden, ttnn.DRAM_MEMORY_CONFIG)
-        b, _, _, d = tt_hidden.shape
-        # CLS = position 0 along the sequence axis. [B,1,S,D] -> [B,1,1,D] -> [B,D].
-        cls_tt = ttnn.slice(tt_hidden, [0, 0, 0, 0], [b, 1, 1, d])
-        cls_tt = ttnn.squeeze(cls_tt, dim=1)
-        cls_tt = ttnn.squeeze(cls_tt, dim=1)
-        return self.classifier(cls_tt)  # [B, 1] logits on device
+        # CLS extraction + device head; shared with the device pooler so the
+        # fork (per-chunk logit) and canonical (model.pooler) paths score
+        # identically. Crops the padded chunk to its real [batch, seq] first.
+        return score_cls_on_device(output, self.classifier, batch_size, seq_len)
 
     def _forward_chunk(self, padded_inputs: dict[str, Optional[torch.Tensor]], chunk_batch_size: int) -> torch.Tensor:
         """Per-chunk primitive for the cross-encoder: run the encoder on one
