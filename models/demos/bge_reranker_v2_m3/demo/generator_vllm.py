@@ -29,6 +29,10 @@ from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head_tt impor
     XLMRobertaClassificationHeadTT,
 )
 from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import score_cls_on_device
+from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import (
+    RerankerChunkedHidden,
+    RerankerClassifierPooler,
+)
 from models.demos.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict
 from models.demos.wormhole.bge_m3.demo.xlm_roberta_encoder import XlmRobertaEncoder
 
@@ -79,6 +83,16 @@ class BgeRerankerV2M3(XlmRobertaEncoder):
         # Device (ttnn) head: CLS extraction + dense->tanh->out_proj run on
         # device in fp32, so the reranker score is computed end-to-end on device.
         self.classifier = XLMRobertaClassificationHeadTT.from_state_dict(self.device, self.state_dict)
+        # Per-call toggle for the two-track forward: False = score each chunk to
+        # a logit (fork path); True = keep the chunk's un-pooled ttnn hidden for
+        # model.pooler (canonical path). Set/reset within forward.
+        self._collect_hidden = False
+        # Expose a TT-native ClassifierPooler as ``model.pooler`` so the
+        # canonical pooling runner can delegate scoring to it (upstream contract:
+        # every vLLM pooling model carries a pooler). It reuses the same device
+        # head, so the fork path (per-chunk logit) and the canonical path
+        # (runner -> model.pooler) score identically.
+        self.pooler = RerankerClassifierPooler(self.classifier, self.device)
 
     def _score_chunk_on_device(self, output: ttnn.Tensor, attention_mask: torch.Tensor) -> ttnn.Tensor:
         """Extract the ``<s>`` (CLS) hidden and run the device head on one chunk.
@@ -95,15 +109,19 @@ class BgeRerankerV2M3(XlmRobertaEncoder):
         return score_cls_on_device(output, self.classifier, batch_size, seq_len)
 
     def _forward_chunk(self, padded_inputs: dict[str, Optional[torch.Tensor]], chunk_batch_size: int) -> torch.Tensor:
-        """Per-chunk primitive for the cross-encoder: run the encoder on one
-        already-padded chunk, extract CLS and run the classification head on
-        device, and return the ``[chunk_batch_size, 1]`` relevance logit on host.
+        """Per-chunk primitive for the cross-encoder (fork / default path).
 
-        Only the small per-chunk logit crosses back to host; the full encoder
-        hidden state stays on device. Called by the shared ``_encode_in_chunks``
-        template method.
+        Runs the encoder on one already-padded chunk, extracts CLS and runs the
+        classification head on device, and returns the ``[chunk_batch_size, 1]``
+        relevance logit on host. Only the small per-chunk logit crosses back to
+        host; the full encoder hidden state stays on device. Called by the
+        shared ``_encode_in_chunks`` template method.
         """
         output = self._run_encoder_chunk(padded_inputs)
+        if getattr(self, "_collect_hidden", False):
+            # Canonical path: return the un-pooled device hidden for this chunk
+            # (with its mask + real row count) so model.pooler scores it.
+            return (output, padded_inputs["attention_mask"], chunk_batch_size)
         logits_tt = self._score_chunk_on_device(output, padded_inputs["attention_mask"])
         logits = to_torch_auto_compose(logits_tt, device=self.device).to(torch.float32)
         logits = logits.reshape(-1, 1)
@@ -116,17 +134,37 @@ class BgeRerankerV2M3(XlmRobertaEncoder):
         attention_mask: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
+        return_full_hidden_states: bool = False,
     ) -> torch.Tensor:
         del positions, token_type_ids, position_ids
         batch_size, seq_len = input_ids.shape
         self._validate_request(batch_size, get_padded_sequence_length(seq_len))
         self._initialize_model()
 
-        # The shared chunking template runs the encoder + device CLS/head per
-        # chunk (see _forward_chunk), so each chunk returns a [chunk, 1] logit on
-        # host. Concatenate them back into the request's [batch, 1] logits.
-        chunk_logits = self._encode_in_chunks(input_ids, attention_mask=attention_mask)
-        return torch.cat(chunk_logits, dim=0)
+        # Two-track contract (default off): the fork's pooling runner calls
+        # forward without the flag and expects the already-scored [batch, 1]
+        # logit, so the default path runs the encoder + device CLS/head per chunk
+        # and concatenates the per-chunk logits (byte-for-byte the prior
+        # behaviour). The canonical runner sets return_full_hidden_states=True
+        # because it delegates scoring to model.pooler; in that case forward
+        # returns the un-pooled device hidden (per chunk) and the pooler does the
+        # CLS extraction + head on device.
+        # Both paths reuse the shared _encode_in_chunks template (identical
+        # chunk/pad contract); only the per-chunk step differs. A private toggle
+        # selects it inside _forward_chunk so the base template stays untouched:
+        # default = score the chunk to a host [chunk, 1] logit (fork path); when
+        # returning full hidden = keep the chunk's un-pooled ttnn hidden for the
+        # pooler. The toggle is scoped to this call (reset in finally).
+        if not return_full_hidden_states:
+            chunk_logits = self._encode_in_chunks(input_ids, attention_mask=attention_mask)
+            return torch.cat(chunk_logits, dim=0)
+
+        self._collect_hidden = True
+        try:
+            chunks = self._encode_in_chunks(input_ids, attention_mask=attention_mask)
+        finally:
+            self._collect_hidden = False
+        return RerankerChunkedHidden(chunks)
 
     # ---- vLLM interface helpers ----
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

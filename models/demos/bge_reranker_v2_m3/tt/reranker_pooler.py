@@ -94,6 +94,26 @@ def score_cls_on_device(
     return classifier(cls_tt)  # [B, 1] logits on device
 
 
+class RerankerChunkedHidden:
+    """Device (ttnn) encoder hidden states carried from forward to the pooler.
+
+    The reranker runs the encoder over device-sized chunks; the canonical path
+    (``forward(return_full_hidden_states=True)``) returns the un-pooled hidden
+    for the whole batch so the pooler can do CLS extraction + scoring. Rather
+    than concatenate variable-length device tensors, this holds the per-chunk
+    ttnn hidden plus each chunk's padded ``attention_mask`` (for cropping) and
+    real ``chunk_batch_size`` (the number of real rows in the chunk). The pooler
+    scores each chunk on device and concatenates the small per-request logits.
+
+    It deliberately exposes no torch ``.device`` so the runner treats it as a
+    device-native hidden (builds the pooling cursor on CPU; see the pooling
+    runner's device tolerance).
+    """
+
+    def __init__(self, chunks: list[tuple[ttnn.Tensor, torch.Tensor, int]]):
+        self.chunks = chunks
+
+
 class RerankerClassifierPooler(_PoolerBase):
     """TT-native cross-encoder ClassifierPooler (CLS extract + device head).
 
@@ -118,13 +138,29 @@ class RerankerClassifierPooler(_PoolerBase):
         """Score a batch of encoder hidden states into per-request logits.
 
         ``hidden_states`` is the model's device (ttnn) last-hidden-state for the
-        batch; ``pooling_metadata`` carries one ``pooling_params`` entry per
-        request. Scoring runs on device and only the final ``[B, 1]`` logit is
-        moved to host, returned as a per-request list (a valid
-        ``PoolerOutput``).
+        batch: either a single ttnn tensor (one chunk) or a
+        :class:`RerankerChunkedHidden` carrying the per-chunk device hidden.
+        ``pooling_metadata`` carries one ``pooling_params`` entry per request.
+        Scoring runs on device (CLS extract + head per chunk) and only the final
+        ``[B, 1]`` logit is moved to host, returned as a per-request list (a
+        valid ``PoolerOutput``).
         """
-        logits_tt = score_cls_on_device(hidden_states, self.classifier)
-        logits = to_torch_auto_compose(logits_tt, device=self.device).to(torch.float32)
-        logits = logits.reshape(-1, 1)
+        if isinstance(hidden_states, RerankerChunkedHidden):
+            per_chunk = []
+            for output, attention_mask, chunk_batch_size in hidden_states.chunks:
+                b, s = attention_mask.shape
+                logits_tt = score_cls_on_device(output, self.classifier, b, s)
+                chunk_logits = to_torch_auto_compose(
+                    logits_tt, device=self.device
+                ).to(torch.float32)
+                per_chunk.append(chunk_logits.reshape(-1, 1)[:chunk_batch_size])
+            logits = torch.cat(per_chunk, dim=0)
+        else:
+            logits_tt = score_cls_on_device(hidden_states, self.classifier)
+            logits = (
+                to_torch_auto_compose(logits_tt, device=self.device)
+                .to(torch.float32)
+                .reshape(-1, 1)
+            )
         num_reqs = len(pooling_metadata.pooling_params)
         return [logits[i] for i in range(num_reqs)]

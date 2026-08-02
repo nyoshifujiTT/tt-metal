@@ -31,6 +31,16 @@ def test_forward_exposes_vllm_kwargs():
     assert "positions" in params
 
 
+def test_forward_exposes_return_full_hidden_states_kwarg():
+    # The canonical pooling runner calls forward with
+    # return_full_hidden_states=True to get the un-pooled hidden for model.pooler.
+    params = inspect.signature(BgeRerankerV2M3.forward).parameters
+    assert "return_full_hidden_states" in params
+    # Default must be off so the fork runner (which never sets it) keeps the
+    # scored-logit pass-through unchanged.
+    assert params["return_full_hidden_states"].default is False
+
+
 def test_vllm_interface_methods_present():
     for name in ("embed_input_ids", "initialize_vllm_model", "get_embedding_dim"):
         assert hasattr(BgeRerankerV2M3, name)
@@ -71,3 +81,68 @@ def test_forward_concatenates_per_chunk_logits(monkeypatch):
     torch.testing.assert_close(out.view(-1), torch.tensor([1.0, 2.0, 3.0]))
     # forward() must delegate to the instance's shared chunking entry point.
     assert seen["self"] is model
+
+
+def test_forward_full_hidden_returns_chunked_device_hidden(monkeypatch):
+    # Device-free: with return_full_hidden_states=True, forward must NOT score;
+    # it collects each chunk's (encoder hidden, mask, real rows) into a
+    # RerankerChunkedHidden for model.pooler. Stub the encoder chunk runner so no
+    # device is needed and assert the per-chunk step keeps the raw hidden.
+    from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import RerankerChunkedHidden
+
+    model = BgeRerankerV2M3.__new__(BgeRerankerV2M3)
+    model.max_batch_size = 32
+    model.max_seq_len = 8192
+    model.tokenizer = _StubTokenizer()
+    model._is_initialized = True
+    model.model = object()
+    model.device = object()
+    model._collect_hidden = False
+
+    # Fake the encoder chunk output so _forward_chunk (collect branch) runs
+    # device-free; return a sentinel "hidden" object per chunk.
+    def fake_run_encoder_chunk(self, padded_inputs):
+        return ("HIDDEN", padded_inputs["attention_mask"].shape)
+
+    monkeypatch.setattr(BgeRerankerV2M3, "_run_encoder_chunk", fake_run_encoder_chunk)
+    monkeypatch.setattr(gen_mod, "get_padded_sequence_length", lambda s: s)
+
+    # One chunk of 3 rows, seq 7 (short-seq path pads batch to 32 but the real
+    # row count is what forward passes through).
+    input_ids = torch.ones(3, 7, dtype=torch.long)
+    out = model.forward(input_ids=input_ids, return_full_hidden_states=True)
+
+    assert isinstance(out, RerankerChunkedHidden)
+    assert len(out.chunks) >= 1
+    total_rows = sum(chunk_batch_size for _, _, chunk_batch_size in out.chunks)
+    assert total_rows == 3  # real rows preserved across chunks, no scoring
+    # Each chunk carries the raw encoder hidden (sentinel), not a scored logit.
+    for hidden, mask, _ in out.chunks:
+        assert hidden[0] == "HIDDEN"
+    # The toggle is reset after the call.
+    assert model._collect_hidden is False
+
+
+def test_post_initialize_sets_classifier_pooler(monkeypatch):
+    # model.pooler must be a TT-native ClassifierPooler advertising classify/
+    # score so the canonical runner can delegate scoring to it.
+    from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import (
+        RerankerClassifierPooler,
+    )
+
+    model = BgeRerankerV2M3.__new__(BgeRerankerV2M3)
+    model.device = object()
+    model.state_dict = {"unused": 0}
+
+    sentinel_head = object()
+    monkeypatch.setattr(
+        gen_mod.XLMRobertaClassificationHeadTT,
+        "from_state_dict",
+        classmethod(lambda cls, device, sd: sentinel_head),
+    )
+
+    model._post_initialize()
+
+    assert isinstance(model.pooler, RerankerClassifierPooler)
+    assert model.pooler.get_supported_tasks() == {"classify", "score"}
+    assert model._collect_hidden is False
