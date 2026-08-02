@@ -853,6 +853,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         sampling_params: SamplingParams | None = None,
         start_pos: list[int] = None,  # Cached prefixes lengths
         return_hidden_states=False,
+        return_full_hidden_states=False,
         warmup_prefill=True,
         **kwargs,
     ):
@@ -920,6 +921,13 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         max_batch_size_per_model = self.model_args[0].max_batch_size
 
         # Output shape depends on whether we're returning logits or hidden states
+        if return_full_hidden_states:
+            # Flat/per-token pooling contract: keep every token's hidden state.
+            # The per-user hidden tensors have different seq lengths, so they can't
+            # share one preallocated [batch, hidden] buffer -- collect them in a
+            # list indexed by user slot instead.
+            assert return_hidden_states, "return_full_hidden_states requires return_hidden_states"
+            output_full_hidden = [None] * batch_size
         if return_hidden_states:
             # For hidden states, output shape is [batch_size, hidden_size]
             # Note: dim is the hidden dimension size
@@ -1192,6 +1200,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     num_cached_tokens=0 if use_batched_prefill else num_cached_tokens,
                     batch_size=padded_batch if use_batched_prefill else 1,
                     return_hidden_states=return_hidden_states,
+                    return_full_hidden_states=return_full_hidden_states,
                     **local_kwargs,
                 )
             if use_batched_prefill:
@@ -1321,15 +1330,20 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     last_token_idx_for_trace = last_token_idx - num_cached_tokens
 
                 if return_hidden_states:
-                    hidden_states = self.model[model_id].process_hidden_states_after_prefill_trace(
-                        logits, last_token_idx_for_trace
-                    )
+                    if return_full_hidden_states:
+                        hidden_states = self.model[model_id].process_full_hidden_states_after_prefill_trace(logits)
+                    else:
+                        hidden_states = self.model[model_id].process_hidden_states_after_prefill_trace(
+                            logits, last_token_idx_for_trace
+                        )
                     prefill_results.append(
                         {
                             "idx": idx,
                             "model_id": model_id,
                             "last_token_idx": last_token_idx,
                             "hidden_states": hidden_states.cpu(blocking=False),
+                            "full_hidden": return_full_hidden_states,
+                            "seq_len": seq_len,
                         }
                     )
                     continue
@@ -1349,15 +1363,23 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     # generic generative forward(). This makes embeddings work at
                     # any (also non-trace-supported) sequence length; trace is a
                     # host-dispatch perf optimization, not a correctness gate.
-                    hidden_states = self.model[model_id].process_hidden_states_after_prefill_trace(
-                        logits, last_token_idx
-                    )
+                    last_token_idx_for_trace = last_token_idx
+                    if not use_batched_prefill and num_cached_tokens > 0:
+                        last_token_idx_for_trace = last_token_idx - num_cached_tokens
+                    if return_full_hidden_states:
+                        hidden_states = self.model[model_id].process_full_hidden_states_after_prefill_trace(logits)
+                    else:
+                        hidden_states = self.model[model_id].process_hidden_states_after_prefill_trace(
+                            logits, last_token_idx_for_trace
+                        )
                     prefill_results.append(
                         {
                             "idx": idx,
                             "model_id": model_id,
                             "last_token_idx": last_token_idx,
                             "hidden_states": hidden_states.cpu(blocking=False),
+                            "full_hidden": return_full_hidden_states,
+                            "seq_len": seq_len,
                         }
                     )
                     # continue with the next user
@@ -1382,9 +1404,16 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                 ttnn.synchronize_device(self.model[model_id].mesh_device)
 
                 if "hidden_states" in res:
-                    output_tensor[idx] = self.model[model_id].process_output_prefill_hidden_states(
-                        res["hidden_states"], last_token_idx=(last_token_idx_relative % 32)
-                    )
+                    if res.get("full_hidden"):
+                        # Flat/per-token pooling contract: keep the whole [seq, dim]
+                        # hidden for this user (the vLLM Pooler selects + normalizes).
+                        output_full_hidden[idx] = self.model[model_id].process_output_prefill_full_hidden_states(
+                            res["hidden_states"], seq_len=res["seq_len"]
+                        )
+                    else:
+                        output_tensor[idx] = self.model[model_id].process_output_prefill_hidden_states(
+                            res["hidden_states"], last_token_idx=(last_token_idx_relative % 32)
+                        )
                 elif res["sampling"]:
                     tt_tokens = res["logits"][0]
                     tt_log_probs = res["logits"][1]
@@ -1409,6 +1438,8 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
 
         logger.info(f"Finished prefill for all users up to {batch_seq_len} tokens, Starting decode...")
 
+        if return_full_hidden_states:
+            return output_full_hidden
         if sampling_executed:
             return output_tokens, reformat_logprobs(output_log_probs, batch_size)
         else:
@@ -1464,6 +1495,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         num_cached_tokens: int = 0,
         batch_size=1,
         return_hidden_states=False,
+        return_full_hidden_states=False,
         **kwargs,
     ):
         seq_len = tokens.shape[-1]
