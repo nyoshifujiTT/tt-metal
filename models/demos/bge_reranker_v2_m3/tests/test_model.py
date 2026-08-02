@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""End-to-end reranker logit test: TT encoder + host classifier vs HF.
+"""End-to-end reranker logit test: TT encoder + device classifier vs HF.
 
-Reuses the bge-m3 XLM-RoBERTa encoder backbone on device, applies the
-reranker classifier head on host, and compares the resulting per-pair logit
-against the Hugging Face AutoModelForSequenceClassification reference.
-Requires a single Tenstorrent device.
+Reuses the bge-m3 XLM-RoBERTa encoder backbone on device and runs the reranker
+CLS extraction + classification head on device (``XLMRobertaClassificationHeadTT``),
+then compares the resulting per-pair logit against the Hugging Face
+``AutoModelForSequenceClassification`` reference. This exercises the same
+device-scoring path (``_forward_chunk`` -> device CLS/head -> ``[chunk, 1]``)
+the model uses at runtime. Requires a single Tenstorrent device.
 """
 
 import pytest
@@ -15,7 +17,9 @@ import torch
 from models.demos.wormhole.bge_m3.tt.common import create_tt_model
 from models.demos.wormhole.bge_m3.tests.test_utils import require_single_device
 from models.demos.bge_reranker_v2_m3.demo.generator_vllm import BgeRerankerV2M3
-from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import XLMRobertaClassificationHead
+from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head_tt import (
+    XLMRobertaClassificationHeadTT,
+)
 
 MODEL_ID = "BAAI/bge-reranker-v2-m3"
 BATCH_SIZE = 1
@@ -57,19 +61,18 @@ def test_reranker_logit_matches_hf(device, artifacts, query, doc, reset_seeds):
         state_dict=state_dict,
         hf_model_name=model_id_or_path,
     )
-    classifier = XLMRobertaClassificationHead.from_state_dict(sd)
-
     input_ids = enc["input_ids"]
     attention_mask = enc["attention_mask"]
-    # Drive the shared encoder via the reranker wrapper wired to this tt_model
-    # (the same _encode_to_last_hidden path it uses at runtime). The base
-    # XlmRobertaEncoder is abstract, so use the concrete reranker subclass.
+    # Drive the shared encoder + device CLS/head via the reranker wrapper wired
+    # to this tt_model (the same _encode_in_chunks -> _forward_chunk device path
+    # it uses at runtime). The base XlmRobertaEncoder is abstract, so use the
+    # concrete reranker subclass.
     encoder = BgeRerankerV2M3.__new__(BgeRerankerV2M3)
     encoder.model = tt_model
     encoder.device = device
     encoder.tokenizer = tokenizer
-    hidden = encoder._encode_to_last_hidden(input_ids, attention_mask)
-    cls_hidden = hidden[:, 0, :][:BATCH_SIZE]
-    tt_logit = classifier(cls_hidden).view(-1)
+    encoder.classifier = XLMRobertaClassificationHeadTT.from_state_dict(device, sd)
+    chunk_logits = encoder._encode_in_chunks(input_ids, attention_mask=attention_mask)
+    tt_logit = torch.cat(chunk_logits, dim=0)[:BATCH_SIZE].view(-1)
 
     torch.testing.assert_close(tt_logit, ref_logit, rtol=LOGIT_RTOL, atol=LOGIT_ATOL)
