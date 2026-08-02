@@ -388,6 +388,20 @@ class Transformer(LightweightModule):
         )
         return hidden_states
 
+    def l2_normalize_hidden(self, hidden_states, eps: float = 1e-12):
+        """L2-normalize the last (hidden) dimension on device.
+
+        ``F.normalize(x, p=2, dim=-1)`` computed with ttnn ops so the whole
+        embedding tail (last-token slice -> final norm -> L2 normalize) can live
+        inside a single prefill trace: ``x * rsqrt(sum(x^2, dim=-1) + eps)``.
+        The result is byte-comparable to the host ``F.normalize`` the demo/pooler
+        applied before, but stays on device (no host round-trip).
+        """
+        squared = ttnn.square(hidden_states)
+        sum_sq = ttnn.sum(squared, dim=-1, keepdim=True)
+        inv_norm = ttnn.rsqrt(ttnn.add(sum_sq, eps))
+        return ttnn.multiply(hidden_states, inv_norm)
+
     def prepare_prefill_inputs_trace(
         self,
         tokens,
