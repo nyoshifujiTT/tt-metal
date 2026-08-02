@@ -110,6 +110,25 @@ def _tt_embedding_from_full_hidden(generator_model: Qwen3ForEmbedding, tokenizer
     return F.normalize(last_token, p=2, dim=1)
 
 
+def _tt_embedding_single_trace(generator_model: Qwen3ForEmbedding, tokenizer, prompt: str) -> torch.Tensor:
+    """TT device path with the WHOLE embedding folded into one prefill trace.
+
+    ``embed_single_trace=True`` makes forward return the finished, L2-normalized
+    embedding computed entirely on device in a single execute_trace replay (last-
+    token slice + final norm + L2 normalize are captured in the trace). No host
+    pooling or normalization is applied here.
+    """
+    batch = tokenizer([prompt], padding=False, truncation=True, max_length=DEFAULT_SEQUENCE_LENGTH, return_tensors="pt")
+    emb = generator_model.forward(
+        input_ids=batch["input_ids"],
+        attention_mask=batch["attention_mask"],
+        embed_single_trace=True,
+    ).to(torch.float32)
+    if emb.dim() == 1:
+        emb = emb.unsqueeze(0)
+    return emb
+
+
 def run_qwen3_embedding_demo(device, prompts, model_name, sequence_length, model_location_generator):
     _require_single_device(device)
     resolved_model_name = _resolve_model_name(model_name, model_location_generator)
@@ -182,3 +201,38 @@ def run_qwen3_embedding_flat_contract(device, prompts, model_name, sequence_leng
 @pytest.mark.parametrize("model_name, sequence_length", [(DEFAULT_MODEL_NAME, DEFAULT_SEQUENCE_LENGTH)])
 def test_qwen3_embedding_flat_contract(device, model_name, sequence_length, model_location_generator):
     run_qwen3_embedding_flat_contract(device, prompts, model_name, sequence_length, model_location_generator)
+
+
+def run_qwen3_embedding_single_trace(device, prompts, model_name, sequence_length, model_location_generator):
+    """Verify the single-trace embedding path (whole tail on device, 1 replay).
+
+    ``embed_single_trace=True`` folds last-token slice + final norm + L2 normalize
+    into the prefill trace, so the finished normalized embedding comes back from a
+    single execute_trace. It must equal the pooled last-token path (which does
+    slice+norm in a trace-external dispatch + host L2 normalize) and match the HF
+    reference. This guards the on-device tail against any numerical drift.
+    """
+    _require_single_device(device)
+    resolved_model_name = _resolve_model_name(model_name, model_location_generator)
+    tokenizer = AutoTokenizer.from_pretrained(resolved_model_name, padding_side="left")
+    generator_model = Qwen3ForEmbedding(
+        device=device, max_batch_size=1, max_seq_len=sequence_length, model_name=resolved_model_name
+    )
+    for prompt in prompts:
+        pooled = _tt_embedding(generator_model, tokenizer, prompt)
+        single = _tt_embedding_single_trace(generator_model, tokenizer, prompt)
+        reference = _reference_embedding(resolved_model_name, tokenizer, prompt)
+        cos_pooled_single = float(F.cosine_similarity(pooled, single).mean())
+        cos_single_hf = float(F.cosine_similarity(single, reference).mean())
+        logger.info(
+            f"single-trace: norm={float(single.norm()):.6f} "
+            f"cos(pooled, single)={cos_pooled_single:.6f} cos(single, HF)={cos_single_hf:.4f}"
+        )
+        assert torch.allclose(single.norm(dim=1), torch.ones(single.shape[0]), atol=1e-2), "not L2-normalized on device"
+        assert cos_pooled_single > 0.999, f"single-trace diverged from pooled path (cos {cos_pooled_single:.6f})"
+        assert cos_single_hf > 0.95, f"single-trace embedding does not match HF (cos {cos_single_hf:.4f})"
+
+
+@pytest.mark.parametrize("model_name, sequence_length", [(DEFAULT_MODEL_NAME, DEFAULT_SEQUENCE_LENGTH)])
+def test_qwen3_embedding_single_trace(device, model_name, sequence_length, model_location_generator):
+    run_qwen3_embedding_single_trace(device, prompts, model_name, sequence_length, model_location_generator)
