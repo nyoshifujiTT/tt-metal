@@ -164,12 +164,16 @@ class BgeRerankerV2M3(XlmRobertaEncoder):
         forward can concatenate them into the flat ``[total_tokens, D]`` layout.
         """
         cropped = _crop_hidden_state_ttnn(output, chunk_batch_size, attention_mask.shape[1])
+        # The encoder output is rank 4 ([B, 1, S, D]); normalize to that so the
+        # per-request slice indexes the batch and sequence axes consistently.
+        if len(cropped.shape) == 3:
+            cropped = ttnn.unsqueeze(cropped, dim=1)  # [B, S, D] -> [B, 1, S, D]
         hidden_dim = int(cropped.shape[-1])
         real_lens = attention_mask[:chunk_batch_size].sum(dim=1).to(torch.int64).tolist()
         for row in range(chunk_batch_size):
             real_len = int(real_lens[row])
-            # Slice this single request's [1, real_len, D] rows from the chunk.
-            single = ttnn.slice(cropped, [row, 0, 0], [row + 1, real_len, hidden_dim])
+            # Slice this single request's real tokens: [1, 1, real_len, D].
+            single = ttnn.slice(cropped, [row, 0, 0, 0], [row + 1, 1, real_len, hidden_dim])
             self._flat_rows.append(ttnn.reshape(single, (real_len, hidden_dim)))
 
     def forward(

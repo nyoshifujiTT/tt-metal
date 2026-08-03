@@ -39,6 +39,7 @@ from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import (
     gather_cls_from_flat,
 )
 from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import RerankerClassifierPooler
+from models.demos.bge_reranker_v2_m3.demo.generator_vllm import BgeRerankerV2M3
 
 HIDDEN_SIZE = 1024
 # Same fp32-dest-acc + HiFi4 device head as test_xlm_roberta_classification_head_tt:
@@ -166,3 +167,38 @@ def test_pooler_forward_scores_flat_hidden(device, reset_seeds):
     assert len(out) == b
     cand = torch.stack([o.reshape(1) for o in out], dim=0)  # [b, 1]
     torch.testing.assert_close(cand, ref_logits, atol=LOGIT_ATOL, rtol=LOGIT_RTOL)
+
+
+@pytest.mark.parametrize("rank", [3, 4], ids=["rank3", "rank4"])
+def test_append_flat_rows_handles_encoder_rank(device, rank, reset_seeds):
+    # The real encoder chunk output is rank 4 ([B, 1, S, D]); _append_flat_rows
+    # must crop per-request real tokens from either a rank-3 or rank-4 chunk into
+    # [real_len, D] rows. A rank-only unit slip here is exactly what the flat
+    # forward's e2e hit, so cover both ranks against a host reference.
+    from types import SimpleNamespace
+
+    require_single_device(device)
+
+    d = HIDDEN_SIZE
+    chunk_bs, s = 3, 64
+    real_lens = [5, 64, 40]
+    hidden = torch.randn(chunk_bs, s, d, dtype=torch.float32)
+    attn = torch.zeros(chunk_bs, s, dtype=torch.float32)
+    for i, li in enumerate(real_lens):
+        attn[i, :li] = 1.0
+    ref_rows = [hidden[i, : real_lens[i], :].to(torch.bfloat16).to(torch.float32) for i in range(chunk_bs)]
+
+    if rank == 4:
+        chunk_tt = to_ttnn_tensor(hidden.reshape(chunk_bs, 1, s, d), device, dtype=ttnn.bfloat16)
+    else:
+        chunk_tt = to_ttnn_tensor(hidden, device, dtype=ttnn.bfloat16)
+
+    model = BgeRerankerV2M3.__new__(BgeRerankerV2M3)
+    model.device = device
+    model._flat_rows = []
+    model._append_flat_rows(chunk_tt, attn, chunk_bs)
+
+    assert len(model._flat_rows) == chunk_bs
+    for i in range(chunk_bs):
+        got = to_torch(model._flat_rows[i], (real_lens[i], d))
+        torch.testing.assert_close(got, ref_rows[i], atol=1e-2, rtol=1e-2)
