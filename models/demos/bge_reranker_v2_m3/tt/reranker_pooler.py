@@ -94,6 +94,66 @@ def score_cls_on_device(
     return classifier(cls_tt)  # [B, 1] logits on device
 
 
+def flatten_request_hidden_to_device(
+    per_request_hidden: list,
+) -> ttnn.Tensor:
+    """Concatenate per-request device hidden rows into a flat ``[total_tokens, D]``.
+
+    ``per_request_hidden`` is a list of ttnn tensors, one per scheduled request,
+    each already cropped to that request's real tokens and shaped ``[seq_i, D]``
+    (no padding). They are concatenated on the token axis, on device, into the
+    flat, unpadded ``[total_tokens, D]`` layout the upstream pooling contract
+    expects (``model.forward`` returns this; the pooler's cursor indexes it).
+
+    Keeping the flatten here (device ``ttnn.concat``) means only the final pooled
+    result crosses to host, not the hidden state.
+    """
+    if len(per_request_hidden) == 1:
+        return per_request_hidden[0]
+    return ttnn.concat(per_request_hidden, dim=0)
+
+
+def crop_request_rows(chunk_hidden: ttnn.Tensor, real_len: int, hidden_dim: int) -> ttnn.Tensor:
+    """Crop one request's real tokens from its padded chunk hidden -> ``[real_len, D]``.
+
+    ``chunk_hidden`` is the encoder ttnn output for a single-request chunk, rank
+    3 (``[1, S, D]``) or rank 4 (``[1, 1, S, D]``). Slices the first ``real_len``
+    sequence positions (dropping padding) and reshapes to ``[real_len, D]`` so it
+    can be concatenated into the flat layout.
+    """
+    tt_hidden = chunk_hidden
+    if len(tt_hidden.shape) == 3:
+        tt_hidden = ttnn.unsqueeze(tt_hidden, dim=1)  # [1,S,D] -> [1,1,S,D]
+    tt_hidden = ttnn.to_memory_config(tt_hidden, ttnn.DRAM_MEMORY_CONFIG)
+    cropped = ttnn.slice(tt_hidden, [0, 0, 0, 0], [1, 1, real_len, hidden_dim])
+    return ttnn.reshape(cropped, (real_len, hidden_dim))
+
+
+def gather_cls_from_flat(
+    flat_hidden: ttnn.Tensor,
+    first_token_indices: torch.Tensor,
+    device,
+) -> ttnn.Tensor:
+    """Gather each request's CLS row from a flat ``[total_tokens, D]`` on device.
+
+    ``first_token_indices`` is the pooling cursor's per-request first-token index
+    into the flat token axis (the standard ``CLSPool`` selector). The gather runs
+    on device via ``ttnn.embedding`` (treating the flat hidden as the embedding
+    table), returning ``[num_reqs, D]`` still on device. This is the device-native
+    equivalent of upstream ``CLSPool``'s ``hidden_states[first_token_indices]``.
+    """
+    d = int(flat_hidden.shape[-1])
+    idx_tt = ttnn.from_torch(
+        first_token_indices.reshape(1, -1).to(torch.int32),
+        device=device,
+        dtype=ttnn.uint32,
+        layout=ttnn.ROW_MAJOR_LAYOUT,
+    )
+    flat_rm = ttnn.to_layout(flat_hidden, ttnn.ROW_MAJOR_LAYOUT)
+    gathered = ttnn.embedding(idx_tt, flat_rm)  # [1, num_reqs, D]
+    return ttnn.reshape(gathered, (first_token_indices.numel(), d))
+
+
 class RerankerChunkedHidden:
     """Device (ttnn) encoder hidden states carried from forward to the pooler.
 
