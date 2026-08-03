@@ -41,6 +41,28 @@ def test_forward_exposes_return_full_hidden_states_kwarg():
     assert params["return_full_hidden_states"].default is False
 
 
+def test_first_token_indices_prefers_cursor_else_prompt_lens():
+    # The pooler selects CLS rows via the cursor's first_token_indices (standard
+    # CLSPool selector); when no cursor is present it falls back to prefix sums
+    # of prompt_lens (the same quantity for single-shot prefill pooling).
+    from types import SimpleNamespace
+
+    from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import (
+        _first_token_indices_cpu,
+    )
+
+    # Cursor present: use it verbatim.
+    cur = SimpleNamespace(first_token_indices_gpu=torch.tensor([0, 3, 5]))
+    meta = SimpleNamespace(pooling_cursor=cur, prompt_lens=torch.tensor([3, 2, 4]))
+    got = _first_token_indices_cpu(meta, 3)
+    assert got.tolist() == [0, 3, 5]
+
+    # No cursor: prefix sums of prompt_lens -> [0, 3, 5].
+    meta2 = SimpleNamespace(pooling_cursor=None, prompt_lens=torch.tensor([3, 2, 4]))
+    got2 = _first_token_indices_cpu(meta2, 3)
+    assert got2.tolist() == [0, 3, 5]
+
+
 def test_vllm_interface_methods_present():
     for name in ("embed_input_ids", "initialize_vllm_model", "get_embedding_dim"):
         assert hasattr(BgeRerankerV2M3, name)
@@ -116,13 +138,11 @@ def test_forward_concatenates_per_chunk_logits(monkeypatch):
     assert seen["self"] is model
 
 
-def test_forward_full_hidden_returns_chunked_device_hidden(monkeypatch):
+def test_forward_full_hidden_returns_flat_device_hidden(monkeypatch):
     # Device-free: with return_full_hidden_states=True, forward must NOT score;
-    # it collects each chunk's (encoder hidden, mask, real rows) into a
-    # RerankerChunkedHidden for model.pooler. Stub the encoder chunk runner so no
-    # device is needed and assert the per-chunk step keeps the raw hidden.
-    from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import RerankerChunkedHidden
-
+    # it appends each request's real rows (via _append_flat_rows) and returns the
+    # flat [total_tokens, D] built by flatten_request_hidden_to_device. Stub both
+    # so no device is needed and assert the flat layout is produced, not a score.
     model = BgeRerankerV2M3.__new__(BgeRerankerV2M3)
     model.max_batch_size = 32
     model.max_seq_len = 8192
@@ -131,29 +151,37 @@ def test_forward_full_hidden_returns_chunked_device_hidden(monkeypatch):
     model.model = object()
     model.device = object()
     model._collect_hidden = False
+    model._flat_rows = []
 
-    # Fake the encoder chunk output so _forward_chunk (collect branch) runs
-    # device-free; return a sentinel "hidden" object per chunk.
     def fake_run_encoder_chunk(self, padded_inputs):
-        return ("HIDDEN", padded_inputs["attention_mask"].shape)
+        return "HIDDEN"
+
+    # Record the per-request rows the collect branch appends (one row per real
+    # request), tagged with the chunk's real row count.
+    def fake_append(self, output, attention_mask, chunk_batch_size):
+        for row in range(chunk_batch_size):
+            self._flat_rows.append((output, row))
+
+    flattened = {}
+
+    def fake_flatten(rows):
+        flattened["rows"] = list(rows)
+        return "FLAT_HIDDEN"
 
     monkeypatch.setattr(BgeRerankerV2M3, "_run_encoder_chunk", fake_run_encoder_chunk)
+    monkeypatch.setattr(BgeRerankerV2M3, "_append_flat_rows", fake_append)
+    monkeypatch.setattr(gen_mod, "flatten_request_hidden_to_device", fake_flatten)
     monkeypatch.setattr(gen_mod, "get_padded_sequence_length", lambda s: s)
 
-    # One chunk of 3 rows, seq 7 (short-seq path pads batch to 32 but the real
-    # row count is what forward passes through).
     input_ids = torch.ones(3, 7, dtype=torch.long)
     out = model.forward(input_ids=input_ids, return_full_hidden_states=True)
 
-    assert isinstance(out, RerankerChunkedHidden)
-    assert len(out.chunks) >= 1
-    total_rows = sum(chunk_batch_size for _, _, chunk_batch_size in out.chunks)
-    assert total_rows == 3  # real rows preserved across chunks, no scoring
-    # Each chunk carries the raw encoder hidden (sentinel), not a scored logit.
-    for hidden, mask, _ in out.chunks:
-        assert hidden[0] == "HIDDEN"
-    # The toggle is reset after the call.
+    # forward returns the flat hidden (no scoring), built from 3 real rows.
+    assert out == "FLAT_HIDDEN"
+    assert len(flattened["rows"]) == 3
+    # Accumulator and toggle are reset after the call.
     assert model._collect_hidden is False
+    assert model._flat_rows == []
 
 
 def test_pooler_available_before_first_forward():

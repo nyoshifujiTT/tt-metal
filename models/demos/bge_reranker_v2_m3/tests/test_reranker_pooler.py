@@ -38,6 +38,7 @@ from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import (
     flatten_request_hidden_to_device,
     gather_cls_from_flat,
 )
+from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import RerankerClassifierPooler
 
 HIDDEN_SIZE = 1024
 # Same fp32-dest-acc + HiFi4 device head as test_xlm_roberta_classification_head_tt:
@@ -119,3 +120,49 @@ def test_flatten_and_cls_gather_on_device(device, real_lens, reset_seeds):
     cls_tt = gather_cls_from_flat(flat_tt, first_idx, device)
     cls_back = to_torch(cls_tt, (b, d))
     torch.testing.assert_close(cls_back, cls_ref, atol=1e-2, rtol=1e-2)
+
+
+def test_pooler_forward_scores_flat_hidden(device, reset_seeds):
+    # End-to-end pooler on device: given a flat [total_tokens, D] and a metadata
+    # carrying prompt_lens, RerankerClassifierPooler.forward gathers each CLS row
+    # (via the cursor selector) and runs the device head, returning one logit per
+    # request. Compare to a host reference (CLS row -> dense->tanh->out_proj).
+    from types import SimpleNamespace
+
+    require_single_device(device)
+
+    d = HIDDEN_SIZE
+    real_lens = [4, 7, 2]
+    b = len(real_lens)
+    per_req = [torch.randn(li, d, dtype=torch.float32) for li in real_lens]
+    flat_ref = torch.cat(per_req, dim=0)
+    # The encoder hidden is bf16 on device; round the reference the same way so
+    # this test isolates the pooler's gather + head numerics from bf16 encoder
+    # rounding (which the encoder PCC tests already cover).
+    flat_bf16 = flat_ref.to(torch.bfloat16).to(torch.float32)
+    first_idx = torch.tensor(
+        [0] + torch.cumsum(torch.tensor(real_lens), 0)[:-1].tolist(), dtype=torch.int64
+    )
+    cls_ref = flat_bf16[first_idx]
+
+    state_dict = _random_state_dict()
+    host_head = XLMRobertaClassificationHead.from_state_dict(state_dict)
+    ref_logits = host_head(cls_ref).to(torch.float32)  # [b, 1]
+
+    # Build the model stub the pooler reads (classifier + device).
+    tt_head = XLMRobertaClassificationHeadTT.from_state_dict(device, state_dict)
+    model_stub = SimpleNamespace(classifier=tt_head, device=device)
+    pooler = RerankerClassifierPooler(model_stub)
+
+    flat_tt = to_ttnn_tensor(flat_ref, device, dtype=ttnn.bfloat16)
+    cursor = SimpleNamespace(first_token_indices_gpu=first_idx)
+    meta = SimpleNamespace(
+        pooling_cursor=cursor,
+        prompt_lens=torch.tensor(real_lens),
+        pooling_params=[object()] * b,
+    )
+
+    out = pooler.forward(flat_tt, meta)
+    assert len(out) == b
+    cand = torch.stack([o.reshape(1) for o in out], dim=0)  # [b, 1]
+    torch.testing.assert_close(cand, ref_logits, atol=LOGIT_ATOL, rtol=LOGIT_RTOL)

@@ -149,29 +149,39 @@ def gather_cls_from_flat(
         dtype=ttnn.uint32,
         layout=ttnn.ROW_MAJOR_LAYOUT,
     )
+    # ttnn.embedding requires a BFLOAT16 weight table; the encoder hidden is
+    # already bf16 in production, but cast defensively so an fp32 flat (e.g. a
+    # test feeding fp32 rows) also works. The row values are unchanged (widening
+    # is exact; a bf16 input is a no-op).
     flat_rm = ttnn.to_layout(flat_hidden, ttnn.ROW_MAJOR_LAYOUT)
+    if flat_rm.dtype != ttnn.bfloat16:
+        flat_rm = ttnn.typecast(flat_rm, ttnn.bfloat16)
     gathered = ttnn.embedding(idx_tt, flat_rm)  # [1, num_reqs, D]
-    return ttnn.reshape(gathered, (first_token_indices.numel(), d))
+    gathered = ttnn.reshape(gathered, (first_token_indices.numel(), d))
+    # The device head runs matmuls, which need TILE layout; ttnn.embedding emits
+    # ROW_MAJOR, so convert before returning.
+    return ttnn.to_layout(gathered, ttnn.TILE_LAYOUT)
 
 
-class RerankerChunkedHidden:
-    """Device (ttnn) encoder hidden states carried from forward to the pooler.
+def _first_token_indices_cpu(pooling_metadata, num_reqs: int) -> torch.Tensor:
+    """Per-request first-token index into the flat token axis (CLSPool selector).
 
-    The reranker runs the encoder over device-sized chunks; the canonical path
-    (``forward(return_full_hidden_states=True)``) returns the un-pooled hidden
-    for the whole batch so the pooler can do CLS extraction + scoring. Rather
-    than concatenate variable-length device tensors, this holds the per-chunk
-    ttnn hidden plus each chunk's padded ``attention_mask`` (for cropping) and
-    real ``chunk_batch_size`` (the number of real rows in the chunk). The pooler
-    scores each chunk on device and concatenates the small per-request logits.
-
-    It deliberately exposes no torch ``.device`` so the runner treats it as a
-    device-native hidden (builds the pooling cursor on CPU; see the pooling
-    runner's device tolerance).
+    Prefers the pooling cursor's ``first_token_indices`` (the standard
+    ``CLSPool`` selector built by the runner); returns it as a CPU int tensor for
+    the device gather. Falls back to computing prefix sums from ``prompt_lens``
+    when no cursor is present (e.g. a stubbed metadata in a unit test), which is
+    the same quantity the cursor holds for single-shot prefill pooling.
     """
-
-    def __init__(self, chunks: list[tuple[ttnn.Tensor, torch.Tensor, int]]):
-        self.chunks = chunks
+    cursor = getattr(pooling_metadata, "pooling_cursor", None)
+    if cursor is not None and getattr(cursor, "first_token_indices_gpu", None) is not None:
+        return cursor.first_token_indices_gpu.detach().to("cpu").to(torch.int32)
+    prompt_lens = pooling_metadata.prompt_lens
+    if not torch.is_tensor(prompt_lens):
+        prompt_lens = torch.tensor(list(prompt_lens), dtype=torch.int64)
+    starts = torch.zeros(num_reqs, dtype=torch.int32)
+    if num_reqs > 1:
+        starts[1:] = torch.cumsum(prompt_lens.to(torch.int64), 0)[:-1].to(torch.int32)
+    return starts
 
 
 class RerankerClassifierPooler(_PoolerBase):
@@ -201,34 +211,33 @@ class RerankerClassifierPooler(_PoolerBase):
         return {"classify", "score"}
 
     def forward(self, hidden_states: ttnn.Tensor, pooling_metadata):
-        """Score a batch of encoder hidden states into per-request logits.
+        """Score a flat ``[total_tokens, hidden]`` batch into per-request logits.
 
-        ``hidden_states`` is the model's device (ttnn) last-hidden-state for the
-        batch: either a single ttnn tensor (one chunk) or a
-        :class:`RerankerChunkedHidden` carrying the per-chunk device hidden.
-        ``pooling_metadata`` carries one ``pooling_params`` entry per request.
-        Scoring runs on device (CLS extract + head per chunk) and only the final
-        ``[B, 1]`` logit is moved to host, returned as a per-request list (a
-        valid ``PoolerOutput``).
+        Upstream-standard cross-encoder pooling (``CLSPool`` + classifier head),
+        done device-native:
+
+        - ``hidden_states`` is the model's flat, unpadded ``[total_tokens, D]``
+          device (ttnn) hidden -- every scheduled request's real tokens
+          concatenated in request order (``model.forward`` returns this).
+        - CLS selection uses ``pooling_metadata``'s cursor
+          ``first_token_indices`` (the standard ``CLSPool`` selector), gathered
+          on device.
+        - the fp32 device head maps the ``[num_reqs, D]`` CLS rows to
+          ``[num_reqs, 1]`` logits.
+
+        Scoring stays on device; only the final ``[num_reqs, 1]`` logit crosses
+        to host, returned as a per-request list (a valid ``PoolerOutput``).
         """
         classifier = self._model.classifier
         device = self._model.device
-        if isinstance(hidden_states, RerankerChunkedHidden):
-            per_chunk = []
-            for output, attention_mask, chunk_batch_size in hidden_states.chunks:
-                b, s = attention_mask.shape
-                logits_tt = score_cls_on_device(output, classifier, b, s)
-                chunk_logits = to_torch_auto_compose(
-                    logits_tt, device=device
-                ).to(torch.float32)
-                per_chunk.append(chunk_logits.reshape(-1, 1)[:chunk_batch_size])
-            logits = torch.cat(per_chunk, dim=0)
-        else:
-            logits_tt = score_cls_on_device(hidden_states, classifier)
-            logits = (
-                to_torch_auto_compose(logits_tt, device=device)
-                .to(torch.float32)
-                .reshape(-1, 1)
-            )
         num_reqs = len(pooling_metadata.pooling_params)
+
+        first_indices = _first_token_indices_cpu(pooling_metadata, num_reqs)
+        cls_tt = gather_cls_from_flat(hidden_states, first_indices, device)
+        logits_tt = classifier(cls_tt)  # [num_reqs, 1] on device
+        logits = (
+            to_torch_auto_compose(logits_tt, device=device)
+            .to(torch.float32)
+            .reshape(-1, 1)
+        )
         return [logits[i] for i in range(num_reqs)]
