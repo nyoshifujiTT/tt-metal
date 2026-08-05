@@ -236,3 +236,72 @@ def run_qwen3_embedding_single_trace(device, prompts, model_name, sequence_lengt
 @pytest.mark.parametrize("model_name, sequence_length", [(DEFAULT_MODEL_NAME, DEFAULT_SEQUENCE_LENGTH)])
 def test_qwen3_embedding_single_trace(device, model_name, sequence_length, model_location_generator):
     run_qwen3_embedding_single_trace(device, prompts, model_name, sequence_length, model_location_generator)
+
+
+def run_qwen3_embedding_batched(device, prompts, model_name, sequence_length, model_location_generator, batch_size):
+    """Verify the multi-prompt batch path (``max_batch_size > 1``).
+
+    Runs a real ``batch_size``-wide forward and asserts every row matches both the
+    single-prompt pooled path (``cos > 0.999``) and its HF reference
+    (``cos > 0.95``), and that all rows are unit-norm. Uses equal-length prompts so
+    the batch-shared ``prompt_lens`` picks the correct last token for every row
+    (the constraint the serving runner honors by batching same-length requests).
+    """
+    _require_single_device(device)
+    resolved_model_name = _resolve_model_name(model_name, model_location_generator)
+    tokenizer = AutoTokenizer.from_pretrained(resolved_model_name, padding_side="left")
+
+    # Build a batch of equal-length prompts by repeating the base prompts up to
+    # batch_size; identical prompts share one real length so the batch-wide
+    # prompt_lens is exact for every row.
+    base = list(prompts)
+    batch_prompts = [base[i % len(base)] for i in range(batch_size)]
+    # Force a single shared real length: tokenize each and pad/truncate to the max.
+    lengths = [len(tokenizer(p, truncation=True, max_length=sequence_length)["input_ids"]) for p in batch_prompts]
+    shared_len = max(lengths)
+
+    generator_model = Qwen3ForEmbedding(
+        device=device, max_batch_size=batch_size, max_seq_len=sequence_length, model_name=resolved_model_name
+    )
+
+    batch = tokenizer(
+        batch_prompts,
+        padding="max_length",
+        truncation=True,
+        max_length=shared_len,
+        return_tensors="pt",
+    )
+    tt_hidden = generator_model.forward(
+        input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]
+    ).to(torch.float32)
+    if tt_hidden.dim() == 1:
+        tt_hidden = tt_hidden.unsqueeze(0)
+    tt_batched = F.normalize(tt_hidden, p=2, dim=1)
+
+    assert tt_batched.shape[0] == batch_size, f"expected {batch_size} rows, got {tt_batched.shape[0]}"
+    assert torch.allclose(
+        tt_batched.norm(dim=1), torch.ones(batch_size), atol=1e-2
+    ), "batched TT embeddings are not L2-normalized"
+
+    # Single-device B=1 reference for the same prompts (own generator to avoid
+    # cross-contaminating the batched model's state).
+    single_model = Qwen3ForEmbedding(
+        device=device, max_batch_size=1, max_seq_len=sequence_length, model_name=resolved_model_name
+    )
+    for i, prompt in enumerate(batch_prompts):
+        pooled_single = _tt_embedding(single_model, tokenizer, prompt)
+        reference = _reference_embedding(resolved_model_name, tokenizer, prompt)
+        cos_batch_single = float(F.cosine_similarity(tt_batched[i : i + 1], pooled_single).mean())
+        cos_batch_hf = float(F.cosine_similarity(tt_batched[i : i + 1], reference).mean())
+        logger.info(
+            f"batched[{i}] B={batch_size}: cos(batched, B1)={cos_batch_single:.6f} "
+            f"cos(batched, HF)={cos_batch_hf:.4f}"
+        )
+        assert cos_batch_single > 0.999, f"batched row {i} diverged from B=1 (cos {cos_batch_single:.6f})"
+        assert cos_batch_hf > 0.95, f"batched row {i} does not match HF (cos {cos_batch_hf:.4f})"
+
+
+@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("model_name, sequence_length", [(DEFAULT_MODEL_NAME, DEFAULT_SEQUENCE_LENGTH)])
+def test_qwen3_embedding_batched(device, model_name, sequence_length, model_location_generator, batch_size):
+    run_qwen3_embedding_batched(device, prompts, model_name, sequence_length, model_location_generator, batch_size)
