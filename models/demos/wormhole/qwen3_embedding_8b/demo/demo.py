@@ -41,6 +41,15 @@ from models.demos.wormhole.qwen3_embedding_8b.demo.generator_vllm import Qwen3Fo
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_SEQUENCE_LENGTH = 8192
 
+# Checkpoints the accuracy demo runs against. The whole Qwen3-Embedding family
+# shares this metal implementation; both are single-device and cap the context
+# at 8192 for the P150 bring-up. 0.6B is the default; 8B is opt-in via -k so a
+# plain run stays fast.
+EMBEDDING_MODELS = [
+    (DEFAULT_MODEL_NAME, DEFAULT_SEQUENCE_LENGTH),
+    ("Qwen/Qwen3-Embedding-8B", DEFAULT_SEQUENCE_LENGTH),
+]
+
 prompts = [
     "Artificial intelligence is transforming how we interact with technology.",
     "AI is changing the way humans use computers and machines.",
@@ -168,7 +177,9 @@ def run_qwen3_embedding_demo(device, prompts, model_name, sequence_length, model
     return tt
 
 
-@pytest.mark.parametrize("model_name, sequence_length", [(DEFAULT_MODEL_NAME, DEFAULT_SEQUENCE_LENGTH)])
+@pytest.mark.parametrize(
+    "model_name, sequence_length", EMBEDDING_MODELS, ids=["0.6B", "8B"]
+)
 def test_qwen3_embedding_demo(device, model_name, sequence_length, model_location_generator):
     run_qwen3_embedding_demo(device, prompts, model_name, sequence_length, model_location_generator)
 
