@@ -121,8 +121,9 @@ The demo's tests, and what each proves:
 - `test_qwen3_embedding_single_trace` — the on-device single-trace embedding
   equals the pooled path (`cos > 0.999`) and is unit-norm on device.
 - `test_qwen3_embedding_batched` — a real `batch_size=4` forward; every row is
-  unit-norm, stays close to its `batch_size=1` embedding (`cos > 0.98`; batched
-  prefill is not bit-exact vs B=1 under bf8) and matches HF (`cos > 0.95`).
+  unit-norm, matches its `batch_size=1` embedding (`cos > 0.99`; batched prefill
+  is not bit-exact vs B=1 under bf8, ~0.996) and matches HF (`cos > 0.95`). Uses
+  one prompt repeated so every row shares the batch-wide `prompt_lens` length.
 - `test_qwen3_embedding_long_context` — a ~4500-token prompt exercises the long
   single-chunk prefill (>4096); unit-norm and `cos(TT, HF) > 0.95`.
 - `test_qwen3_embedding_accessors` — `get_embedding_dim` / `get_max_seq_len` /

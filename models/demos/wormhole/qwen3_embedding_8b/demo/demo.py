@@ -253,25 +253,25 @@ def run_qwen3_embedding_batched(device, prompts, model_name, sequence_length, mo
     """Verify the multi-prompt batch path (``max_batch_size > 1``).
 
     Runs a real ``batch_size``-wide forward and asserts every row is unit-norm,
-    stays close to its single-prompt pooled embedding (``cos > 0.98`` -- a sanity
-    bound, since batched prefill uses a different padded trace than B=1 and is not
-    bit-exact under bf8 weights), and matches its HF reference (``cos > 0.95`` --
-    the real accuracy contract). Uses equal-length prompts so the batch-shared
-    ``prompt_lens`` picks the correct last token for every row (the constraint the
-    serving runner honors by batching same-length requests).
+    matches its single-prompt pooled embedding (``cos > 0.99``; batched prefill is
+    not bit-exact vs B=1 under bf8 weights, but agrees to ~0.996) and matches its
+    HF reference (``cos > 0.95`` -- the real accuracy contract).
+
+    The batch is one prompt repeated ``batch_size`` times. The metal forward
+    derives the last-token index from a single ``prompt_lens`` value shared across
+    the batch, so every row must have the *same real length*; identical prompts
+    guarantee that. (Batching distinct prompts of different real lengths -- padded
+    to a common width -- would make the shared ``prompt_lens`` point past the real
+    last token of the shorter rows and corrupt their embeddings; the serving
+    runner avoids this by batching same-length requests.)
     """
     _require_single_device(device)
     resolved_model_name = _resolve_model_name(model_name, model_location_generator)
     tokenizer = AutoTokenizer.from_pretrained(resolved_model_name, padding_side="left")
 
-    # Build a batch of equal-length prompts by repeating the base prompts up to
-    # batch_size; identical prompts share one real length so the batch-wide
-    # prompt_lens is exact for every row.
-    base = list(prompts)
-    batch_prompts = [base[i % len(base)] for i in range(batch_size)]
-    # Force a single shared real length: tokenize each and pad/truncate to the max.
-    lengths = [len(tokenizer(p, truncation=True, max_length=sequence_length)["input_ids"]) for p in batch_prompts]
-    shared_len = max(lengths)
+    # One prompt repeated batch_size times: every row has the same real length, so
+    # the batch-shared prompt_lens picks the correct last token for every row.
+    batch_prompts = [prompts[0]] * batch_size
 
     generator_model = Qwen3ForEmbedding(
         device=device, max_batch_size=batch_size, max_seq_len=sequence_length, model_name=resolved_model_name
@@ -279,9 +279,9 @@ def run_qwen3_embedding_batched(device, prompts, model_name, sequence_length, mo
 
     batch = tokenizer(
         batch_prompts,
-        padding="max_length",
+        padding=True,
         truncation=True,
-        max_length=shared_len,
+        max_length=sequence_length,
         return_tensors="pt",
     )
     tt_hidden = generator_model.forward(
@@ -310,11 +310,11 @@ def run_qwen3_embedding_batched(device, prompts, model_name, sequence_length, mo
             f"batched[{i}] B={batch_size}: cos(batched, B1)={cos_batch_single:.6f} "
             f"cos(batched, HF)={cos_batch_hf:.4f}"
         )
-        # cos(batched, B1) is a sanity bound, not a bit-exactness check: batched
-        # (B>1) prefill uses a different padded trace than the B=1 path, so with
-        # bf8 weights the two agree closely but not bit-for-bit (~0.996 measured on
-        # P150). The real accuracy contract is matching the HF reference.
-        assert cos_batch_single > 0.98, f"batched row {i} diverged from B=1 (cos {cos_batch_single:.6f})"
+        # batched (B>1) prefill uses a different padded trace than the B=1 path, so
+        # with bf8 weights the two agree closely but not bit-for-bit (~0.996 on
+        # P150); this is a tight sanity bound, while matching the HF reference is
+        # the real accuracy contract.
+        assert cos_batch_single > 0.99, f"batched row {i} diverged from B=1 (cos {cos_batch_single:.6f})"
         assert cos_batch_hf > 0.95, f"batched row {i} does not match HF (cos {cos_batch_hf:.4f})"
 
 
