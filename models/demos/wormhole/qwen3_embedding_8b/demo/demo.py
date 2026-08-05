@@ -305,3 +305,45 @@ def run_qwen3_embedding_batched(device, prompts, model_name, sequence_length, mo
 @pytest.mark.parametrize("model_name, sequence_length", [(DEFAULT_MODEL_NAME, DEFAULT_SEQUENCE_LENGTH)])
 def test_qwen3_embedding_batched(device, model_name, sequence_length, model_location_generator, batch_size):
     run_qwen3_embedding_batched(device, prompts, model_name, sequence_length, model_location_generator, batch_size)
+
+
+def _build_long_prompt(tokenizer, target_tokens: int) -> str:
+    """Build a prompt whose tokenization is ~``target_tokens`` long by repeating text."""
+    unit = "Artificial intelligence systems process large amounts of natural language data. "
+    unit_tokens = len(tokenizer(unit)["input_ids"])
+    repeats = max(1, target_tokens // max(1, unit_tokens))
+    return unit * repeats
+
+
+def run_qwen3_embedding_long_context(device, model_name, sequence_length, model_location_generator, target_tokens):
+    """Exercise the long-context prefill (single chunk up to ``sequence_length``).
+
+    The default prompts are short, so they never reach the >4096-token regime that
+    metal serves as one prefill chunk (the path validated for the P150 8192 cap).
+    Feed one long prompt (~``target_tokens``) and assert the TT embedding is
+    unit-norm and still matches the HF reference (cos>0.95), proving the long
+    single-chunk prefill preserves the embedding numerics.
+    """
+    _require_single_device(device)
+    resolved_model_name = _resolve_model_name(model_name, model_location_generator)
+    tokenizer = AutoTokenizer.from_pretrained(resolved_model_name, padding_side="left")
+
+    long_prompt = _build_long_prompt(tokenizer, target_tokens)
+    n_tokens = len(tokenizer(long_prompt, truncation=True, max_length=sequence_length)["input_ids"])
+
+    generator_model = Qwen3ForEmbedding(
+        device=device, max_batch_size=1, max_seq_len=sequence_length, model_name=resolved_model_name
+    )
+    tt = _tt_embedding(generator_model, tokenizer, long_prompt)
+    reference = _reference_embedding(resolved_model_name, tokenizer, long_prompt)
+    cos_tt_hf = float(F.cosine_similarity(tt, reference).mean())
+    logger.info(f"long-context: n_tokens={n_tokens} dim={tt.shape[1]} cos(TT, HF)={cos_tt_hf:.4f}")
+
+    assert torch.allclose(tt.norm(dim=1), torch.ones(tt.shape[0]), atol=1e-2), "long-context TT embedding not L2-normalized"
+    assert cos_tt_hf > 0.95, f"long-context embedding does not match HF (cos {cos_tt_hf:.4f})"
+
+
+@pytest.mark.parametrize("target_tokens", [4500])
+@pytest.mark.parametrize("model_name, sequence_length", [(DEFAULT_MODEL_NAME, DEFAULT_SEQUENCE_LENGTH)])
+def test_qwen3_embedding_long_context(device, model_name, sequence_length, model_location_generator, target_tokens):
+    run_qwen3_embedding_long_context(device, model_name, sequence_length, model_location_generator, target_tokens)
