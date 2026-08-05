@@ -347,3 +347,41 @@ def run_qwen3_embedding_long_context(device, model_name, sequence_length, model_
 @pytest.mark.parametrize("model_name, sequence_length", [(DEFAULT_MODEL_NAME, DEFAULT_SEQUENCE_LENGTH)])
 def test_qwen3_embedding_long_context(device, model_name, sequence_length, model_location_generator, target_tokens):
     run_qwen3_embedding_long_context(device, model_name, sequence_length, model_location_generator, target_tokens)
+
+
+def run_qwen3_embedding_accessors(device, model_name, sequence_length, model_location_generator):
+    """Check the model's public accessor methods.
+
+    ``Qwen3ForEmbedding`` exposes ``get_embedding_dim`` / ``get_max_seq_len`` /
+    ``get_max_batch_size`` (used by the serving stack to size buffers). Assert they
+    report values consistent with the constructor args and the resolved HF config,
+    and that a real forward returns that embedding dimension. Accessors resolve the
+    config without a device forward, so this stays cheap.
+    """
+    _require_single_device(device)
+    resolved_model_name = _resolve_model_name(model_name, model_location_generator)
+    tokenizer = AutoTokenizer.from_pretrained(resolved_model_name, padding_side="left")
+
+    max_batch_size = 2
+    generator_model = Qwen3ForEmbedding(
+        device=device, max_batch_size=max_batch_size, max_seq_len=sequence_length, model_name=resolved_model_name
+    )
+
+    dim = generator_model.get_embedding_dim()
+    reported_seq_len = generator_model.get_max_seq_len()
+    reported_batch = generator_model.get_max_batch_size()
+    logger.info(f"accessors: dim={dim} max_seq_len={reported_seq_len} max_batch_size={reported_batch}")
+
+    hidden_size = getattr(generator_model.config, "hidden_size", getattr(generator_model.config, "dim", None))
+    assert dim == hidden_size, f"get_embedding_dim {dim} != config hidden_size {hidden_size}"
+    assert reported_seq_len == sequence_length, f"get_max_seq_len {reported_seq_len} != {sequence_length}"
+    assert reported_batch == max_batch_size, f"get_max_batch_size {reported_batch} != {max_batch_size}"
+
+    # A real embedding must have exactly get_embedding_dim() columns.
+    tt = _tt_embedding(generator_model, tokenizer, prompts[0])
+    assert tt.shape[1] == dim, f"embedding dim {tt.shape[1]} != get_embedding_dim {dim}"
+
+
+@pytest.mark.parametrize("model_name, sequence_length", [(DEFAULT_MODEL_NAME, DEFAULT_SEQUENCE_LENGTH)])
+def test_qwen3_embedding_accessors(device, model_name, sequence_length, model_location_generator):
+    run_qwen3_embedding_accessors(device, model_name, sequence_length, model_location_generator)
