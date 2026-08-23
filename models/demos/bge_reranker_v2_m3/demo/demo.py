@@ -27,13 +27,12 @@ Covered:
 Requires a single Tenstorrent device.
 """
 
-import os
-
 import pytest
 import torch
 from loguru import logger
 
 from models.demos.bge_reranker_v2_m3.demo.generator_vllm import BgeRerankerV2M3
+from models.demos.wormhole.bge_m3.tt.common import resolve_model_name
 
 DEFAULT_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 DEFAULT_MAX_SEQ_LEN = 8192
@@ -61,18 +60,6 @@ RERANK_DOCUMENTS = [
 def _require_single_device(device) -> None:
     if hasattr(device, "get_num_devices") and device.get_num_devices() != 1:
         raise ValueError("bge-reranker-v2-m3 demo currently expects a single device")
-
-
-def _resolve_model_name(model_name, model_location_generator):
-    # Allow an explicit local checkpoint via HF_MODEL (the convention other
-    # demos use, e.g. gpt-oss/gemma) so the demo runs offline against a local
-    # snapshot without hitting the Hugging Face Hub.
-    hf_model = os.getenv("HF_MODEL")
-    if hf_model:
-        return hf_model
-    if model_location_generator is None:
-        return model_name
-    return str(model_location_generator(model_name, download_if_ci_v2=True, ci_v2_timeout_in_s=1800))
 
 
 def _build_reranker(device, resolved_model_name, max_seq_len):
@@ -119,7 +106,7 @@ def _hf_logit(resolved_model_name, query, doc, max_length):
 def run_reranker_score(device, model_name, model_location_generator):
     """Score positive/negative pairs on device and check against HF logits."""
     _require_single_device(device)
-    resolved_model_name = _resolve_model_name(model_name, model_location_generator)
+    resolved_model_name = resolve_model_name(model_name, model_location_generator)
     reranker = _build_reranker(device, resolved_model_name, DEFAULT_MAX_SEQ_LEN)
 
     scores = {}
@@ -141,7 +128,7 @@ def run_reranker_score(device, model_name, model_location_generator):
 def run_reranker_rerank(device, model_name, model_location_generator):
     """Score one query against several documents and rank them (host-side sort)."""
     _require_single_device(device)
-    resolved_model_name = _resolve_model_name(model_name, model_location_generator)
+    resolved_model_name = resolve_model_name(model_name, model_location_generator)
     reranker = _build_reranker(device, resolved_model_name, DEFAULT_MAX_SEQ_LEN)
 
     scored = []
@@ -163,7 +150,7 @@ def run_reranker_rerank(device, model_name, model_location_generator):
 def run_reranker_long_seq(device, model_name, model_location_generator):
     """Exercise the chunked long-sequence (8192-token) encoder path in one forward."""
     _require_single_device(device)
-    resolved_model_name = _resolve_model_name(model_name, model_location_generator)
+    resolved_model_name = resolve_model_name(model_name, model_location_generator)
     reranker = _build_reranker(device, resolved_model_name, DEFAULT_MAX_SEQ_LEN)
 
     query = QUERY
