@@ -24,7 +24,7 @@ def test_falls_back_to_repo_id_without_generator(monkeypatch):
     assert resolve_model_name(REPO_ID, None) == REPO_ID
 
 
-def test_uses_generator_with_ci_v2_download(monkeypatch):
+def test_generator_defaults_match_the_fixture_defaults(monkeypatch):
     monkeypatch.delenv("HF_MODEL", raising=False)
     seen = {}
 
@@ -37,8 +37,23 @@ def test_uses_generator_with_ci_v2_download(monkeypatch):
 
     assert resolved == "/mnt/MLPerf/bge-reranker-v2-m3"
     assert seen["model_version"] == REPO_ID
-    # CIv2 checkpoints must be downloaded on demand, with the long timeout the
-    # large reranker/embedding snapshots need.
+    # Callers must opt in to CIv2 downloads; the defaults mirror the
+    # `model_location_generator` fixture so migrating a caller to this helper
+    # cannot silently change how CI resolves its checkpoint.
+    assert seen["download_if_ci_v2"] is False
+    assert seen["ci_v2_timeout_in_s"] == 300
+
+
+def test_ci_v2_download_is_opt_in(monkeypatch):
+    monkeypatch.delenv("HF_MODEL", raising=False)
+    seen = {}
+
+    def _generator(model_version, **kwargs):
+        seen.update(kwargs)
+        return "/mnt/MLPerf/x"
+
+    resolve_model_name(REPO_ID, _generator, download_if_ci_v2=True, ci_v2_timeout_in_s=1800)
+
     assert seen["download_if_ci_v2"] is True
     assert seen["ci_v2_timeout_in_s"] == 1800
 

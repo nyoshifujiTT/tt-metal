@@ -106,7 +106,9 @@ def _hf_logit(resolved_model_name, query, doc, max_length):
 def run_reranker_score(device, model_name, model_location_generator):
     """Score positive/negative pairs on device and check against HF logits."""
     _require_single_device(device)
-    resolved_model_name = resolve_model_name(model_name, model_location_generator)
+    resolved_model_name = resolve_model_name(
+        model_name, model_location_generator, download_if_ci_v2=True, ci_v2_timeout_in_s=1800
+    )
     reranker = _build_reranker(device, resolved_model_name, DEFAULT_MAX_SEQ_LEN)
 
     scores = {}
@@ -128,7 +130,9 @@ def run_reranker_score(device, model_name, model_location_generator):
 def run_reranker_rerank(device, model_name, model_location_generator):
     """Score one query against several documents and rank them (host-side sort)."""
     _require_single_device(device)
-    resolved_model_name = resolve_model_name(model_name, model_location_generator)
+    resolved_model_name = resolve_model_name(
+        model_name, model_location_generator, download_if_ci_v2=True, ci_v2_timeout_in_s=1800
+    )
     reranker = _build_reranker(device, resolved_model_name, DEFAULT_MAX_SEQ_LEN)
 
     scored = []
@@ -150,7 +154,9 @@ def run_reranker_rerank(device, model_name, model_location_generator):
 def run_reranker_long_seq(device, model_name, model_location_generator):
     """Exercise the chunked long-sequence (8192-token) encoder path in one forward."""
     _require_single_device(device)
-    resolved_model_name = resolve_model_name(model_name, model_location_generator)
+    resolved_model_name = resolve_model_name(
+        model_name, model_location_generator, download_if_ci_v2=True, ci_v2_timeout_in_s=1800
+    )
     reranker = _build_reranker(device, resolved_model_name, DEFAULT_MAX_SEQ_LEN)
 
     query = QUERY

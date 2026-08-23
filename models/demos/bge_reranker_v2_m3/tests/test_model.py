@@ -31,7 +31,9 @@ LOGIT_ATOL = 0.5
 @pytest.fixture(scope="module")
 def artifacts(model_location_generator):
     transformers = pytest.importorskip("transformers")
-    model_id_or_path = resolve_model_name(MODEL_ID, model_location_generator)
+    model_id_or_path = resolve_model_name(
+        MODEL_ID, model_location_generator, download_if_ci_v2=True, ci_v2_timeout_in_s=1800
+    )
     hf_model = transformers.AutoModelForSequenceClassification.from_pretrained(model_id_or_path).eval()
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id_or_path)
     state_dict = hf_model.state_dict()
