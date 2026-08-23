@@ -44,6 +44,28 @@ model; the device model produces per-pair relevance logits only.
 - The `BAAI/bge-reranker-v2-m3` weights (downloaded from Hugging Face, or provided
   via the test `model_location_generator`).
 
+### Environment
+Every command below assumes a tt-metal built from the commit you are testing,
+with `TT_METAL_HOME` set and its Python environment active:
+
+```bash
+source $TT_METAL_HOME/python_env/bin/activate
+```
+
+If you run the demo inside a container image (for example the
+`vllm-tt-metal-src-*` images used by tt-inference-server), build the image from
+the commit under test, e.g. via tt-inference-server:
+
+```bash
+python3 scripts/build_docker_images.py --build-metal-commit <tt-metal-sha>
+```
+
+Do not bind-mount `models/demos/...` over a pre-built image to pick up local
+edits. It silently mixes model code with a tt-metal built from a different
+commit, so a pass proves nothing about the commit you intend to ship: the C++
+runtime, the Python package and the model code no longer come from the same
+revision. Rebuild the image from the commit instead.
+
 ## How to Run
 
 ### Demo (single device)
