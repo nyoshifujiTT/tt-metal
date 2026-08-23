@@ -14,7 +14,7 @@ the model uses at runtime. Requires a single Tenstorrent device.
 import pytest
 import torch
 
-from models.demos.wormhole.bge_m3.tt.common import create_tt_model
+from models.demos.wormhole.bge_m3.tt.common import create_tt_model, resolve_model_name
 from models.demos.wormhole.bge_m3.tests.test_utils import require_single_device
 from models.demos.bge_reranker_v2_m3.demo.generator_vllm import BgeRerankerV2M3
 from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head_tt import (
@@ -31,7 +31,7 @@ LOGIT_ATOL = 0.5
 @pytest.fixture(scope="module")
 def artifacts(model_location_generator):
     transformers = pytest.importorskip("transformers")
-    model_id_or_path = str(model_location_generator(MODEL_ID, download_if_ci_v2=True, ci_v2_timeout_in_s=1800))
+    model_id_or_path = resolve_model_name(MODEL_ID, model_location_generator)
     hf_model = transformers.AutoModelForSequenceClassification.from_pretrained(model_id_or_path).eval()
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id_or_path)
     state_dict = hf_model.state_dict()
