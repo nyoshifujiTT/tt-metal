@@ -67,8 +67,8 @@ def _record_chunks(input_ids, **kwargs):
 @pytest.mark.parametrize(
     "batch,seq_len,exp_padded_seq",
     [
-        (1, 5, 128),      # tiny -> 128
-        (4, 200, 256),    # 200 -> 256
+        (1, 5, 128),  # tiny -> 128
+        (4, 200, 256),  # 200 -> 256
         (8, 1000, 1024),  # 1000 -> 1024
         (2, 1500, 2048),  # 1024<seq<=2048 -> 2048
         (3, 8000, 8192),  # long -> 8192

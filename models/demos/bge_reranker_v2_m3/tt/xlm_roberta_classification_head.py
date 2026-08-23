@@ -85,9 +85,7 @@ class XLMRobertaClassificationHead:
         at inference (dropout is identity): dense -> tanh -> out_proj. See the
         module docstring for the pinned upstream permalinks.
         """
-        x = torch.nn.functional.linear(
-            cls_hidden.to(torch.float32), self.dense_weight, self.dense_bias
-        )
+        x = torch.nn.functional.linear(cls_hidden.to(torch.float32), self.dense_weight, self.dense_bias)
         x = torch.tanh(x)
         x = torch.nn.functional.linear(x, self.out_proj_weight, self.out_proj_bias)
         return x

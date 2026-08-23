@@ -32,6 +32,7 @@ location if a second such model is added.
 from __future__ import annotations
 
 import torch
+
 import ttnn
 
 

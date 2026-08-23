@@ -24,18 +24,16 @@ import torch
 
 import ttnn
 from models.common.auto_compose import to_torch_auto_compose
-from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_length
-from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head_tt import (
-    XLMRobertaClassificationHeadTT,
-)
+from models.demos.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict
 from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import (
     RerankerClassifierPooler,
     flatten_request_hidden_to_device,
     score_cls_on_device,
 )
-from models.demos.bge_reranker_v2_m3.tt.model_config import load_reranker_state_dict
-from models.demos.wormhole.bge_m3.demo.xlm_roberta_encoder import XlmRobertaEncoder
+from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head_tt import XLMRobertaClassificationHeadTT
 from models.demos.wormhole.bge_m3.demo.generator_vllm import _crop_hidden_state_ttnn
+from models.demos.wormhole.bge_m3.demo.xlm_roberta_encoder import XlmRobertaEncoder
+from models.demos.wormhole.bge_m3.tt.model_config import get_padded_sequence_length
 
 
 class BgeRerankerV2M3(XlmRobertaEncoder):

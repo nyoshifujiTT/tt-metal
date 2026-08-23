@@ -19,9 +19,7 @@ import pytest
 import torch
 
 from models.demos.bge_reranker_v2_m3.tt import model_config
-from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import (
-    XLMRobertaClassificationHead,
-)
+from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import XLMRobertaClassificationHead
 
 
 class _FakeModel:

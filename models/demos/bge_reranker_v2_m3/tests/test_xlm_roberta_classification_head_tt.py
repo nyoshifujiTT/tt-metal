@@ -22,17 +22,9 @@ import pytest
 import torch
 
 import ttnn
-from models.demos.wormhole.bge_m3.tests.test_utils import (
-    require_single_device,
-    to_torch,
-    to_ttnn_tensor,
-)
-from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import (
-    XLMRobertaClassificationHead,
-)
-from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head_tt import (
-    XLMRobertaClassificationHeadTT,
-)
+from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head import XLMRobertaClassificationHead
+from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head_tt import XLMRobertaClassificationHeadTT
+from models.demos.wormhole.bge_m3.tests.test_utils import require_single_device, to_torch, to_ttnn_tensor
 
 HIDDEN_SIZE = 1024
 # fp32-dest-acc + HiFi4 on device vs host fp32: logits agree to ~1e-3 (tile
@@ -70,6 +62,4 @@ def test_device_head_matches_host_reference(device, batch_size, reset_seeds):
     cand_logits = to_torch(logits_tt, (batch_size, 1))
 
     assert cand_logits.shape == (batch_size, 1)
-    torch.testing.assert_close(
-        cand_logits, ref_logits, atol=LOGIT_ATOL, rtol=LOGIT_RTOL
-    )
+    torch.testing.assert_close(cand_logits, ref_logits, atol=LOGIT_ATOL, rtol=LOGIT_RTOL)

@@ -12,8 +12,8 @@ import inspect
 
 import torch
 
-from models.demos.bge_reranker_v2_m3.demo.generator_vllm import BgeRerankerV2M3
 from models.demos.bge_reranker_v2_m3.demo import generator_vllm as gen_mod
+from models.demos.bge_reranker_v2_m3.demo.generator_vllm import BgeRerankerV2M3
 
 
 def test_cross_encoder_class_flags():
@@ -47,9 +47,7 @@ def test_first_token_indices_prefers_cursor_else_prompt_lens():
     # of prompt_lens (the same quantity for single-shot prefill pooling).
     from types import SimpleNamespace
 
-    from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import (
-        _first_token_indices_cpu,
-    )
+    from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import _first_token_indices_cpu
 
     # Cursor present: use it verbatim.
     cur = SimpleNamespace(first_token_indices_gpu=torch.tensor([0, 3, 5]))
@@ -190,9 +188,7 @@ def test_pooler_available_before_first_forward():
     # construction and advertise classify/score without a head.
     model = BgeRerankerV2M3.__new__(BgeRerankerV2M3)
     # Simulate the parts of __init__ that install the pooler (no device / super).
-    from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import (
-        RerankerClassifierPooler,
-    )
+    from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import RerankerClassifierPooler
 
     model.classifier = None
     model.pooler = RerankerClassifierPooler(model)

@@ -14,12 +14,10 @@ the model uses at runtime. Requires a single Tenstorrent device.
 import pytest
 import torch
 
-from models.demos.wormhole.bge_m3.tt.common import create_tt_model, resolve_model_name
-from models.demos.wormhole.bge_m3.tests.test_utils import require_single_device
 from models.demos.bge_reranker_v2_m3.demo.generator_vllm import BgeRerankerV2M3
-from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head_tt import (
-    XLMRobertaClassificationHeadTT,
-)
+from models.demos.bge_reranker_v2_m3.tt.xlm_roberta_classification_head_tt import XLMRobertaClassificationHeadTT
+from models.demos.wormhole.bge_m3.tests.test_utils import require_single_device
+from models.demos.wormhole.bge_m3.tt.common import create_tt_model, resolve_model_name
 
 MODEL_ID = "BAAI/bge-reranker-v2-m3"
 BATCH_SIZE = 1

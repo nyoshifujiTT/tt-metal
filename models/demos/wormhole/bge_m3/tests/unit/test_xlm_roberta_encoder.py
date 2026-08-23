@@ -110,9 +110,7 @@ def test_validate_request_bounds():
 def test_initialize_vllm_model_builds_from_vllm_config_and_rejects_optimizations():
     dev = object()
     model_config = types.SimpleNamespace(override_tt_config=None)
-    vllm_config = types.SimpleNamespace(
-        model_config=model_config, device_config=types.SimpleNamespace(device=dev)
-    )
+    vllm_config = types.SimpleNamespace(model_config=model_config, device_config=types.SimpleNamespace(device=dev))
     m = _ConcreteEncoder.initialize_vllm_model(
         hf_config=None, mesh_device=dev, max_batch_size=2, vllm_config=vllm_config
     )
@@ -120,9 +118,7 @@ def test_initialize_vllm_model_builds_from_vllm_config_and_rejects_optimizations
     assert m.device is dev
 
     with pytest.raises(ValueError):
-        _ConcreteEncoder.initialize_vllm_model(
-            hf_config=None, mesh_device=dev, max_batch_size=2, optimizations="perf"
-        )
+        _ConcreteEncoder.initialize_vllm_model(hf_config=None, mesh_device=dev, max_batch_size=2, optimizations="perf")
 
 
 def test_initialize_model_runs_hooks_in_order(_stub_create_tt_model):

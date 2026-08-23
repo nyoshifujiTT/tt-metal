@@ -235,9 +235,5 @@ class RerankerClassifierPooler(_PoolerBase):
         first_indices = _first_token_indices_cpu(pooling_metadata, num_reqs)
         cls_tt = gather_cls_from_flat(hidden_states, first_indices, device)
         logits_tt = classifier(cls_tt)  # [num_reqs, 1] on device
-        logits = (
-            to_torch_auto_compose(logits_tt, device=device)
-            .to(torch.float32)
-            .reshape(-1, 1)
-        )
+        logits = to_torch_auto_compose(logits_tt, device=device).to(torch.float32).reshape(-1, 1)
         return [logits[i] for i in range(num_reqs)]
