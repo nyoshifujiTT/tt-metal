@@ -1,5 +1,29 @@
 # BGE-M3 User Guide
 
+## Environment
+
+All snippets below assume a tt-metal built from the commit you are testing, with
+`TT_METAL_HOME` set and its Python environment active:
+
+```bash
+source $TT_METAL_HOME/python_env/bin/activate
+```
+
+If you run inside a container image (for example the `vllm-tt-metal-src-*`
+images used by tt-inference-server), build the image from the commit under test,
+e.g. via tt-inference-server:
+
+```bash
+python3 scripts/build_docker_images.py --build-metal-commit <tt-metal-sha>
+```
+
+Do not bind-mount `models/demos/...` over a pre-built image to pick up local
+edits. The image bakes in a whole tt-metal tree, so overlaying model code from a
+different commit mixes the C++ runtime, the Python package and the model code
+across revisions: a passing run then says nothing about the commit you intend to
+ship, and the image tag no longer describes what actually ran. Rebuild the image
+at that commit instead.
+
 ## Low-level model creation
 
 Use `create_tt_model()` when you want the raw TT encoder model.
