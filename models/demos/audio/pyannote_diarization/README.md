@@ -89,5 +89,5 @@ No fixture data is checked in. The parity tests build their inputs from a fixed 
 
 ## Notes
 
-- The last time-chunk of a recording can be very narrow (time-width `W` down to 1). `ttnn_wespeaker_resident` zero-pads such conv inputs up to a safe width and crops the output back, so every conv runs on device (no host fallback) and the result is numerically identical. This sidesteps a ttnn conv2d auto-shard reader-index assert (tenstorrent/tt-metal#35207, #43193).
+- The last time-chunk of a recording can be very narrow (time-width `W` down to 1). `ttnn_wespeaker_resident` zero-pads such conv inputs up to a safe width and crops the output back, so every conv runs on device with no host fallback. `tests/test_resident_narrow_ondevice.py` checks that path for `W = 1, 2, 4, 8, 12`: the cropped output keeps the exact unpadded shape and stays within bf16 tolerance of the numpy backbone (cosine > 0.99). This sidesteps a ttnn conv2d auto-shard reader-index assert (tenstorrent/tt-metal#35207, #43193).
 - ttnn prints harmless `leaked function/type` noise on exit; filter it with `grep -viE 'leaked|nanobind'`.
