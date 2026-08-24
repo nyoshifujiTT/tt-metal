@@ -68,22 +68,31 @@ tests rather than this demo.
 
 ## Run inference (Example)
 
+For a standalone metal run, prefer `embed_single_trace=True`: the whole tail runs
+on device in one replay and `forward` hands back the finished, already-normalized
+embedding.
+
 ```python
 import torch
-import torch.nn.functional as F
 from transformers import AutoTokenizer
 
 tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-Embedding-0.6B", padding_side="left")
 
 def embed(prompt):
     batch = tokenizer([prompt], padding=False, truncation=True, max_length=8192, return_tensors="pt")
-    hidden = model.forward(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).to(torch.float32)
-    if hidden.dim() == 1:
-        hidden = hidden.unsqueeze(0)
-    return F.normalize(hidden, p=2, dim=1)   # finished embedding
+    emb = model.forward(
+        input_ids=batch["input_ids"],
+        attention_mask=batch["attention_mask"],
+        embed_single_trace=True,   # slice + final norm + L2 normalize inside the trace
+    ).to(torch.float32)
+    return emb if emb.dim() > 1 else emb.unsqueeze(0)
 
 emb = embed("Artificial intelligence is transforming how we interact with technology.")
 ```
+
+Without `embed_single_trace`, `forward` returns the pooled last-token hidden state
+and the caller normalizes it (`F.normalize(hidden, p=2, dim=1)`) -- that is the
+shape the serving stack's Pooler is handed, not what a standalone run needs.
 
 ## Batched inference
 
@@ -113,8 +122,11 @@ pytest models/demos/wormhole/qwen3_embedding_8b/demo/demo.py
 
 The demo's tests, and what each proves:
 
-- `test_qwen3_embedding_demo[0.6B|8B]` — pooled last-token forward + host L2
-  normalize; unit-norm and `cos(TT, HF) > 0.95` (observed ~0.97 on P150).
+- `test_qwen3_embedding_demo[0.6B|8B]` — the device-complete path: one
+  `execute_trace` replay returns the finished embedding (last-token slice, final
+  norm and L2 normalize all folded into the prefill trace, no host
+  post-processing); unit-norm on device and `cos(TT, HF) > 0.95` (observed ~0.97
+  on P150).
 - `test_qwen3_embedding_flat_contract` — flat per-token forward equals the pooled
   path bit-for-bit (`cos > 0.9999`) and matches HF, guarding the layout the vLLM
   pooling runner relies on.

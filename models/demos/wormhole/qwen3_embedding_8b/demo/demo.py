@@ -11,14 +11,23 @@ Qwen3-Embedding only had the vLLM adapter (``generator_vllm.py``) and no such
 single-device demo, so it could not be exercised the standard way. This file
 fills that gap.
 
-The demo drives the exact same TT forward path the vLLM adapter uses
-(``Qwen3ForEmbedding.forward`` -> ``generator.prefill_forward_text(
-return_hidden_states=True)``), which returns the last-token hidden state after
-the final norm and before the LM head. The only pooling directive Qwen3-Embedding
-adds on top is L2 normalization; the official Hugging Face usage example applies
-``F.normalize(embeddings, p=2, dim=1)`` after last-token pooling, so the demo does
-the same on the host to obtain the finished embedding and compares it against the
-Hugging Face reference by cosine similarity.
+Qwen3-Embedding's embedding is the last token's hidden state (after the final
+norm, before the LM head), L2-normalized -- the official Hugging Face usage
+example applies ``F.normalize(embeddings, p=2, dim=1)`` after last-token pooling.
+
+The main accuracy test runs that whole tail on device: with
+``embed_single_trace=True`` the last-token slice, final norm and L2 normalize are
+folded into the prefill trace, so a single ``execute_trace`` replay returns the
+finished embedding and nothing is post-processed on the host. A standalone metal
+run should exercise that path, so it is the one the demo uses, and the result is
+compared against the Hugging Face reference by cosine similarity.
+
+The other two ways of obtaining the same embedding are kept as cross-checks
+rather than as the demo's main path: the pooled last-token forward plus host
+normalize (what the serving stack's Pooler is handed, verified in
+``test_qwen3_embedding_single_trace``) and the flat per-token forward plus host
+LAST pooling (the layout the vLLM pooling runner indexes, verified in
+``test_qwen3_embedding_flat_contract``).
 
 Each prompt is run at ``batch_size=1``. Qwen3-Embedding is a decoder model whose
 embedding is the *last* token's hidden state; the TT forward derives that index
@@ -155,7 +164,12 @@ def run_qwen3_embedding_demo(device, prompts, model_name, sequence_length, model
     tt_embeddings = []
     for prompt in prompts:
         reference_embeddings.append(_reference_embedding(resolved_model_name, tokenizer, prompt))
-        tt_embeddings.append(_tt_embedding(generator_model, tokenizer, prompt))
+        # Device-complete path: last-token slice, final norm and L2 normalize are
+        # folded into the prefill trace, so one execute_trace replay returns the
+        # finished embedding with no host post-processing. That is what a
+        # standalone metal run should exercise; the host-normalized variant stays
+        # as the cross-check in test_qwen3_embedding_single_trace.
+        tt_embeddings.append(_tt_embedding_single_trace(generator_model, tokenizer, prompt))
 
     reference = torch.cat(reference_embeddings, dim=0)
     tt = torch.cat(tt_embeddings, dim=0)
@@ -166,12 +180,16 @@ def run_qwen3_embedding_demo(device, prompts, model_name, sequence_length, model
     per_prompt_alignment = np.diag(cross)
     mean_alignment = float(per_prompt_alignment.mean())
 
-    logger.info(f"Qwen3-Embedding demo: model={resolved_model_name} dim={tt.shape[1]} n={tt.shape[0]}")
-    logger.info(f"TT L2 norms (should be ~1.0): {tt.norm(dim=1).tolist()}")
+    logger.info(
+        f"Qwen3-Embedding demo (single-trace): model={resolved_model_name} dim={tt.shape[1]} n={tt.shape[0]}"
+    )
+    logger.info(f"TT L2 norms, normalized on device (should be ~1.0): {tt.norm(dim=1).tolist()}")
     logger.info(f"per-prompt cos(TT, HF): {[round(float(x), 4) for x in per_prompt_alignment]}")
     logger.info(f"mean cos(TT, HF): {mean_alignment:.4f}")
 
-    assert torch.allclose(tt.norm(dim=1), torch.ones(tt.shape[0]), atol=1e-2), "TT embeddings are not L2-normalized"
+    assert torch.allclose(
+        tt.norm(dim=1), torch.ones(tt.shape[0]), atol=1e-2
+    ), "TT embeddings are not L2-normalized on device"
     assert mean_alignment > 0.95, f"TT embeddings do not match HF reference (mean cos {mean_alignment:.4f})"
 
     return tt
