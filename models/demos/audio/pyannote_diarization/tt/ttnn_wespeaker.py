@@ -3,10 +3,11 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 """ttnn implementation of WeSpeaker ResNet34 embedding (community-1) for p150.
 
-Op graph, parity target = wespeaker_numpy_ref /
-golden_embeddings.json. BN is folded into conv weights on host (fold_bn_into_conv
-in wespeaker_numpy_ref). Convs run on device via ttnn.conv2d; residual add / relu
-via ttnn; TSTP (mean+std over time) via ttnn reductions; seg_1 via ttnn.linear.
+Op graph follows wespeaker_numpy_ref, and tests/test_ttnn_wespeaker_ondevice.py
+checks this against the torch model. BN is folded into conv weights on host
+(fold_bn_into_conv in wespeaker_numpy_ref). Convs run on device via ttnn.conv2d;
+residual add / relu via ttnn; TSTP (mean+std over time) via ttnn reductions;
+seg_1 via ttnn.linear.
 
 Input boundary: log-mel Fbank (B,1,80,T) float (frontend stays on host).
 """
