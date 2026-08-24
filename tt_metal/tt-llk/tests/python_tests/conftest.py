@@ -32,9 +32,7 @@ _SHOULD_RUN_SIMULATOR = _IS_XDIST_WORKER or (
 if _SHOULD_RUN_SIMULATOR and _SIMULATOR_PATH and _SIMULATOR_PATH.endswith(".so"):
     from ttexalens import tt_exalens_init as _tt_exalens_init
 
-    _tt_exalens_init.init_ttexalens(
-        simulation_directory=_SIMULATOR_PATH, use_4B_mode=False
-    )
+    _tt_exalens_init.init_ttexalens(simulation_directory=_SIMULATOR_PATH)
 
 import helpers.order_processing as order_processing
 import helpers.utils as utils_module
@@ -45,7 +43,7 @@ from helpers.device import LLKAssertException
 from helpers.exalens_server import ExalensServer
 from helpers.format_config import InputOutputFormat
 from helpers.logger import configure_logger, logger
-from helpers.perf import PerfConfig, PerfReport, combine_perf_reports
+from helpers.perf.core import PerfConfig, PerfReport, combine_perf_reports
 from helpers.test_config import BuildMode, TestConfig, process_coverage_run_artefacts
 from ttexalens import check_context, tt_exalens_init
 from ttexalens.tt_exalens_lib import get_tensix_state
@@ -56,7 +54,11 @@ _exalens_server: Optional[ExalensServer] = None
 # This is a workaround for this issue: https://github.com/tenstorrent/tt-exalens/issues/958
 # In a nutshell, everything except Tensix GPRs is accessible over NoC, thus ignoring that allows us to dump
 # most of the Tensix state, without causing any runtime issues.
+# Quasar is a no-op: ttexalens has no Tensix register description yet
+# (hardware/quasar/device.py raises NotImplementedError).
 def override_gprs_used_by_tensix_dump():
+    if get_chip_architecture() == ChipArchitecture.QUASAR:
+        return
     context = check_context()
     for device_id in context.devices.keys():
         context.devices[
@@ -153,6 +155,18 @@ def pytest_addoption(parser):
         "--coverage",
         action="store_true",
         help="Enables coverage *.info file generation for every test variant run",
+    )
+
+    parser.addoption(
+        "--bit-exact-runs",
+        action="store",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Execute each test variant N times on device and assert every run "
+        "produces a bit-identical result buffer. Use to check the hardware "
+        "returns the same output for the same input (e.g. --bit-exact-runs=20). "
+        "Default 1 (no repetition).",
     )
 
     parser.addoption(
@@ -322,6 +336,12 @@ def pytest_configure(config):
         os.environ["TT_METAL_DISABLE_SFPLOADMACRO"] = "1"
 
     config.coverage_enabled = config.getoption("--coverage", default=False)
+
+    bit_exact_runs = config.getoption("--bit-exact-runs", default=1)
+    if bit_exact_runs < 1:
+        raise pytest.UsageError(f"--bit-exact-runs must be >= 1, got {bit_exact_runs}")
+    TestConfig.BIT_EXACT_RUNS = bit_exact_runs
+
     TestConfig.DUMP_RAW_COUNTERS = config.getoption(
         "--dump-raw-counters", default=False
     )
@@ -388,14 +408,6 @@ def pytest_configure(config):
         _RECORD_TEST_ORDER = True
         utils_module._RECORD_TEST_ORDER = True
 
-    is_ttsim = _SIMULATOR_PATH and _SIMULATOR_PATH.endswith(".so")
-    if (
-        (is_ttsim or not TestConfig.TEST_TARGET.run_simulator)
-        and TestConfig.ARCH != ChipArchitecture.QUASAR
-        and TestConfig.BUILD_MODE != BuildMode.PRODUCE
-    ):
-        override_gprs_used_by_tensix_dump()
-
     log_file = "pytest_errors.log"
     if not hasattr(config, "workerinput"):  # executed only by master pytest runner
         # Refresh order folder with setup_files function
@@ -432,16 +444,25 @@ def pytest_configure(config):
                         "Re-run without it.",
                         returncode=1,
                     )
+                TestConfig.resolve_worker_tensix_location()
             elif not hasattr(config, "workerinput"):
                 # RTL simulator: only the controller process manages the server; xdist workers
-                # just connect to the already-running instance.
+                # just connect to the already-running instance. TENSIX_LOCATION is bound
+                # after init_ttexalens_remote in pytest_runtest_setup, once the server is up.
                 global _exalens_server
                 _exalens_server = ExalensServer(
                     simulator_path=_SIMULATOR_PATH,
                     port=TestConfig.TEST_TARGET.simulator_port,
                 )
         else:
-            tt_exalens_init.init_ttexalens(use_4B_mode=False)
+            tt_exalens_init.init_ttexalens()
+            TestConfig.resolve_worker_tensix_location()
+
+        is_ttsim = _SIMULATOR_PATH and _SIMULATOR_PATH.endswith(".so")
+        # WH/BH only: ttsim or silicon. Quasar is skipped inside the helper
+        # because ttexalens has no Tensix register description yet.
+        if is_ttsim or not TestConfig.TEST_TARGET.run_simulator:
+            override_gprs_used_by_tensix_dump()
 
 
 def pytest_ignore_collect(collection_path, config):
@@ -453,6 +474,22 @@ def pytest_ignore_collect(collection_path, config):
     ):
         return True
     return None
+
+
+def _statically_skipped(definition) -> bool:
+    conds = []
+    for m in definition.iter_markers(name="skipif"):
+        conds.extend(m.args)
+        conds.append(m.kwargs.get("condition"))
+    return any(c for c in conds if c is not None and not isinstance(c, str))
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_generate_tests(metafunc):
+    if _statically_skipped(metafunc.definition):
+        metafunc.definition.own_markers = [
+            m for m in metafunc.definition.own_markers if m.name != "parametrize"
+        ]
 
 
 def _collapse_runtime_only_variants(config, items):
@@ -470,7 +507,7 @@ def _collapse_runtime_only_variants(config, items):
     deselected = []
     for item in items:
         marker = item.get_closest_marker(RUNTIME_AXES_MARK)
-        if marker is None:
+        if marker is None or not getattr(item, "callspec", None):
             keep.append(item)
             continue
         compile_key_fn = marker.kwargs["compile_key_fn"]
@@ -797,8 +834,9 @@ def pytest_runtest_setup(item):
     if not _exalens_server.running and not _exalens_server.ever_started:
         _exalens_server.start()
         tt_exalens_init.init_ttexalens_remote(
-            port=TestConfig.TEST_TARGET.simulator_port, use_4B_mode=False
+            port=TestConfig.TEST_TARGET.simulator_port
         )
+        TestConfig.resolve_worker_tensix_location()
     elif not _exalens_server.running:
         logger.error("tt-exalens server is no longer running unexpectedly.")
         pytest.exit(returncode=1)
@@ -807,8 +845,9 @@ def pytest_runtest_setup(item):
         tt_exalens_init.cleanup_global_context()
         _exalens_server.restart()
         tt_exalens_init.init_ttexalens_remote(
-            port=TestConfig.TEST_TARGET.simulator_port, use_4B_mode=False
+            port=TestConfig.TEST_TARGET.simulator_port
         )
+        TestConfig.resolve_worker_tensix_location()
 
 
 def pytest_sessionstart(session):
@@ -835,7 +874,7 @@ def counter_report(request, worker_id):
 
     PerfConfig.COUNTER_REPORT = None
 
-    if TestConfig.MODE == TestMode.PRODUCE:
+    if TestConfig.BUILD_MODE == BuildMode.PRODUCE:
         return
 
     if PerfConfig.TEST_COUNTER == 0:
@@ -925,6 +964,21 @@ skip_for_blackhole = pytest.mark.skipif(
 skip_for_quasar = pytest.mark.skipif(
     get_chip_architecture() == ChipArchitecture.QUASAR,
     reason="Test is not supported on Quasar architecture",
+)
+
+wormhole_only = pytest.mark.skipif(
+    get_chip_architecture() != ChipArchitecture.WORMHOLE,
+    reason="Test is only supported on Wormhole architecture",
+)
+
+blackhole_only = pytest.mark.skipif(
+    get_chip_architecture() != ChipArchitecture.BLACKHOLE,
+    reason="Test is only supported on Blackhole architecture",
+)
+
+quasar_only = pytest.mark.skipif(
+    get_chip_architecture() != ChipArchitecture.QUASAR,
+    reason="Test is only supported on Quasar architecture",
 )
 
 skip_for_coverage = pytest.mark.skipif(

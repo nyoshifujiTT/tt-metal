@@ -126,6 +126,17 @@
 // calculate_mask_binary) used by the dispatch below.
 #include "sfpu_test_helpers.h"
 
+namespace ckernel::sfpu
+{
+
+template <bool APPROXIMATION_MODE, bool IS_FP32_DEST_ACC_EN, int ITERATIONS, bool CLAMP_NEGATIVE, std::uint32_t EXP_BASE_SCALE_FACTOR>
+inline __attribute__((always_inline)) void calculate_exponential_const_scale()
+{
+    calculate_exponential<APPROXIMATION_MODE, IS_FP32_DEST_ACC_EN, true /* SCALE_EN */, ITERATIONS, CLAMP_NEGATIVE>(EXP_BASE_SCALE_FACTOR);
+}
+
+} // namespace ckernel::sfpu
+
 namespace test_utils
 {
 using namespace ckernel;
@@ -714,7 +725,15 @@ void call_unary_sfpu_operation(std::uint32_t dst_index, std::uint32_t math_forma
     // _int_maxmin_scalar / _int_shift_amount). The two sides must move together, so
     // keep them named on both to avoid a silent golden desync.
     constexpr std::uint32_t MAXMIN_SCALAR = 1000u;
-    constexpr std::uint32_t SHIFT_AMOUNT  = 3u;
+    // Shift amount for the unary shift ops. Overridable from params.h via the SFPU_SHIFT_AMOUNT
+    // template parameter so the Python side can sweep it; a test that does not set it keeps the
+    // original fixed 3. The golden reads the same value through UnarySFPUGolden's shift_amount
+    // argument, so the two sides move together.
+#ifdef SFPU_SHIFT_AMOUNT
+    constexpr std::uint32_t SHIFT_AMOUNT = SFPU_SHIFT_AMOUNT;
+#else
+    constexpr std::uint32_t SHIFT_AMOUNT = 3u;
+#endif
     // Integer scalar that unary_eq/unary_ne (Int32) compare against via metal
     // calculate_comp_unary_int. Shared with the golden (golden_generators.py:
     // _unary_comp_int_scalar); the two sides must move together.
@@ -833,18 +852,15 @@ void call_unary_sfpu_operation(std::uint32_t dst_index, std::uint32_t math_forma
     // golden is exp(0.5*x); 0.5 is exact in bf16 so no scale-rounding error is added.
     //
     // The bf16-accurate path (_sfpu_exp_21f_bf16_tti_) lowers the scale via TTI_SFPMULI,
-    // whose immediate operand must be a compile-time constant. Forwarding the scale as a
-    // runtime arg through the generic SFPU_UNARY_CALL wrapper drops constness at -O3 and
-    // trips the "impossible asm constraint" error, so bake the literal into a direct call.
+    // whose immediate operand must be a compile-time constant. Pass the scale through the
+    // test-only adapter's template arguments so SFPU_UNARY_CALL preserves that constness.
     else if constexpr (OPERATION == SfpuType::exp_with_base)
     {
-        ::ckernel::_sfpu_check_<DST_SYNC_MODE, DST_ACCUM_MODE>(dst_index, vector_mode);
-        _llk_math_eltwise_unary_sfpu_params_(
-            []()
-            {
-                ::ckernel::sfpu::calculate_exponential<APPROX_MODE, is_fp32_dest_acc_en, true /* scale_en */, ITERATIONS, CLAMP_NEGATIVE>(
-                    0x3F00u /* bf16(0.5) exp base scale */);
-            },
+        SFPU_UNARY_CALL(
+            DST_SYNC_MODE,
+            DST_ACCUM_MODE,
+            calculate_exponential_const_scale,
+            (APPROX_MODE, is_fp32_dest_acc_en, ITERATIONS, CLAMP_NEGATIVE, 0x3F00u /* bf16(0.5) exp base scale */),
             dst_index,
             vector_mode);
     }

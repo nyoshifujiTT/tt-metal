@@ -75,9 +75,10 @@ concept ProgramDescriptorFactoryConcept = (requires { &T::create_descriptor; } |
 
 // Metal 2.0 op-porting stepping-stone factory concept: factories that return
 // ProgramArtifacts (a ProgramSpec + ProgramRunArgs + any op-owned tensors) from
-// create_program_artifacts. The framework adapter stamps a Program from the spec onto
-// each mesh coordinate range on cache miss, and patches every TensorArg (io and
-// op-owned alike) via experimental::UpdateTensorArgs on cache hit.
+// create_program_artifacts. The framework adapter maps that same ProgramSpec onto
+// tensor_coords via experimental::MakeMeshWorkloadFromSpecs on cache miss, and
+// patches every TensorArg (io and op-owned alike) via experimental::UpdateTensorArgs
+// on cache hit.
 //
 // NOTE: Each TensorArgument in ProgramRunArgs MUST reference a MeshTensor reachable from
 // the factory's `tensor_args` / `tensor_return_value` parameters, OR one of the
@@ -228,5 +229,31 @@ concept HasSkipLaunch = requires(
         device_operation_t::skip_launch(operation_attributes, tensor_args, tensor_return_value)
     } -> std::convertible_to<bool>;
 };
+
+// Opt-in marker for per-core L1 allocation.
+//
+// A per-core allocated buffer has an independent L1 address on every core, but ops address a
+// buffer by a single value -- Buffer::address() is the first core's address, and CB binding,
+// runtime-arg patching and the host write/read all resolve through it (#51354). An op that has
+// not been taught to resolve `get_per_core_address()` per core would therefore address every
+// core as though it shared the first core's allocation, which is silently wrong whenever those
+// addresses differ.
+//
+// launch() refuses per-core allocated tensors in tensor_args unless the op declares support:
+//
+//     struct MyDeviceOperation {
+//         static constexpr bool supports_per_core_allocation = true;
+//         ...
+//     };
+//
+// Declaring it is a promise that the op resolves per-core addresses at every point it binds the
+// buffer -- circular buffers, runtime args, and any borrowed-memory attachment.
+//
+// Satisfied only when the member is present *and* true, so an op can opt back out with
+// `= false` without removing the declaration.
+template <typename device_operation_t>
+concept SupportsPerCoreAllocation = requires {
+    { device_operation_t::supports_per_core_allocation } -> std::convertible_to<bool>;
+} && device_operation_t::supports_per_core_allocation;
 
 }  // namespace ttnn::device_operation

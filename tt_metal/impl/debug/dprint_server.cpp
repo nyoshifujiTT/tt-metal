@@ -241,25 +241,6 @@ public:
             };
         }
 
-        // Quasar dispatch-engine cores run DM-only firmware (COMPILE_FOR_DM), but the on-device
-        // DevicePrintMemoryLayout still reserves the TRISC sub-buffer first, so the DM print buffer
-        // (the one get_device_print_buffer() returns) lives at structure_address +
-        // kQuasarDprintComputeSubbufferSize. Only the DM sub-buffer is populated; mirror the DM half of
-        // the Quasar TENSIX split above.
-        if (programmable_core_type == HalProgrammableCoreType::DISPATCH) {
-            const uint16_t dm_count = static_cast<uint16_t>(hal.get_processor_types_count(
-                programmable_core_type, static_cast<uint32_t>(HalProcessorClassType::DM)));
-            TT_FATAL(
-                static_cast<uint32_t>(kQuasarDprintComputeSubbufferSize) + kQuasarDprintDmSubbufferSize ==
-                    structure_size,
-                "Quasar DISPATCH DPRINT buffer split (compute {} + DM {}) doesn't match region size {}",
-                kQuasarDprintComputeSubbufferSize,
-                kQuasarDprintDmSubbufferSize,
-                structure_size);
-            return {make_buffer(
-                structure_address + kQuasarDprintComputeSubbufferSize, kQuasarDprintDmSubbufferSize, dm_count, 0)};
-        }
-
         const uint16_t num_processors = static_cast<uint16_t>(hal.get_num_risc_processors(programmable_core_type));
         return {make_buffer(structure_address, static_cast<uint16_t>(structure_size), num_processors, 0)};
     }
@@ -574,7 +555,8 @@ bool DPrintServer::Impl::poll_print_buffer(
     auto from_dev = cluster.read_core(device_id, virtual_core, read_write_pointer_address, eightbytes);
     uint32_t wpos = from_dev[0], rpos = from_dev[1];
 
-    if (wpos == DEBUG_PRINT_SERVER_DISABLED_MAGIC || wpos == DEBUG_PRINT_SERVER_STARTING_MAGIC || wpos == rpos) {
+    if (wpos == DEBUG_PRINT_SERVER_DISABLED_MAGIC || wpos == DEBUG_PRINT_SERVER_STARTING_MAGIC ||
+        rpos == DEVICE_PRINT_RESET_BUFFER_MAGIC || wpos == rpos) {
         return false;
     }
 
@@ -617,6 +599,12 @@ bool DPrintServer::Impl::poll_print_buffer(
             from_dev = cluster.read_core(device_id, virtual_core, read_write_pointer_address, eightbytes);
             wpos = from_dev[0];
             rpos = from_dev[1];
+
+            // Device should be much faster than host, but in case we are running simulation,
+            // we should check if device has reset buffer and we have caught up to it.
+            if (rpos == DEVICE_PRINT_RESET_BUFFER_MAGIC) {
+                return false;
+            }
             continue;
         }
 
@@ -1086,6 +1074,7 @@ void DPrintServer::Impl::attach_device(ChipId device_id) {
 
     // Core range depends on whether dprint_all_cores flag is set.
     std::vector<umd::CoreDescriptor> print_cores_sanitized;
+    print_cores_sanitized.reserve(all_cores.size() + dispatch_cores.size());
     const auto& hal = env_.get_hal();
     std::vector<CoreType> core_types_to_check = {CoreType::WORKER, CoreType::ETH};
     if (hal.has_programmable_core_type(HalProgrammableCoreType::DRAM)) {

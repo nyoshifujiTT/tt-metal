@@ -33,6 +33,7 @@
 #include <tt_stl/span.hpp>
 #include <tt-metalium/tt_backend_api_types.hpp>
 #include <tt-metalium/tt_metal.hpp>
+#include "impl/program/program_impl.hpp"
 #include "tt_metal/test_utils/comparison.hpp"
 #include "tt_metal/test_utils/packing.hpp"
 #include "tt_metal/test_utils/print_helpers.hpp"
@@ -622,8 +623,7 @@ bool single_core_unpack_reconfig_quasar(const std::shared_ptr<distributed::MeshD
     };
     experimental::SetProgramRunArgs(program, params);
 
-    auto* dev = mesh_device->get_devices()[0];
-    tt_metal::detail::LaunchProgram(dev, program, /*wait_until_cores_done=*/true);
+    LaunchProgram(*mesh_device, std::move(program), /*wait_until_cores_done=*/true);
 
     std::vector<uint32_t> dest_buffer_data;
     distributed::ReadShard(cq, dest_buffer_data, out_dram, zero_coord, false);
@@ -977,8 +977,7 @@ bool single_core_pack_reconfig_quasar(const std::shared_ptr<distributed::MeshDev
     };
     experimental::SetProgramRunArgs(program, params);
 
-    auto* dev = mesh_device->get_devices()[0];
-    tt_metal::detail::LaunchProgram(dev, program, /*wait_until_cores_done=*/true);
+    LaunchProgram(*mesh_device, std::move(program), /*wait_until_cores_done=*/true);
 
     std::vector<uint32_t> out0_data;
     std::vector<uint32_t> out1_data;
@@ -1103,9 +1102,8 @@ TEST_F(LLKMeshDeviceFixture, TensixTileCopyReconfigExplicitSplitDstAcc) {
                             .fp32_dest_acc_en = fp32_dest_acc_en,
                             .block_copy = block_copy,
                             .dst_full_sync_en = dst_full_sync_en};
-                        for (unsigned int id = 0; id < num_devices_; id++) {
-                            ASSERT_TRUE(
-                                unit_tests::compute::reconfig::single_core_reconfig(devices_.at(id), test_config));
+                        for (auto& device : this->devices_) {
+                            ASSERT_TRUE(unit_tests::compute::reconfig::single_core_reconfig(device, test_config));
                         }
                     }
                 }
@@ -1120,22 +1118,22 @@ TEST_F(LLKMeshDeviceFixture, TensixTileCopyReconfigL1Acc) {
             log_info(LogTest, "L1 accumulation is {}, DstSyncFull = {}", l1_acc ? "on." : "off.", dst_full_sync_en);
             unit_tests::compute::reconfig::ReconfigConfig test_config = {
                 .num_tiles = 1, .ublock_size_tiles = 1, .dst_full_sync_en = dst_full_sync_en};
-            for (unsigned int id = 0; id < num_devices_; id++) {
-                ASSERT_TRUE(unit_tests::compute::reconfig::single_core_reconfig(devices_.at(id), test_config));
+            for (auto& device : this->devices_) {
+                ASSERT_TRUE(unit_tests::compute::reconfig::single_core_reconfig(device, test_config));
             }
         }
     }
 }
 
 TEST_F(LLKQuasarMeshDeviceSingleCardFixture, TensixUnpackReconfigQuasarDfb) {
-    for (unsigned int id = 0; id < num_devices_; id++) {
-        ASSERT_TRUE(unit_tests::compute::reconfig::single_core_unpack_reconfig_quasar(devices_.at(id)));
+    for (auto& device : this->devices_) {
+        ASSERT_TRUE(unit_tests::compute::reconfig::single_core_unpack_reconfig_quasar(device));
     }
 }
 
 TEST_F(LLKQuasarMeshDeviceSingleCardFixture, TensixPackReconfigQuasarDfb) {
-    for (unsigned int id = 0; id < num_devices_; id++) {
-        ASSERT_TRUE(unit_tests::compute::reconfig::single_core_pack_reconfig_quasar(devices_.at(id)));
+    for (auto& device : this->devices_) {
+        ASSERT_TRUE(unit_tests::compute::reconfig::single_core_pack_reconfig_quasar(device));
     }
 }
 
