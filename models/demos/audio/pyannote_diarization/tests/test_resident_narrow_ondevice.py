@@ -16,41 +16,26 @@ The device comes from the shared tt-metal ``device`` fixture, so ``--device-id``
 and the CI SKU/topology handling apply; ``l1_small_size`` is requested through
 ``device_params``.
 """
-import os
-
 import pytest
 
 pytest.importorskip("torch")
 pytest.importorskip("ttnn")
 pytest.importorskip("pyannote.audio")
 
-# WeSpeaker ResNet34 weights come straight from the community-1 embedding
-# checkpoint (same state_dict the test used to slice out of the dev emb_all.npz
-# fixture). Override the path with PYANNOTE_COMMUNITY1_WEIGHTS for a non-default
-# install; skip cleanly when the weights are not present.
-WEIGHTS = os.environ.get(
-    "PYANNOTE_COMMUNITY1_WEIGHTS",
-    "/data/pyannote-community-1/weights/embedding/pytorch_model.bin",
-)
-if not os.path.exists(WEIGHTS):
-    pytest.skip(
-        f"community-1 embedding weights not present at {WEIGHTS}",
-        allow_module_level=True,
-    )
-
-import sys  # noqa: E402
-
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from pyannote.audio import Model  # noqa: E402
 
+from models.demos.audio.pyannote_diarization import common  # noqa: E402
 from models.demos.audio.pyannote_diarization.reference.wespeaker_numpy_ref import WeSpeakerNumpyRef  # noqa: E402
 from models.demos.audio.pyannote_diarization.tt.ttnn_wespeaker_resident import TTNNWeSpeakerResident  # noqa: E402
 
 
 @pytest.fixture(scope="module")
-def state_dict():
-    model = Model.from_pretrained(WEIGHTS)
+def state_dict(model_location_generator):
+    """WeSpeaker ResNet34 weights from the community-1 embedding checkpoint."""
+    weights = common.resolve_weights(common.EMBEDDING_RELPATH, model_location_generator)
+    model = Model.from_pretrained(weights)
     model.eval()
     return model.state_dict()
 

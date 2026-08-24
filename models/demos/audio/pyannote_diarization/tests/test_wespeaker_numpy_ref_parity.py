@@ -3,31 +3,27 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 """Parity: numpy reference forward == real torch WeSpeakerResNet34 (community-1).
 
-Establishes the golden op-graph for the ttnn port. Skipped automatically when
-torch/pyannote or the community-1 embedding weights are unavailable (e.g. CI
-without the model), so it is safe in the media-server test suite.
+Establishes the golden op-graph for the ttnn port. Weights are resolved through
+the shared helper (model_location_generator, else a Hugging Face download).
+Skipped automatically when torch/pyannote are unavailable.
 """
-import os
-
 import pytest
-
-WEIGHTS = "/data/pyannote-community-1/weights/embedding/pytorch_model.bin"
 
 pytest.importorskip("torch")
 pytest.importorskip("pyannote.audio")
-if not os.path.exists(WEIGHTS):
-    pytest.skip("community-1 embedding weights not present", allow_module_level=True)
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from pyannote.audio import Model  # noqa: E402
 
-import sys  # noqa: E402
+from models.demos.audio.pyannote_diarization import common  # noqa: E402
 from models.demos.audio.pyannote_diarization.reference.wespeaker_numpy_ref import WeSpeakerNumpyRef  # noqa: E402
 
 
-def test_numpy_ref_matches_torch_wespeaker_resnet34():
-    m = Model.from_pretrained(WEIGHTS)
+def test_numpy_ref_matches_torch_wespeaker_resnet34(model_location_generator):
+    m = Model.from_pretrained(
+        common.resolve_weights(common.EMBEDDING_RELPATH, model_location_generator)
+    )
     m.eval()
     ref = WeSpeakerNumpyRef(m.state_dict())
     wav = (torch.rand(1, 1, 48000, generator=torch.Generator().manual_seed(7)) * 2 - 1) * 0.1

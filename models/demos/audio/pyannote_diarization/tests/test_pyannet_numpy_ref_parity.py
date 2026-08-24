@@ -4,28 +4,28 @@
 """Parity: numpy PyanNet reference == real torch PyanNet (community-1 segmentation).
 
 Establishes the golden op-graph (SincNet + BiLSTM4 + linear + classifier) for the
-ttnn port. Skips without torch/pyannote/weights so it is CI-safe.
+ttnn port. Weights are resolved through the shared helper
+(model_location_generator, else a Hugging Face download). Skips without
+torch/pyannote so it is CI-safe.
 """
-import os
 import pytest
 
-WEIGHTS = "/data/pyannote-community-1/weights/segmentation/pytorch_model.bin"
 pytest.importorskip("torch")
 pytest.importorskip("pyannote.audio")
-if not os.path.exists(WEIGHTS):
-    pytest.skip("community-1 segmentation weights not present", allow_module_level=True)
 
-import sys
 import numpy as np
 import torch
 import torch.nn.functional as F
 from pyannote.audio import Model
 
+from models.demos.audio.pyannote_diarization import common
 from models.demos.audio.pyannote_diarization.reference.pyannet_numpy_ref import PyanNetNumpyRef
 
 
-def test_numpy_ref_matches_torch_pyannet():
-    m = Model.from_pretrained(WEIGHTS)
+def test_numpy_ref_matches_torch_pyannet(model_location_generator):
+    m = Model.from_pretrained(
+        common.resolve_weights(common.SEGMENTATION_RELPATH, model_location_generator)
+    )
     m.eval()
     sinc_kernel = m.sincnet.conv1d[0].filterbank.filters().detach().numpy()
     ref = PyanNetNumpyRef(m.state_dict(), sinc_kernel)
