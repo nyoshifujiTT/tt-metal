@@ -13,10 +13,9 @@ Input boundary: log-mel Fbank (B,1,80,T) float (frontend stays on host).
 """
 from __future__ import annotations
 
-import numpy as np
 import torch
-import ttnn
 
+import ttnn
 from models.demos.audio.pyannote_diarization.reference.wespeaker_numpy_ref import WeSpeakerNumpyRef
 
 
@@ -45,15 +44,26 @@ class TTNNWeSpeaker:
         tb = ttnn.from_torch(torch.from_numpy(b).reshape(1, 1, 1, Cout).to(torch.bfloat16))
         conv_cfg = ttnn.Conv2dConfig(weights_dtype=ttnn.bfloat16)
         compute_cfg = ttnn.init_device_compute_kernel_config(
-            self.device.arch(), math_fidelity=ttnn.MathFidelity.HiFi4,
-            fp32_dest_acc_en=True, packer_l1_acc=True,
+            self.device.arch(),
+            math_fidelity=ttnn.MathFidelity.HiFi4,
+            fp32_dest_acc_en=True,
+            packer_l1_acc=True,
         )
         out = ttnn.conv2d(
-            input_tensor=tx, weight_tensor=tw, bias_tensor=tb, device=self.device,
-            in_channels=Cin, out_channels=Cout, batch_size=B,
-            input_height=H, input_width=W, kernel_size=(kh, kw),
-            stride=(stride, stride), padding=(pad, pad),
-            conv_config=conv_cfg, compute_config=compute_cfg,
+            input_tensor=tx,
+            weight_tensor=tw,
+            bias_tensor=tb,
+            device=self.device,
+            in_channels=Cin,
+            out_channels=Cout,
+            batch_size=B,
+            input_height=H,
+            input_width=W,
+            kernel_size=(kh, kw),
+            stride=(stride, stride),
+            padding=(pad, pad),
+            conv_config=conv_cfg,
+            compute_config=compute_cfg,
         )
         ot = ttnn.to_torch(out if not isinstance(out, (tuple, list)) else out[0])
         Hout = (H + 2 * pad - kh) // stride + 1
@@ -66,17 +76,18 @@ class TTNNWeSpeaker:
 
     def _relu_dev(self, x_nchw):
         """ReLU on device (ttnn.relu), host<->device round-trip on a tiled tensor."""
-        t = ttnn.from_torch(x_nchw.to(torch.bfloat16), dtype=ttnn.bfloat16,
-                            layout=ttnn.TILE_LAYOUT, device=self.device)
+        t = ttnn.from_torch(x_nchw.to(torch.bfloat16), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
         t = ttnn.relu(t)
         return ttnn.to_torch(t).float()
 
     def _add_dev(self, a_nchw, b_nchw):
         """Residual add on device (ttnn.add)."""
-        ta = ttnn.from_torch(a_nchw.to(torch.bfloat16), dtype=ttnn.bfloat16,
-                             layout=ttnn.TILE_LAYOUT, device=self.device)
-        tb = ttnn.from_torch(b_nchw.to(torch.bfloat16), dtype=ttnn.bfloat16,
-                             layout=ttnn.TILE_LAYOUT, device=self.device)
+        ta = ttnn.from_torch(
+            a_nchw.to(torch.bfloat16), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
+        )
+        tb = ttnn.from_torch(
+            b_nchw.to(torch.bfloat16), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
+        )
         return ttnn.to_torch(ttnn.add(ta, tb)).float()
 
     def _block(self, x, prefix, stride):
@@ -117,19 +128,25 @@ class TTNNWeSpeaker:
         """TSTP (mean+std over time) + seg_1 linear on device (ttnn)."""
         # x2: torch (B, 2560, T). Compute mean/std over last dim on device.
         tx = ttnn.from_torch(x2.to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.device)
-        mean = ttnn.mean(tx, dim=2)            # (B,2560)
+        mean = ttnn.mean(tx, dim=2)  # (B,2560)
         # std = sqrt(mean(x^2) - mean^2)  (population std, matches numpy .std())
         sq = ttnn.multiply(tx, tx)
-        msq = ttnn.mean(sq, dim=2)             # (B,2560)
+        msq = ttnn.mean(sq, dim=2)  # (B,2560)
         m2 = ttnn.multiply(mean, mean)
         var = ttnn.subtract(msq, m2)
-        std = ttnn.sqrt(ttnn.relu(var))        # relu guards tiny negatives
+        std = ttnn.sqrt(ttnn.relu(var))  # relu guards tiny negatives
         mean_t = ttnn.to_torch(mean).float().reshape(x2.shape[0], -1)
         std_t = ttnn.to_torch(std).float().reshape(x2.shape[0], -1)
         pooled = torch.cat([mean_t, std_t], dim=1)  # (B,5120)
         # seg_1 linear on device
         tp = ttnn.from_torch(pooled.to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.device)
-        tw = ttnn.from_torch(torch.from_numpy(self.seg_w.T.copy()).to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.device)
-        tb = ttnn.from_torch(torch.from_numpy(self.seg_b.reshape(1, -1).copy()).to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.device)
+        tw = ttnn.from_torch(
+            torch.from_numpy(self.seg_w.T.copy()).to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.device
+        )
+        tb = ttnn.from_torch(
+            torch.from_numpy(self.seg_b.reshape(1, -1).copy()).to(torch.bfloat16),
+            layout=ttnn.TILE_LAYOUT,
+            device=self.device,
+        )
         emb = ttnn.linear(tp, tw, bias=tb)
         return ttnn.to_torch(emb).float()

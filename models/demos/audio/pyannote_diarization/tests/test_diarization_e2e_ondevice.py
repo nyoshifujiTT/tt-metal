@@ -102,12 +102,8 @@ def _offload_segmentation(pipeline, device):
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
-@pytest.mark.parametrize(
-    "offload_segmentation", [False, True], ids=["embedding_only", "both_nets"]
-)
-def test_diarization_matches_host_pipeline(
-    device, model_location_generator, offload_segmentation
-):
+@pytest.mark.parametrize("offload_segmentation", [False, True], ids=["embedding_only", "both_nets"])
+def test_diarization_matches_host_pipeline(device, model_location_generator, offload_segmentation):
     from pyannote.metrics.diarization import DiarizationErrorRate
 
     audio = _sample_audio()
@@ -120,12 +116,9 @@ def test_diarization_matches_host_pipeline(
         _offload_segmentation(pipeline, device)
     on_device = pipeline(audio).speaker_diarization
 
-    assert len(_speakers(host)) >= 2, (
-        "host pipeline should find multiple speakers in the sample recording"
-    )
+    assert len(_speakers(host)) >= 2, "host pipeline should find multiple speakers in the sample recording"
     assert len(_speakers(on_device)) == len(_speakers(host)), (
-        f"speaker count differs: device={sorted(_speakers(on_device))} "
-        f"host={sorted(_speakers(host))}"
+        f"speaker count differs: device={sorted(_speakers(on_device))} " f"host={sorted(_speakers(host))}"
     )
 
     der = DiarizationErrorRate()(host, on_device)

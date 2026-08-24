@@ -23,9 +23,7 @@ from models.demos.audio.pyannote_diarization.reference.pyannet_numpy_ref import 
 
 
 def test_numpy_ref_matches_torch_pyannet(model_location_generator):
-    m = Model.from_pretrained(
-        common.resolve_weights(common.SEGMENTATION_RELPATH, model_location_generator)
-    )
+    m = Model.from_pretrained(common.resolve_weights(common.SEGMENTATION_RELPATH, model_location_generator))
     m.eval()
     sinc_kernel = m.sincnet.conv1d[0].filterbank.filters().detach().numpy()
     ref = PyanNetNumpyRef(m.state_dict(), sinc_kernel)

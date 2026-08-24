@@ -25,21 +25,25 @@ from __future__ import annotations
 
 import numpy as np
 import torch
-import ttnn
 
+import ttnn
 from models.demos.audio.pyannote_diarization.reference.pyannet_numpy_ref import (
-    instance_norm_1d, leaky_relu, conv1d, maxpool1d,
+    conv1d,
+    instance_norm_1d,
+    leaky_relu,
+    maxpool1d,
 )
 
 
 def _tt_linear(device, x_np, w_np, b_np):
     """y = x @ w.T + b on device. x:(N,in) w:(out,in) b:(out,) -> (N,out)."""
-    tx = ttnn.from_torch(torch.from_numpy(np.ascontiguousarray(x_np)).to(torch.bfloat16),
-                         layout=ttnn.TILE_LAYOUT, device=device)
-    tw = ttnn.from_torch(torch.from_numpy(w_np.T.copy()).to(torch.bfloat16),
-                         layout=ttnn.TILE_LAYOUT, device=device)
-    tb = ttnn.from_torch(torch.from_numpy(b_np.reshape(1, -1).copy()).to(torch.bfloat16),
-                         layout=ttnn.TILE_LAYOUT, device=device)
+    tx = ttnn.from_torch(
+        torch.from_numpy(np.ascontiguousarray(x_np)).to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=device
+    )
+    tw = ttnn.from_torch(torch.from_numpy(w_np.T.copy()).to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=device)
+    tb = ttnn.from_torch(
+        torch.from_numpy(b_np.reshape(1, -1).copy()).to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=device
+    )
     ty = ttnn.linear(tx, tw, bias=tb)
     return ttnn.to_torch(ty).float().numpy()
 
@@ -61,8 +65,8 @@ class _DevBiLSTM:
 
         def dv(a):
             return ttnn.from_torch(
-                torch.from_numpy(np.ascontiguousarray(a)).to(torch.bfloat16),
-                layout=ttnn.TILE_LAYOUT, device=device)
+                torch.from_numpy(np.ascontiguousarray(a)).to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=device
+            )
 
         self.wih = dv(sd[f"lstm.weight_ih_l{li}"].T)  # (in,4h)
         self.whh = dv(sd[f"lstm.weight_hh_l{li}"].T)  # (h,4h)
@@ -75,33 +79,33 @@ class _DevBiLSTM:
         h = hidden
         # 3D (direction-batched) recurrent weights/bias for the fused loop:
         #   dir 0 = forward, dir 1 = reverse
-        self.whh3 = dv(np.stack([sd[f"lstm.weight_hh_l{li}"].T,
-                                 sd[f"lstm.weight_hh_l{li}_reverse"].T], axis=0))     # (2,h,4h)
-        self.bhh3 = dv(np.stack([sd[f"lstm.bias_hh_l{li}"],
-                                 sd[f"lstm.bias_hh_l{li}_reverse"]], axis=0).reshape(2, 1, 4 * h))
+        self.whh3 = dv(
+            np.stack([sd[f"lstm.weight_hh_l{li}"].T, sd[f"lstm.weight_hh_l{li}_reverse"].T], axis=0)
+        )  # (2,h,4h)
+        self.bhh3 = dv(
+            np.stack([sd[f"lstm.bias_hh_l{li}"], sd[f"lstm.bias_hh_l{li}_reverse"]], axis=0).reshape(2, 1, 4 * h)
+        )
 
     def _dir(self, GXtb, B, T, whh, bhh):
         """Recurrence, fully device-resident. GXtb: device (T*B,4h) time-major
         (block t = rows [t*B:(t+1)*B]); input projection precomputed by caller.
         Only the final (T,B,h) output is downloaded once (no per-step transfer)."""
         h = self.h
-        ht = ttnn.from_torch(torch.zeros(B, h, dtype=torch.bfloat16),
-                             layout=ttnn.TILE_LAYOUT, device=self.dev)
-        ct = ttnn.from_torch(torch.zeros(B, h, dtype=torch.bfloat16),
-                             layout=ttnn.TILE_LAYOUT, device=self.dev)
+        ht = ttnn.from_torch(torch.zeros(B, h, dtype=torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.dev)
+        ct = ttnn.from_torch(torch.zeros(B, h, dtype=torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.dev)
         outs = []
         for t in range(T):
             gx = ttnn.slice(GXtb, [t * B, 0], [t * B + B, 4 * h])  # (B,4h) outer-dim slice
-            gh = ttnn.linear(ht, whh, bias=bhh)               # (B,4h) device
+            gh = ttnn.linear(ht, whh, bias=bhh)  # (B,4h) device
             g = ttnn.add(gx, gh)
-            i = ttnn.sigmoid(g[:, 0 * h:1 * h])
-            f = ttnn.sigmoid(g[:, 1 * h:2 * h])
-            gg = ttnn.tanh(g[:, 2 * h:3 * h])
-            o = ttnn.sigmoid(g[:, 3 * h:4 * h])
+            i = ttnn.sigmoid(g[:, 0 * h : 1 * h])
+            f = ttnn.sigmoid(g[:, 1 * h : 2 * h])
+            gg = ttnn.tanh(g[:, 2 * h : 3 * h])
+            o = ttnn.sigmoid(g[:, 3 * h : 4 * h])
             ct = ttnn.add(ttnn.multiply(f, ct), ttnn.multiply(i, gg))
             ht = ttnn.multiply(o, ttnn.tanh(ct))
             outs.append(ht)
-        stacked = ttnn.concat(outs, dim=0)                    # (T*B,h)
+        stacked = ttnn.concat(outs, dim=0)  # (T*B,h)
         return ttnn.to_torch(stacked).float().reshape(T, B, h)
 
     def forward(self, X):
@@ -120,39 +124,40 @@ class _DevBiLSTM:
         Xr = np.ascontiguousarray(np.transpose(X[:, ::-1, :], (1, 0, 2)).reshape(T * B, -1))
         Xf_d = ttnn.from_torch(torch.from_numpy(Xf).to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.dev)
         Xr_d = ttnn.from_torch(torch.from_numpy(Xr).to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.dev)
-        GXf = ttnn.linear(Xf_d, self.wih, bias=self.bih)      # (T*B,4h)
-        GXr = ttnn.linear(Xr_d, self.wihr, bias=self.bihr)    # (T*B,4h)
+        GXf = ttnn.linear(Xf_d, self.wih, bias=self.bih)  # (T*B,4h)
+        GXr = ttnn.linear(Xr_d, self.wihr, bias=self.bihr)  # (T*B,4h)
         GXf = ttnn.to_torch(GXf).float().reshape(T, B, 4 * h)
         GXr = ttnn.to_torch(GXr).float().reshape(T, B, 4 * h)
         # interleave to (T,2,B,4h) -> (T*2*B, 4h): block order per t = [fwd(B), rev(B)]
         GX = np.concatenate([GXf[:, None], GXr[:, None]], axis=1).reshape(T * 2 * B, 4 * h)
-        GX_d = ttnn.from_torch(torch.from_numpy(np.ascontiguousarray(GX)).to(torch.bfloat16),
-                               layout=ttnn.TILE_LAYOUT, device=self.dev)
+        GX_d = ttnn.from_torch(
+            torch.from_numpy(np.ascontiguousarray(GX)).to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.dev
+        )
         ht = ttnn.from_torch(torch.zeros(2, B, h, dtype=torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.dev)
         ct = ttnn.from_torch(torch.zeros(2, B, h, dtype=torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.dev)
         outs = []
         for t in range(T):
             gx = ttnn.slice(GX_d, [t * 2 * B, 0], [t * 2 * B + 2 * B, 4 * h])  # (2B,4h)
-            gh = ttnn.matmul(ht, self.whh3)                   # (2,B,4h) recurrent, per-direction
+            gh = ttnn.matmul(ht, self.whh3)  # (2,B,4h) recurrent, per-direction
             gh = ttnn.add(gh, self.bhh3)
-            gh = ttnn.reshape(gh, (2 * B, 4 * h))             # back to 2D for lean gate slicing
-            g = ttnn.add(gx, gh)                              # (2B,4h)
+            gh = ttnn.reshape(gh, (2 * B, 4 * h))  # back to 2D for lean gate slicing
+            g = ttnn.add(gx, gh)  # (2B,4h)
             R = 2 * B
-            sg = ttnn.sigmoid(g)                              # i,f,o in slots 0,1,3
-            tg = ttnn.tanh(ttnn.slice(g, [0, 2 * h], [R, 3 * h]))   # gg
+            sg = ttnn.sigmoid(g)  # i,f,o in slots 0,1,3
+            tg = ttnn.tanh(ttnn.slice(g, [0, 2 * h], [R, 3 * h]))  # gg
             i = ttnn.slice(sg, [0, 0 * h], [R, 1 * h])
             f = ttnn.slice(sg, [0, 1 * h], [R, 2 * h])
             o = ttnn.slice(sg, [0, 3 * h], [R, 4 * h])
             ct2 = ttnn.reshape(ct, (2 * B, h))
             ct2 = ttnn.add(ttnn.multiply(f, ct2), ttnn.multiply(i, tg))
-            ht2 = ttnn.multiply(o, ttnn.tanh(ct2))           # (2B,h)
+            ht2 = ttnn.multiply(o, ttnn.tanh(ct2))  # (2B,h)
             ct = ttnn.reshape(ct2, (2, B, h))
             ht = ttnn.reshape(ht2, (2, B, h))
             outs.append(ttnn.reshape(ht2, (1, 2 * B, h)))
-        stacked = ttnn.concat(outs, dim=0)                    # (T,2B,h)
+        stacked = ttnn.concat(outs, dim=0)  # (T,2B,h)
         y = ttnn.to_torch(stacked).float().numpy().reshape(T, 2, B, h)
-        fwd = np.transpose(y[:, 0], (1, 0, 2))                # (B,T,h)
-        rev = np.transpose(y[:, 1], (1, 0, 2))[:, ::-1, :]    # (B,T,h) restore order
+        fwd = np.transpose(y[:, 0], (1, 0, 2))  # (B,T,h)
+        rev = np.transpose(y[:, 1], (1, 0, 2))[:, ::-1, :]  # (B,T,h) restore order
         return np.concatenate([np.ascontiguousarray(fwd), np.ascontiguousarray(rev)], axis=2)
 
 
@@ -168,12 +173,18 @@ class TTNNPyanNet:
         sd = self.sd
         x = instance_norm_1d(wav, sd["sincnet.wav_norm1d.weight"], sd["sincnet.wav_norm1d.bias"])
         x = conv1d(x, self.sinc_kernel, None, stride=10)
-        x = np.abs(x); x = maxpool1d(x)
-        x = instance_norm_1d(x, sd["sincnet.norm1d.0.weight"], sd["sincnet.norm1d.0.bias"]); x = leaky_relu(x)
-        x = conv1d(x, sd["sincnet.conv1d.1.weight"], sd["sincnet.conv1d.1.bias"]); x = maxpool1d(x)
-        x = instance_norm_1d(x, sd["sincnet.norm1d.1.weight"], sd["sincnet.norm1d.1.bias"]); x = leaky_relu(x)
-        x = conv1d(x, sd["sincnet.conv1d.2.weight"], sd["sincnet.conv1d.2.bias"]); x = maxpool1d(x)
-        x = instance_norm_1d(x, sd["sincnet.norm1d.2.weight"], sd["sincnet.norm1d.2.bias"]); x = leaky_relu(x)
+        x = np.abs(x)
+        x = maxpool1d(x)
+        x = instance_norm_1d(x, sd["sincnet.norm1d.0.weight"], sd["sincnet.norm1d.0.bias"])
+        x = leaky_relu(x)
+        x = conv1d(x, sd["sincnet.conv1d.1.weight"], sd["sincnet.conv1d.1.bias"])
+        x = maxpool1d(x)
+        x = instance_norm_1d(x, sd["sincnet.norm1d.1.weight"], sd["sincnet.norm1d.1.bias"])
+        x = leaky_relu(x)
+        x = conv1d(x, sd["sincnet.conv1d.2.weight"], sd["sincnet.conv1d.2.bias"])
+        x = maxpool1d(x)
+        x = instance_norm_1d(x, sd["sincnet.norm1d.2.weight"], sd["sincnet.norm1d.2.bias"])
+        x = leaky_relu(x)
         return x  # (B,60,T)
 
     def _ensure_bilstm(self):
@@ -188,14 +199,20 @@ class TTNNPyanNet:
         h = np.zeros((1, hidden), dtype=np.float32)
         c = np.zeros((1, hidden), dtype=np.float32)
         out = np.zeros((T, hidden), dtype=np.float32)
-        def sig(z): return 1.0 / (1.0 + np.exp(-z))
+
+        def sig(z):
+            return 1.0 / (1.0 + np.exp(-z))
+
         for t in range(T):
-            xt = seq[t:t + 1]
+            xt = seq[t : t + 1]
             gx = _tt_linear(self.device, xt, w_ih, b_ih)
             gh = _tt_linear(self.device, h, w_hh, b_hh)
             g = gx + gh
             i, f, gg, o = np.split(g[0], 4)
-            i = sig(i); f = sig(f); gg = np.tanh(gg); o = sig(o)
+            i = sig(i)
+            f = sig(f)
+            gg = np.tanh(gg)
+            o = sig(o)
             c = f * c + i * gg
             h = (o * np.tanh(c)).reshape(1, hidden)
             out[t] = h[0]
@@ -203,10 +220,24 @@ class TTNNPyanNet:
 
     def bilstm(self, x, li, hidden=128):
         sd = self.sd
-        fwd = self._lstm_dir(x, sd[f"lstm.weight_ih_l{li}"], sd[f"lstm.weight_hh_l{li}"],
-                             sd[f"lstm.bias_ih_l{li}"], sd[f"lstm.bias_hh_l{li}"], hidden, reverse=False)
-        rev = self._lstm_dir(x, sd[f"lstm.weight_ih_l{li}_reverse"], sd[f"lstm.weight_hh_l{li}_reverse"],
-                             sd[f"lstm.bias_ih_l{li}_reverse"], sd[f"lstm.bias_hh_l{li}_reverse"], hidden, reverse=True)
+        fwd = self._lstm_dir(
+            x,
+            sd[f"lstm.weight_ih_l{li}"],
+            sd[f"lstm.weight_hh_l{li}"],
+            sd[f"lstm.bias_ih_l{li}"],
+            sd[f"lstm.bias_hh_l{li}"],
+            hidden,
+            reverse=False,
+        )
+        rev = self._lstm_dir(
+            x,
+            sd[f"lstm.weight_ih_l{li}_reverse"],
+            sd[f"lstm.weight_hh_l{li}_reverse"],
+            sd[f"lstm.bias_ih_l{li}_reverse"],
+            sd[f"lstm.bias_hh_l{li}_reverse"],
+            hidden,
+            reverse=True,
+        )
         return np.concatenate([fwd, rev], axis=1)
 
     def forward(self, wav):
@@ -230,11 +261,11 @@ class TTNNPyanNet:
         """
         sd = self.sd
         B = wav_batch.shape[0]
-        feats = [self.sincnet(wav_batch[i:i + 1])[0].T for i in range(B)]  # list of (T,60)
+        feats = [self.sincnet(wav_batch[i : i + 1])[0].T for i in range(B)]  # list of (T,60)
         T = min(f.shape[0] for f in feats)
         X = np.stack([np.ascontiguousarray(f[:T]) for f in feats], axis=0)  # (B,T,60)
         for L in self._ensure_bilstm():
-            X = L.forward(X)                                   # (B,T,256)
+            X = L.forward(X)  # (B,T,256)
         N = B * T
         X2 = X.reshape(N, -1)
         X2 = leaky_relu(_tt_linear(self.device, X2, sd["linear.0.weight"], sd["linear.0.bias"]))

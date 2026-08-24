@@ -58,9 +58,7 @@ class WeSpeakerNumpyRef:
                 # downsample present on first block of layers 2..4
                 ds_w = f"{p}.shortcut.0.weight"
                 if ds_w in self.sd:
-                    self.folded[f"{p}.ds"] = self._fold_conv_bn(
-                        f"{p}.shortcut.0", f"{p}.shortcut.1"
-                    )
+                    self.folded[f"{p}.ds"] = self._fold_conv_bn(f"{p}.shortcut.0", f"{p}.shortcut.1")
         self.seg_w = self._get("resnet.seg_1.weight")
         self.seg_b = self._get("resnet.seg_1.bias")
 

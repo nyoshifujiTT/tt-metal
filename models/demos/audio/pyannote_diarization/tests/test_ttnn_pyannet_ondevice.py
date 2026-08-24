@@ -29,9 +29,7 @@ from models.demos.audio.pyannote_diarization.tt.ttnn_pyannet import TTNNPyanNet 
 
 @pytest.fixture(scope="module")
 def pyannet(model_location_generator):
-    model = Model.from_pretrained(
-        common.resolve_weights(common.SEGMENTATION_RELPATH, model_location_generator)
-    )
+    model = Model.from_pretrained(common.resolve_weights(common.SEGMENTATION_RELPATH, model_location_generator))
     model.eval()
     return model
 

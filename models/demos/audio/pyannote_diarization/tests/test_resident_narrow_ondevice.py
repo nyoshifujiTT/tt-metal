@@ -48,7 +48,7 @@ def test_resident_narrow_matches_numpy_backbone(device, state_dict, W):
     tt = TTNNWeSpeakerResident(state_dict, device)
 
     feat = np.random.RandomState(W).randn(1, 1, 80, W).astype(np.float32)
-    ref_map = ref.backbone_numpy(feat)                       # (1,C,H,Wref)
+    ref_map = ref.backbone_numpy(feat)  # (1,C,H,Wref)
     dev_map = tt.backbone(torch.from_numpy(feat).float()).numpy()
 
     # the pad+crop path must reproduce the exact unpadded output width

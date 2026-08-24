@@ -27,9 +27,7 @@ from models.demos.audio.pyannote_diarization.tt.ttnn_wespeaker import TTNNWeSpea
 
 @pytest.fixture(scope="module")
 def wespeaker(model_location_generator):
-    model = Model.from_pretrained(
-        common.resolve_weights(common.EMBEDDING_RELPATH, model_location_generator)
-    )
+    model = Model.from_pretrained(common.resolve_weights(common.EMBEDDING_RELPATH, model_location_generator))
     model.eval()
     return model
 
@@ -52,9 +50,7 @@ def _torch_reference(model, seconds):
     [(False, False), (True, False), (True, True)],
     ids=["convs_only", "device_elementwise", "device_elementwise_and_pool"],
 )
-def test_ttnn_wespeaker_matches_torch(
-    device, wespeaker, use_device_elementwise, use_device_pool
-):
+def test_ttnn_wespeaker_matches_torch(device, wespeaker, use_device_elementwise, use_device_pool):
     feats, embedding_torch = _torch_reference(wespeaker, seconds=3.0)
 
     tt = TTNNWeSpeaker(wespeaker.state_dict(), device)

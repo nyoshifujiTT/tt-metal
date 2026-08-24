@@ -21,9 +21,7 @@ from models.demos.audio.pyannote_diarization.reference.wespeaker_numpy_ref impor
 
 
 def test_numpy_ref_matches_torch_wespeaker_resnet34(model_location_generator):
-    m = Model.from_pretrained(
-        common.resolve_weights(common.EMBEDDING_RELPATH, model_location_generator)
-    )
+    m = Model.from_pretrained(common.resolve_weights(common.EMBEDDING_RELPATH, model_location_generator))
     m.eval()
     ref = WeSpeakerNumpyRef(m.state_dict())
     wav = (torch.rand(1, 1, 48000, generator=torch.Generator().manual_seed(7)) * 2 - 1) * 0.1
@@ -32,10 +30,7 @@ def test_numpy_ref_matches_torch_wespeaker_resnet34(model_location_generator):
         emb_torch = m.resnet(fbank)[1].numpy()
     feats = fbank.permute(0, 2, 1).unsqueeze(1).numpy()
     emb_np = ref.forward(feats)
-    cos = float(
-        np.dot(emb_torch[0], emb_np[0])
-        / (np.linalg.norm(emb_torch[0]) * np.linalg.norm(emb_np[0]))
-    )
+    cos = float(np.dot(emb_torch[0], emb_np[0]) / (np.linalg.norm(emb_torch[0]) * np.linalg.norm(emb_np[0])))
     max_abs = float(np.max(np.abs(emb_torch - emb_np)))
     assert cos > 0.999, f"cosine too low: {cos}"
     assert max_abs < 1e-2, f"max_abs too high: {max_abs}"

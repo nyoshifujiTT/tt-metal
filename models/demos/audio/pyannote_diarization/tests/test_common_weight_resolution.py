@@ -68,7 +68,5 @@ def test_resolve_model_dir_falls_back_when_generator_has_no_local_copy(monkeypat
 
 def test_resolve_weights_joins_the_checkpoint_relpath(tmp_path, monkeypatch):
     monkeypatch.delenv("HF_MODEL", raising=False)
-    got = common.resolve_weights(
-        common.EMBEDDING_RELPATH, lambda model_version, **kwargs: tmp_path
-    )
+    got = common.resolve_weights(common.EMBEDDING_RELPATH, lambda model_version, **kwargs: tmp_path)
     assert got == os.path.join(str(tmp_path), "embedding/pytorch_model.bin")

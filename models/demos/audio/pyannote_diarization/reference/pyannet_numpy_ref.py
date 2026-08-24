@@ -51,11 +51,17 @@ def lstm_layer(x, w_ih, w_hh, b_ih, b_hh, hidden):
     h = np.zeros(hidden, dtype=np.float64)
     c = np.zeros(hidden, dtype=np.float64)
     out = np.zeros((T, hidden), dtype=np.float64)
-    def sig(z): return 1.0 / (1.0 + np.exp(-z))
+
+    def sig(z):
+        return 1.0 / (1.0 + np.exp(-z))
+
     for t in range(T):
         g = x[t] @ w_ih.T + b_ih + h @ w_hh.T + b_hh  # (4*hidden,)
         i, f, gg, o = np.split(g, 4)
-        i = sig(i); f = sig(f); gg = np.tanh(gg); o = sig(o)
+        i = sig(i)
+        f = sig(f)
+        gg = np.tanh(gg)
+        o = sig(o)
         c = f * c + i * gg
         h = o * np.tanh(c)
         out[t] = h
@@ -65,13 +71,21 @@ def lstm_layer(x, w_ih, w_hh, b_ih, b_hh, hidden):
 def bilstm_layer(x, sd, li, hidden=128):
     """Bidirectional LSTM layer li. x: (T, in) -> (T, 2*hidden)."""
     fwd = lstm_layer(
-        x, sd[f"lstm.weight_ih_l{li}"], sd[f"lstm.weight_hh_l{li}"],
-        sd[f"lstm.bias_ih_l{li}"], sd[f"lstm.bias_hh_l{li}"], hidden,
+        x,
+        sd[f"lstm.weight_ih_l{li}"],
+        sd[f"lstm.weight_hh_l{li}"],
+        sd[f"lstm.bias_ih_l{li}"],
+        sd[f"lstm.bias_hh_l{li}"],
+        hidden,
     )
     xr = x[::-1]
     rev = lstm_layer(
-        xr, sd[f"lstm.weight_ih_l{li}_reverse"], sd[f"lstm.weight_hh_l{li}_reverse"],
-        sd[f"lstm.bias_ih_l{li}_reverse"], sd[f"lstm.bias_hh_l{li}_reverse"], hidden,
+        xr,
+        sd[f"lstm.weight_ih_l{li}_reverse"],
+        sd[f"lstm.weight_hh_l{li}_reverse"],
+        sd[f"lstm.bias_ih_l{li}_reverse"],
+        sd[f"lstm.bias_hh_l{li}_reverse"],
+        hidden,
     )[::-1]
     return np.concatenate([fwd, rev], axis=1)
 
@@ -104,13 +118,13 @@ class PyanNetNumpyRef:
 
     def forward(self, wav):
         sd = self.sd
-        feat = self.sincnet(wav)          # (B,60,T)
+        feat = self.sincnet(wav)  # (B,60,T)
         assert feat.shape[0] == 1
-        x = feat[0].T                     # (T,60)
+        x = feat[0].T  # (T,60)
         for li in range(4):
-            x = bilstm_layer(x, sd, li)   # (T,256)
+            x = bilstm_layer(x, sd, li)  # (T,256)
         # linear layers with leaky_relu
         x = leaky_relu(x @ sd["linear.0.weight"].T + sd["linear.0.bias"])
         x = leaky_relu(x @ sd["linear.1.weight"].T + sd["linear.1.bias"])
         logits = x @ sd["classifier.weight"].T + sd["classifier.bias"]  # (T,7)
-        return logits[None]               # (1,T,7)
+        return logits[None]  # (1,T,7)

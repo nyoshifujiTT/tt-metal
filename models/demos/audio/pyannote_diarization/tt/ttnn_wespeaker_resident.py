@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import numpy as np
 import torch
-import ttnn
 
+import ttnn
 from models.demos.audio.pyannote_diarization.reference.wespeaker_numpy_ref import WeSpeakerNumpyRef
 
 
@@ -40,8 +40,8 @@ class TTNNWeSpeakerResident:
         self.seg_b = self._ref.seg_b
         self._wcache = {}
         self.compute_cfg = ttnn.init_device_compute_kernel_config(
-            device.arch(), math_fidelity=ttnn.MathFidelity.HiFi4,
-            fp32_dest_acc_en=True, packer_l1_acc=True)
+            device.arch(), math_fidelity=ttnn.MathFidelity.HiFi4, fp32_dest_acc_en=True, packer_l1_acc=True
+        )
         self.conv_cfg = ttnn.Conv2dConfig(weights_dtype=ttnn.bfloat16)
 
     def _w(self, key, arr):
@@ -58,12 +58,22 @@ class TTNNWeSpeakerResident:
         tb = self._w(key + ".b", b.reshape(1, 1, 1, Cout))
         if W >= self.SAFE_W:
             out, (Hout, Wout) = ttnn.conv2d(
-                input_tensor=tx, weight_tensor=tw, bias_tensor=tb, device=self.device,
-                in_channels=Cin, out_channels=Cout, batch_size=B,
-                input_height=H, input_width=W, kernel_size=(kh, kw),
-                stride=(stride, stride), padding=(pad, pad),
-                conv_config=self.conv_cfg, compute_config=self.compute_cfg,
-                return_output_dim=True)
+                input_tensor=tx,
+                weight_tensor=tw,
+                bias_tensor=tb,
+                device=self.device,
+                in_channels=Cin,
+                out_channels=Cout,
+                batch_size=B,
+                input_height=H,
+                input_width=W,
+                kernel_size=(kh, kw),
+                stride=(stride, stride),
+                padding=(pad, pad),
+                conv_config=self.conv_cfg,
+                compute_config=self.compute_cfg,
+                return_output_dim=True,
+            )
             return out, Hout, Wout, Cout
         # --- narrow-width path: zero-pad time axis to SAFE_W, conv, crop back ---
         # true output dims the unpadded conv would produce
@@ -77,12 +87,22 @@ class TTNNWeSpeakerResident:
         x_nhwc = x_pad.reshape(1, 1, B * H * Wp, Cin)
         txp = ttnn.from_torch(x_nhwc.to(torch.bfloat16), layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device)
         out, (Hpo, Wpo) = ttnn.conv2d(
-            input_tensor=txp, weight_tensor=tw, bias_tensor=tb, device=self.device,
-            in_channels=Cin, out_channels=Cout, batch_size=B,
-            input_height=H, input_width=Wp, kernel_size=(kh, kw),
-            stride=(stride, stride), padding=(pad, pad),
-            conv_config=self.conv_cfg, compute_config=self.compute_cfg,
-            return_output_dim=True)
+            input_tensor=txp,
+            weight_tensor=tw,
+            bias_tensor=tb,
+            device=self.device,
+            in_channels=Cin,
+            out_channels=Cout,
+            batch_size=B,
+            input_height=H,
+            input_width=Wp,
+            kernel_size=(kh, kw),
+            stride=(stride, stride),
+            padding=(pad, pad),
+            conv_config=self.conv_cfg,
+            compute_config=self.compute_cfg,
+            return_output_dim=True,
+        )
         # crop the padded conv output (NHWC-flattened) back to Wout columns
         o_bhwc = ttnn.to_torch(out).float().reshape(B, Hpo, Wpo, Cout)[:, :, :Wout, :]
         o_nhwc = o_bhwc.reshape(1, 1, B * Hout * Wout, Cout).contiguous()
