@@ -12,8 +12,9 @@ device, runs the conv, and crops the output back. This test asserts that path is
 numerically faithful to the numpy reference backbone for degenerate widths and
 that the whole backbone still runs on the p150.
 
-Skipped automatically when ttnn / a Tenstorrent device / the community-1
-embedding weights are unavailable, so it is safe in the media-server suite.
+The device comes from the shared tt-metal ``device`` fixture, so ``--device-id``
+and the CI SKU/topology handling apply; ``l1_small_size`` is requested through
+``device_params``.
 """
 import os
 
@@ -41,21 +42,10 @@ import sys  # noqa: E402
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
-import ttnn  # noqa: E402
 from pyannote.audio import Model  # noqa: E402
 
 from models.demos.audio.pyannote_diarization.reference.wespeaker_numpy_ref import WeSpeakerNumpyRef  # noqa: E402
 from models.demos.audio.pyannote_diarization.tt.ttnn_wespeaker_resident import TTNNWeSpeakerResident  # noqa: E402
-
-
-@pytest.fixture(scope="module")
-def device():
-    try:
-        dev = ttnn.open_device(device_id=0, l1_small_size=32768)
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"no Tenstorrent device available: {exc}")
-    yield dev
-    ttnn.close_device(dev)
 
 
 @pytest.fixture(scope="module")
@@ -65,6 +55,7 @@ def state_dict():
     return model.state_dict()
 
 
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
 @pytest.mark.parametrize("W", [1, 2, 4, 8, 12])
 def test_resident_narrow_matches_numpy_backbone(device, state_dict, W):
     sdn = {k: v.numpy() for k, v in state_dict.items()}
