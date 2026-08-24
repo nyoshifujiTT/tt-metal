@@ -23,7 +23,7 @@ Weights are fetched on demand, so there is nothing to place by hand. Model ident
 export HF_TOKEN=hf_...
 ```
 
-Without a token, point `HF_MODEL` at the ungated mirror, which carries the same checkpoint SHAs:
+Without a token, point `HF_MODEL` at the ungated mirror. It carries the same checkpoints: the Hub tree API reports identical git object ids and sizes for `config.yaml`, `embedding/pytorch_model.bin`, `segmentation/pytorch_model.bin` and both `plda/*.npz` files.
 
 ```sh
 export HF_MODEL=pyannote-community/speaker-diarization-community-1
