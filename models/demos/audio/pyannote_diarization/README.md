@@ -5,7 +5,7 @@
 
 ## Introduction
 
-[`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1) is a speaker-diarization pipeline: it segments an audio recording into "who spoke when". The pipeline runs two neural nets — a **WeSpeaker ResNet34** speaker-embedding model and a **PyanNet** (SincNet + BiLSTM) local-segmentation model — around host-side clustering. This demo ports both neural nets to ttnn so they execute on a Tenstorrent Blackhole p150, matching the torch reference within tolerance (WeSpeaker embedding cosine > 0.99; PyanNet frame agreement 0.998 vs CPU; end-to-end diarization error rate < 0.05 against the host pipeline).
+[`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1) is a speaker-diarization pipeline: it segments an audio recording into "who spoke when". The pipeline runs two neural nets — a **WeSpeaker ResNet34** speaker-embedding model and a **PyanNet** (SincNet + BiLSTM) local-segmentation model — around host-side clustering. This demo ports both neural nets to ttnn so they execute on a Tenstorrent Blackhole p150, matching the torch reference within tolerance. The tests assert the bounds: WeSpeaker embedding cosine > 0.99, PyanNet segmentation logit cosine > 0.99 with powerset argmax agreement > 0.95, and an end-to-end diarization error rate < 0.05 against the same pipeline run entirely on host. On the 30 s sample the measured frame agreement is 0.998.
 
 ## Prerequisites
 
