@@ -8,21 +8,29 @@ Shared vLLM pooling adapter for the Qwen3-Embedding family.
 The upstream embedding wrapper (PR #35941) lives at
 ``models/demos/wormhole/qwen3_embedding_8b/demo/generator_vllm.py``. It targets
 plain vLLM. This adapter subclasses it and adds only what the TT vLLM plugin's
-pooling path needs, for both 0.6B and 8B:
+pooling path needs, for both 0.6B and 8B.
 
-  Plugin pooling contract. vLLM's ``is_vllm_model`` check
-     (vllm/model_executor/models/interfaces_base.py) needs ``embed_input_ids`` to
-     exist and ``forward`` to accept ``input_ids`` and ``positions`` kwargs, and the
-     pooling task is only enumerated when ``is_pooling_model`` is truthy. The pooling
-     runner (TTModelRunnerPooling) calls ``forward(input_ids=..., attention_mask=...)``
-     and never passes ``positions``; it only needs to be an accepted keyword for the
-     signature check, so ``forward`` just delegates to the base implementation (all
-     embedding numerics stay in the base wrapper, which drives the real prefill length
-     from ``prompt_lens`` via ``get_padded_prefill_len``).
+Pooling contract (identical to upstream vLLM's). The plugin's pooling runner
+mirrors ``GPUModelRunner._pool``: it takes the flat per-token hidden states from
+``forward`` and hands them to ``model.pooler`` together with a
+``PoolingMetadata`` describing each request's token span. The Pooler owns every
+pooling directive -- pooling type (LAST for Qwen3-Embedding), normalization,
+activation -- exactly as it does on GPU. So this adapter must
 
-Model resolution (offline / 0.6B vs 8B) and the KV-cache context limit are handled
-outside this adapter: the base wrapper now uses the caller-provided ``hf_config``
-as-is, and the on-device context cap lives in the tt-inference-server model spec
+  * return the flat ``[total_tokens, hidden]`` layout from ``forward``
+    (``return_full_hidden_states``), not an already-pooled tensor, and
+  * expose a ``pooler``.
+
+Returning a pooled tensor instead would be silently wrong: the runner would treat
+the ``[batch, hidden]`` result as if its first axis were the token axis.
+
+``forward`` also accepts ``positions`` so vLLM's ``_check_vllm_model_forward``
+signature check passes; the runner never passes it and the base forward does not
+use it.
+
+Model resolution (0.6B vs 8B) and the KV-cache context limit are handled outside
+this adapter: the base wrapper uses the caller-provided ``hf_config`` as-is, and
+the on-device context cap lives in the tt-inference-server model spec
 (``max_context`` -> ``max_model_len``). So this adapter carries only the pooling
 contract and nothing size- or environment-specific.
 """
@@ -38,16 +46,67 @@ from models.demos.wormhole.qwen3_embedding_8b.demo.generator_vllm import (
 
 class Qwen3EmbeddingForTTvLLM(Qwen3ForEmbedding):
     """Qwen3-Embedding wrapper wired for the TT vLLM plugin's pooling path
-    (0.6B / 8B, WH / BH). Adds only the plugin pooling contract; all numerics and
+    (0.6B / 8B, WH / BH). Adds only the pooling contract; all numerics and
     model/config resolution stay in the base wrapper."""
 
     # is_pooling_model(model) reads this via getattr; inspect_model_cls
     # enumerates the "embed" task only when it is truthy.
     is_pooling_model = True
 
-    # vLLM is_vllm_model introspection hook. The real embedding is produced on
-    # the prefill path inside forward(); this only needs to exist.
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Built lazily on first access: constructing a Pooler needs the resolved
+        # vLLM config, which is not available for every instantiation path (the
+        # metal-only demo builds this class with a bare device + model_name).
+        self._pooler = None
+
+    @property
+    def pooler(self):
+        """The vLLM Pooler that turns flat hidden states into embeddings.
+
+        ``Pooler.for_embed`` builds the standard embedding pooler for the
+        resolved ``PoolerConfig`` -- LAST pooling plus the configured
+        normalization -- so normalization stays where vLLM puts it on every other
+        backend instead of being re-implemented in the runner or the adapter.
+        """
+        if self._pooler is None:
+            from vllm.model_executor.layers.pooler import Pooler
+
+            self._pooler = Pooler.for_embed(pooler_config=self._resolve_pooler_config())
+        return self._pooler
+
+    @pooler.setter
+    def pooler(self, value):
+        # The base wrapper assigns ``self.pooler = None`` during __init__ to
+        # satisfy older vLLM wrappers; absorb that without clobbering the property.
+        self._pooler = value
+
+    def _resolve_pooler_config(self):
+        """The resolved ``PoolerConfig`` for this model, from the vLLM config.
+
+        Taken as-is from ``vllm_config.model_config``: vLLM derives it from the
+        checkpoint plus any ``--override-pooler-config``, and its field set has
+        changed across releases, so reconstructing one here would both ignore the
+        user's configuration and break whenever those fields move. A missing
+        config is an error rather than a guess -- the serving path always has one,
+        and the metal-only demo does not go through the Pooler at all.
+        """
+        vllm_config = getattr(self, "vllm_config", None)
+        model_config = getattr(vllm_config, "model_config", None) if vllm_config else None
+        pooler_config = getattr(model_config, "pooler_config", None) if model_config else None
+        if pooler_config is None:
+            raise RuntimeError(
+                "Qwen3EmbeddingForTTvLLM.pooler needs vllm_config.model_config."
+                "pooler_config, which vLLM populates for pooling models. It is "
+                "absent here, so this instance was not built by the vLLM/"
+                "tt-inference-server path; use the base wrapper's forward "
+                "directly for metal-only runs."
+            )
+        return pooler_config
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        # vLLM is_vllm_model introspection hook; the real embedding is produced
+        # on the prefill path inside forward().
         return input_ids
 
     def forward(
@@ -56,7 +115,9 @@ class Qwen3EmbeddingForTTvLLM(Qwen3ForEmbedding):
         positions: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
-        # positions is accepted only so vLLM's _check_vllm_model_forward
-        # signature check passes; the pooling runner does not pass it and the base
-        # forward does not use it. All numerics stay in the base implementation.
+        # Flat per-token hidden states: the layout the pooling runner indexes with
+        # PoolingMetadata before handing it to the Pooler. Forced here (rather
+        # than left to the caller) because the runner never passes it and a pooled
+        # return would be misread as token-major.
+        kwargs.setdefault("return_full_hidden_states", True)
         return super().forward(input_ids, **kwargs)
