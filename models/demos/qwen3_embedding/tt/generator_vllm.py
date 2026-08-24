@@ -64,15 +64,18 @@ class Qwen3EmbeddingForTTvLLM(Qwen3ForEmbedding):
     def pooler(self):
         """The vLLM Pooler that turns flat hidden states into embeddings.
 
-        ``Pooler.for_embed`` builds the standard embedding pooler for the
-        resolved ``PoolerConfig`` -- LAST pooling plus the configured
-        normalization -- so normalization stays where vLLM puts it on every other
-        backend instead of being re-implemented in the runner or the adapter.
+        ``DispatchPooler.for_embedding`` builds the standard embedding pooler for
+        the resolved ``PoolerConfig`` -- the configured pooling type plus the
+        activation/normalization the task implies. It is the same constructor
+        vLLM's own embedding adapters use (see
+        ``vllm/model_executor/models/adapters.py``), so normalization stays where
+        vLLM puts it on every other backend instead of being re-implemented in
+        the runner or in this adapter.
         """
         if self._pooler is None:
-            from vllm.model_executor.layers.pooler import Pooler
+            from vllm.model_executor.layers.pooler import DispatchPooler
 
-            self._pooler = Pooler.for_embed(pooler_config=self._resolve_pooler_config())
+            self._pooler = DispatchPooler.for_embedding(self._resolve_pooler_config())
         return self._pooler
 
     @pooler.setter

@@ -118,3 +118,36 @@ def test_base_assigning_pooler_none_does_not_break_the_property(monkeypatch):
     model.pooler = None
     assert type(model).pooler.fget is not None
     assert model._pooler is None
+
+def test_pooler_is_built_with_the_vllm_embedding_factory(monkeypatch):
+    """The pooler must come from vLLM's own embedding-pooler constructor.
+
+    Not a hand-rolled Pooler: ``DispatchPooler.for_embedding`` is what vLLM's own
+    embedding adapters call (vllm/model_executor/models/adapters.py), so using it
+    keeps pooling type, activation and normalization identical to every other
+    backend. Patched here so the assertion holds without instantiating a real
+    Pooler (whose constructor signature is vLLM-version specific).
+    """
+    cls = _load_adapter_with_stub_base(monkeypatch)
+    model = cls()
+
+    sentinel_config = object()
+    sentinel_pooler = object()
+    monkeypatch.setattr(model, "_resolve_pooler_config", lambda: sentinel_config)
+
+    seen = {}
+
+    class _StubDispatchPooler:
+        @staticmethod
+        def for_embedding(pooler_config):
+            seen["config"] = pooler_config
+            return sentinel_pooler
+
+    pooler_mod = types.ModuleType("vllm.model_executor.layers.pooler")
+    pooler_mod.DispatchPooler = _StubDispatchPooler
+    monkeypatch.setitem(sys.modules, pooler_mod.__name__, pooler_mod)
+
+    assert model.pooler is sentinel_pooler
+    assert seen["config"] is sentinel_config
+    # Built once and cached.
+    assert model.pooler is sentinel_pooler
