@@ -55,10 +55,29 @@ class Qwen3EmbeddingForTTvLLM(Qwen3ForEmbedding):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Built lazily on first access: constructing a Pooler needs the resolved
-        # vLLM config, which is not available for every instantiation path (the
-        # metal-only demo builds this class with a bare device + model_name).
-        self._pooler = None
+        # The Pooler is built here, during model construction, because that is
+        # the only window in which vLLM guarantees the current-config context:
+        # the loader wraps construction in set_current_vllm_config(), and the
+        # pooling methods underneath DispatchPooler read it via
+        # get_current_vllm_config() in their __init__. Building it lazily on
+        # first access instead put construction inside get_supported_tasks(),
+        # outside that context, and serving died with "Current vLLM config is
+        # not set".
+        #
+        # Not every instantiation path has a vLLM config -- the metal-only demo
+        # builds this class with a bare device plus model name, and never pools
+        # through vLLM -- so it stays None there and only an actual pooler
+        # access reports the problem.
+        self._pooler = (
+            self._build_pooler()
+            if getattr(self, "vllm_config", None) is not None
+            else None
+        )
+
+    def _build_pooler(self):
+        from vllm.model_executor.layers.pooler import DispatchPooler
+
+        return DispatchPooler.for_embedding(self._resolve_pooler_config())
 
     @property
     def pooler(self):
@@ -73,9 +92,9 @@ class Qwen3EmbeddingForTTvLLM(Qwen3ForEmbedding):
         the runner or in this adapter.
         """
         if self._pooler is None:
-            from vllm.model_executor.layers.pooler import DispatchPooler
-
-            self._pooler = DispatchPooler.for_embedding(self._resolve_pooler_config())
+            # Only reachable when the instance was built without a vLLM config;
+            # _resolve_pooler_config explains that case and raises.
+            self._pooler = self._build_pooler()
         return self._pooler
 
     @pooler.setter

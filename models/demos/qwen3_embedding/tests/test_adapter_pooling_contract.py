@@ -151,3 +151,59 @@ def test_pooler_is_built_with_the_vllm_embedding_factory(monkeypatch):
     assert seen["config"] is sentinel_config
     # Built once and cached.
     assert model.pooler is sentinel_pooler
+
+
+def test_pooler_is_built_during_construction_when_a_vllm_config_is_present(monkeypatch):
+    """Pooler construction must happen while the model is being constructed.
+
+    That is the only window in which vLLM's current-config context is set: the
+    TT loader wraps ``initialize_vllm_model`` in ``set_current_vllm_config``,
+    and the pooling methods underneath ``DispatchPooler`` resolve the config
+    through ``get_current_vllm_config()`` in their ``__init__``. Building the
+    pooler lazily on first access instead moved construction into
+    ``get_supported_tasks``, outside that context, and serving
+    Qwen3-Embedding-0.6B on p150 failed at startup with "Current vLLM config is
+    not set".
+    """
+    cls = _load_adapter_with_stub_base(monkeypatch)
+
+    sentinel_config = object()
+    sentinel_pooler = object()
+    seen = {}
+
+    class _StubDispatchPooler:
+        @staticmethod
+        def for_embedding(pooler_config):
+            seen["config"] = pooler_config
+            return sentinel_pooler
+
+    pooler_mod = types.ModuleType("vllm.model_executor.layers.pooler")
+    pooler_mod.DispatchPooler = _StubDispatchPooler
+    monkeypatch.setitem(sys.modules, pooler_mod.__name__, pooler_mod)
+
+    class _WithVllmConfig(cls):
+        def __init__(self):
+            # The real base stores the vllm_config it was handed before the
+            # adapter's __init__ body runs.
+            self.vllm_config = types.SimpleNamespace(
+                model_config=types.SimpleNamespace(pooler_config=sentinel_config)
+            )
+            super().__init__()
+
+    model = _WithVllmConfig()
+
+    assert seen["config"] is sentinel_config, "the pooler must be built in __init__"
+    assert model._pooler is sentinel_pooler
+
+
+def test_construction_without_a_vllm_config_defers_instead_of_failing(monkeypatch):
+    """The metal-only demo builds this class with no vLLM config and never pools
+    through vLLM, so construction must not try to build a Pooler; only an actual
+    ``pooler`` access reports the missing config."""
+    cls = _load_adapter_with_stub_base(monkeypatch)
+
+    model = cls()
+
+    assert model._pooler is None
+    with pytest.raises(RuntimeError, match="pooler_config"):
+        model.pooler
