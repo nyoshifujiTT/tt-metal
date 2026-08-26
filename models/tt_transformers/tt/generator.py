@@ -1331,6 +1331,15 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     )
                 else:
                     if return_hidden_states:
+                        if return_full_hidden_states:
+                            self._extract_batched_prefill_full_hidden(
+                                logits,
+                                model_id=model_id,
+                                empty_slots=empty_slots,
+                                prompt_lens=prompt_lens,
+                                output_full_hidden=output_full_hidden,
+                            )
+                            break
                         # Embedding models: trace returns hidden states; extract last-token hidden per slot
                         slot_hidden_list = []
                         for local_idx, slot in enumerate(empty_slots):
@@ -1498,6 +1507,35 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
             return output_tokens, reformat_logprobs(output_log_probs, batch_size)
         else:
             return output_tensor
+
+    def _extract_batched_prefill_full_hidden(
+        self, logits, *, model_id, empty_slots, prompt_lens, output_full_hidden
+    ):
+        """Fill ``output_full_hidden`` from a batched-prefill trace output.
+
+        Batched prefill runs every scheduled request in one pass, so the trace
+        output carries all slots at once and has to be split per slot. This is
+        the flat/per-token pooling counterpart of the last-token extraction
+        beside it: the whole sequence is final-normed with no last-token slice,
+        because on this path the vLLM Pooler -- not the generator -- selects and
+        normalizes the pooled vector.
+
+        Without it the batched path left ``output_full_hidden`` all-None while
+        reporting success, and the caller's concatenation of the per-user
+        tensors died with "torch.cat(): expected a non-empty list of Tensors"
+        (observed serving Qwen3-Embedding-0.6B on p150, where a two-input
+        request takes the batched path).
+        """
+        slot_full_hidden = []
+        for local_idx, slot in enumerate(empty_slots):
+            user_hidden = logits[slot : slot + 1, :, :, :]
+            full_hidden = self.model[model_id].process_full_hidden_states_after_prefill_trace(user_hidden)
+            slot_full_hidden.append((local_idx, full_hidden.cpu(blocking=False)))
+        ttnn.synchronize_device(self.model[model_id].mesh_device)
+        for local_idx, full_hidden_host in slot_full_hidden:
+            output_full_hidden[local_idx] = self.model[model_id].process_output_prefill_full_hidden_states(
+                full_hidden_host, seq_len=int(prompt_lens[local_idx])
+            )
 
     def _paged_prefill_block_size(self, kv_cache):
         """Block size for chunked-prefill page-table padding/slicing.
