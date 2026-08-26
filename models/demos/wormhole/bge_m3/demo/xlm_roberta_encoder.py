@@ -190,7 +190,7 @@ class XlmRobertaEncoder(abc.ABC):
         return self.max_batch_size
 
     def warmup_model_prefill(self, *args, **kwargs) -> None:
-        """Compiles one forward per long-sequence device width.
+        """Compiles one full forward per long-sequence device width.
 
         Kernels are JIT-compiled per shape, and the compile lands on whichever
         request first uses an unseen shape: measured on Blackhole p150 at seq
@@ -217,11 +217,15 @@ class XlmRobertaEncoder(abc.ABC):
         self._initialize_model()
         pad_token_id = self.tokenizer.pad_token_id
         for width in BGE_M3_LONG_SEQ_WIDTHS:
-            padded_inputs = {
-                "input_ids": torch.full((width, BGE_M3_LONG_SEQ_LEN), pad_token_id, dtype=torch.long),
-                "attention_mask": torch.ones((width, BGE_M3_LONG_SEQ_LEN), dtype=torch.long),
-            }
-            ttnn.deallocate(self._run_encoder_chunk(padded_inputs))
+            # Run the model's own forward, not just the encoder: whatever the
+            # subclass does after the encoder (the reranker's device CLS
+            # extraction and classification head) compiles its own kernels too,
+            # and warming only the encoder left that cost on the first real
+            # request (measured 9.9 s against a 0.4 s steady state at width 1).
+            self.forward(
+                torch.full((width, BGE_M3_LONG_SEQ_LEN), pad_token_id, dtype=torch.long),
+                attention_mask=torch.ones((width, BGE_M3_LONG_SEQ_LEN), dtype=torch.long),
+            )
 
     # ---- shared encoder execution (uses self.model / self.device) ----
     def _run_encoder_chunk(self, padded_inputs: dict[str, Optional[torch.Tensor]]) -> ttnn.Tensor:
