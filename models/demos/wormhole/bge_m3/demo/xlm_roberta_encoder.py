@@ -97,8 +97,11 @@ class XlmRobertaEncoder(abc.ABC):
         self.dtype = dtype
         self.model_name = model_name
 
-        if vllm_config is not None:
-            self.vllm_config = vllm_config
+        # Always set the attribute, None when running outside vLLM (the demo /
+        # test path). Setting it only when present made ``self.vllm_config``
+        # raise AttributeError instead of reading as None, so callers had to
+        # guess whether it existed.
+        self.vllm_config = vllm_config
 
         self._is_initialized = False
         self.model_args = None
