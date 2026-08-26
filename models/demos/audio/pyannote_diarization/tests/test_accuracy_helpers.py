@@ -69,3 +69,74 @@ def test_thresholds_keep_fidelity_stricter_than_absolute_accuracy():
     """
     assert accuracy.FIDELITY_DER_MAX < accuracy.ACCURACY_DER_MAX
     assert accuracy.ACCURACY_DER_MAX < accuracy.PUBLISHED_DER
+
+
+def _write_rttm(path, turns):
+    lines = [
+        f"SPEAKER rec 1 {start:.3f} {end - start:.3f} <NA> <NA> {speaker} <NA> <NA>\n"
+        for speaker, start, end in turns
+    ]
+    path.write_text("".join(lines))
+
+
+def test_corpus_pairs_audio_with_its_annotation_in_a_stable_order(tmp_path):
+    """A limited run must pick the same recordings every time."""
+    (tmp_path / "audio").mkdir()
+    (tmp_path / "rttm").mkdir()
+    for name in ("b", "a", "c"):
+        (tmp_path / "audio" / f"{name}.wav").write_bytes(b"RIFF")
+        _write_rttm(tmp_path / "rttm" / f"{name}.rttm", [("s1", 0.0, 1.0)])
+    # An audio file with no annotation must be dropped, not scored as empty.
+    (tmp_path / "audio" / "unannotated.wav").write_bytes(b"RIFF")
+
+    pairs = accuracy.corpus_files(str(tmp_path))
+
+    assert [recording_id for recording_id, _, _ in pairs] == ["a", "b", "c"]
+    assert [r for r, _, _ in accuracy.corpus_files(str(tmp_path), limit=2)] == ["a", "b"]
+
+
+def test_corpus_der_accumulates_over_recordings_rather_than_averaging(tmp_path):
+    """Long recordings must weigh more, which is how published DERs are computed."""
+    (tmp_path / "audio").mkdir()
+    (tmp_path / "rttm").mkdir()
+    # 'long' is 100 s and scored perfectly; 'short' is 1 s and scored entirely
+    # wrong. A per-file mean would be ~0.5; accumulating gives ~1/101.
+    _write_rttm(tmp_path / "rttm" / "long.rttm", [("s1", 0.0, 100.0)])
+    _write_rttm(tmp_path / "rttm" / "short.rttm", [("s1", 0.0, 1.0)])
+    for name in ("long", "short"):
+        (tmp_path / "audio" / f"{name}.wav").write_bytes(b"RIFF")
+
+    def diarize(wav_path):
+        if wav_path.endswith("long.wav"):
+            return [{"speaker": "s1", "start": 0.0, "end": 100.0}]
+        return []  # missed the whole recording
+
+    scored = accuracy.corpus_der(diarize, str(tmp_path))
+
+    assert scored["num_recordings"] == 2
+    assert scored["der"] == pytest.approx(1.0 / 101.0, abs=1e-6)
+    assert scored["per_recording"]["short"] == pytest.approx(1.0)
+
+
+def test_corpus_root_prefers_the_per_corpus_variable(tmp_path, monkeypatch):
+    generic = tmp_path / "generic"
+    specific = tmp_path / "specific"
+    generic.mkdir()
+    specific.mkdir()
+    monkeypatch.setenv("DIARIZATION_CORPUS_DIR", str(generic))
+    monkeypatch.setenv("DIARIZATION_VOXCONVERSE_DIR", str(specific))
+
+    assert accuracy.corpus_root("voxconverse") == str(specific)
+
+    monkeypatch.delenv("DIARIZATION_VOXCONVERSE_DIR")
+    assert accuracy.corpus_root("voxconverse") == str(generic)
+
+    monkeypatch.delenv("DIARIZATION_CORPUS_DIR")
+    assert accuracy.corpus_root("voxconverse") is None
+
+
+def test_published_corpus_targets_cover_the_reported_benchmarks():
+    """The gate compares against a per-corpus figure, not the single-clip one."""
+    assert set(accuracy.PUBLISHED_CORPUS_DER) == {"ami", "dihard3", "voxconverse"}
+    # The single-sample gate is unrelated to these and must not be reused.
+    assert accuracy.PUBLISHED_CORPUS_DER["voxconverse"] < accuracy.ACCURACY_DER_MAX

@@ -40,6 +40,21 @@ ACCURACY_DER_MAX = 0.15
 PUBLISHED_DER = 0.170
 PUBLISHED_DER_REF = "https://huggingface.co/pyannote/speaker-diarization-community-1"
 
+# Published DER per corpus, which is what a corpus run can actually be compared
+# against. The single 30 s sample cannot: it is one clean two-speaker clip,
+# while these are hours of meeting and broadcast audio.
+PUBLISHED_CORPUS_DER = {
+    "ami": 0.170,  # AMI, IHM
+    "dihard3": 0.202,  # DIHARD 3, full
+    "voxconverse": 0.112,  # VoxConverse v0.3
+}
+
+# How far a corpus run may sit above the published figure before it counts as a
+# regression. The published numbers come from pyannote's own harness, so an
+# exact match is not expected -- a different subset, resampling, or overlap
+# handling all move the third decimal -- but a real break moves it much further.
+CORPUS_DER_TOLERANCE = 0.05
+
 
 def sample_audio_path() -> str:
     """The 30 s two-speaker recording shipped inside ``pyannote.audio``.
@@ -114,4 +129,66 @@ def score_against_reference(hypothesis, reference) -> dict:
         "num_speakers": speaker_count(hypothesis),
         "reference_num_speakers": speaker_count(reference),
         "speaker_count_matches": speaker_count(hypothesis) == speaker_count(reference),
+    }
+
+
+def corpus_root(name: str = "voxconverse"):
+    """Local directory holding a diarization corpus, or ``None`` if unset.
+
+    Corpora are hundreds of files and gigabytes, so they are never downloaded
+    by a test run. Point ``DIARIZATION_CORPUS_DIR`` (or the per-corpus
+    ``DIARIZATION_<NAME>_DIR``) at a prepared directory holding ``audio/*.wav``
+    and ``rttm/*.rttm``, and the corpus test runs; otherwise it skips.
+    """
+    specific = os.environ.get(f"DIARIZATION_{name.upper()}_DIR")
+    generic = os.environ.get("DIARIZATION_CORPUS_DIR")
+    for candidate in (specific, generic):
+        if candidate and os.path.isdir(candidate):
+            return candidate
+    return None
+
+
+def corpus_files(root: str, limit=None):
+    """Pair ``audio/<id>.wav`` with ``rttm/<id>.rttm`` under ``root``.
+
+    Returns ``[(recording_id, wav_path, rttm_path), ...]`` sorted by id, so a
+    ``limit`` selects the same subset on every run rather than a random one.
+    """
+    audio_dir = os.path.join(root, "audio")
+    rttm_dir = os.path.join(root, "rttm")
+    pairs = []
+    for entry in sorted(os.listdir(audio_dir)):
+        if not entry.endswith(".wav"):
+            continue
+        recording_id = entry[: -len(".wav")]
+        rttm = os.path.join(rttm_dir, recording_id + ".rttm")
+        if os.path.exists(rttm):
+            pairs.append((recording_id, os.path.join(audio_dir, entry), rttm))
+    return pairs[:limit] if limit else pairs
+
+
+def corpus_der(diarize, root: str, limit=None) -> dict:
+    """Score a whole corpus, accumulating one DER over every recording.
+
+    ``diarize(wav_path) -> [{speaker, start, end}, ...]``.
+
+    The metric is accumulated rather than averaged per file, which is how the
+    published figures are computed: a five-minute recording should weigh more
+    than a thirty-second one. Per-recording DERs are returned alongside so a
+    regression can be traced to the file that caused it.
+    """
+    from pyannote.metrics.diarization import DiarizationErrorRate
+
+    metric = DiarizationErrorRate()
+    per_recording = {}
+    for recording_id, wav, rttm in corpus_files(root, limit):
+        reference = load_rttm(rttm)
+        hypothesis = turns_to_annotation(diarize(wav))
+        per_recording[recording_id] = float(metric(reference, hypothesis))
+    if not per_recording:
+        raise RuntimeError(f"no audio/rttm pairs found under {root}")
+    return {
+        "der": abs(metric),
+        "num_recordings": len(per_recording),
+        "per_recording": per_recording,
     }
