@@ -22,9 +22,17 @@ crosses back to host. The public interface matches vLLM's ``Pooler`` ABC
 (``get_supported_tasks`` / ``forward(hidden_states, pooling_metadata)``) so the
 pooling runner drives it exactly like any upstream pooler.
 
-The activation (sigmoid for /score) is applied by vLLM downstream of the raw
-logit, matching how a cross-encoder ``ClassifierPooler`` keeps the un-activated
-logit here; the runner / serving layer applies ``use_activation`` per request.
+``ClassifierPoolerHead`` does more than run the classifier, and all of it is
+part of the API contract, so this class reproduces the same stages in the same
+order: the classifier, then the ``logit_mean`` / ``logit_sigma`` affine
+calibration, then the activation gated by each request's ``use_activation``.
+
+The activation is not optional decoration. vLLM resolves it from the HF config
+(``resolve_classifier_act_fn`` -> ``get_act_fn`` -> ``PoolerClassify``), and for
+a single-label cross-encoder like this one that is ``sigmoid``, so upstream's
+``/score`` answers in 0..1. Nothing downstream of the pooler applies it: the
+entrypoints only forward ``use_activation`` into ``PoolingParams``. Leaving it
+out therefore does not "let vLLM do it later", it changes the API's answer.
 """
 
 from __future__ import annotations
@@ -48,6 +56,38 @@ try:
 except Exception:  # pragma: no cover - exercised only without vLLM installed
     _PoolerBase = object
     _HAS_VLLM_POOLER = False
+
+# Upstream resolves the classification activation from the HF config rather than
+# hardcoding one, so call the same resolver instead of restating its rules (a
+# copy would drift, and it already handles problem_type and the sentence-
+# transformers override). Optional for the same reason as the Pooler ABC above.
+try:
+    from vllm.model_executor.layers.pooler.activations import resolve_classifier_act_fn
+
+    _HAS_VLLM_ACT_FN = True
+except Exception:  # pragma: no cover - exercised only without vLLM installed
+    resolve_classifier_act_fn = None
+    _HAS_VLLM_ACT_FN = False
+
+try:
+    from vllm.config import get_current_vllm_config_or_none
+
+    _HAS_VLLM_CURRENT_CONFIG = True
+except Exception:  # pragma: no cover - exercised only without vLLM installed
+    get_current_vllm_config_or_none = None
+    _HAS_VLLM_CURRENT_CONFIG = False
+
+
+def _activation_module():
+    """vLLM's pooler activations module, imported on use.
+
+    Kept out of the module-level import so this file still imports without vLLM
+    (the device-free tests rely on that), while the runtime pooler path, which
+    always has vLLM, can compare against the real activation classes.
+    """
+    from vllm.model_executor.layers.pooler import activations
+
+    return activations
 
 
 def extract_cls_hidden(
@@ -204,6 +244,63 @@ class RerankerClassifierPooler(_PoolerBase):
         if _HAS_VLLM_POOLER:
             super().__init__()
         self._model = model
+        self._logit_mean = None
+        self._logit_sigma = None
+        # Resolve the head's configuration now, not at scoring time. vLLM's
+        # ambient config is only set for the duration of the load, which is when
+        # the model (and so this pooler) is constructed; reading it later would
+        # find nothing. This is the same reason upstream builds its head in
+        # pooler_for_classify() during model construction.
+        model_config = self._model_config()
+        self._act_fn = self._resolve_activation(model_config)
+        pooler_config = getattr(model_config, "pooler_config", None)
+        if pooler_config is not None:
+            self._logit_mean = getattr(pooler_config, "logit_mean", None)
+            self._logit_sigma = getattr(pooler_config, "logit_sigma", None)
+
+    def _model_config(self):
+        """The vLLM ModelConfig, or None outside the vLLM serving path.
+
+        Prefers the config the model was built with, and falls back to vLLM's
+        ambient one. The fallback is needed because ``initialize_vllm_model`` is
+        called without ``vllm_config`` by the plugin's loader (most TT models do
+        not accept the argument, so the loader cannot pass it), yet the load runs
+        inside a ``set_current_vllm_config`` context. This is how upstream reads
+        it too -- ``pooler_for_classify`` calls ``get_current_vllm_config()``
+        rather than taking the config as an argument.
+
+        Returns None on the demo path, where there is no vLLM at all. The pooler
+        is constructed unconditionally there, so construction must tolerate that;
+        only the stages that genuinely need the config fail, and only if reached.
+        """
+        model_config = getattr(getattr(self._model, "vllm_config", None), "model_config", None)
+        if model_config is not None:
+            return model_config
+        if not _HAS_VLLM_CURRENT_CONFIG:
+            return None
+        return getattr(get_current_vllm_config_or_none(), "model_config", None)
+
+    @staticmethod
+    def _resolve_activation(model_config):
+        """Upstream's classification activation for this model, or None off-vLLM.
+
+        Delegates to vLLM's own ``resolve_classifier_act_fn`` so the rules
+        (``problem_type``, the sentence-transformers override, single-label
+        sigmoid vs multi-label softmax) come from one place instead of being
+        restated here, where they would drift.
+        """
+        if model_config is None or not _HAS_VLLM_ACT_FN:
+            return None
+        return resolve_classifier_act_fn(model_config, static_num_labels=True)
+
+    def _activation(self):
+        if self._act_fn is None:
+            raise RuntimeError(
+                "the classification activation could not be resolved (no vLLM "
+                "model config was available when the pooler was built); the "
+                "pooler is only driven from the vLLM serving path"
+            )
+        return self._act_fn
 
     def get_supported_tasks(self):
         # Cross-encoder scoring: /score and /rerank both route through the
@@ -224,16 +321,92 @@ class RerankerClassifierPooler(_PoolerBase):
           on device.
         - the fp32 device head maps the ``[num_reqs, D]`` CLS rows to
           ``[num_reqs, 1]`` logits.
+        - the head's remaining stages follow, in upstream's order: the
+          ``logit_mean`` / ``logit_sigma`` affine calibration, then the
+          activation, applied per request according to its ``use_activation``.
 
-        Scoring stays on device; only the final ``[num_reqs, 1]`` logit crosses
-        to host, returned as a per-request list (a valid ``PoolerOutput``).
+        Scoring stays on device -- the calibration and the activation are ttnn
+        ops too, so only the final ``[num_reqs, 1]`` score crosses to host,
+        returned as a per-request list (a valid ``PoolerOutput``).
         """
         classifier = self._model.classifier
         device = self._model.device
-        num_reqs = len(pooling_metadata.pooling_params)
+        pooling_params = pooling_metadata.pooling_params
+        num_reqs = len(pooling_params)
 
         first_indices = _first_token_indices_cpu(pooling_metadata, num_reqs)
         cls_tt = gather_cls_from_flat(hidden_states, first_indices, device)
         logits_tt = classifier(cls_tt)  # [num_reqs, 1] on device
+        logits_tt = self._calibrate_on_device(logits_tt)
+        logits_tt = self._activate_on_device(logits_tt, pooling_params)
         logits = to_torch_auto_compose(logits_tt, device=device).to(torch.float32).reshape(-1, 1)
         return [logits[i] for i in range(num_reqs)]
+
+    def _calibrate_on_device(self, logits_tt: ttnn.Tensor) -> ttnn.Tensor:
+        """Upstream's affine score calibration, on device.
+
+        ``(logit - logit_mean) / logit_sigma``, each step applied only when its
+        value is configured, matching ``ClassifierPoolerHead``. Both are unset
+        for this checkpoint, so this is normally a no-op; it exists because the
+        pooler config can carry them and dropping them would silently change the
+        score for a checkpoint that does.
+        """
+        if self._logit_mean is not None:
+            logits_tt = ttnn.subtract(logits_tt, self._logit_mean)
+        if self._logit_sigma is not None:
+            logits_tt = ttnn.multiply(logits_tt, 1.0 / self._logit_sigma)
+        return logits_tt
+
+    def _activate_on_device(self, logits_tt: ttnn.Tensor, pooling_params) -> ttnn.Tensor:
+        """Apply the classification activation, gated per request, on device.
+
+        For this single-label cross-encoder upstream resolves the activation to
+        sigmoid, so ``/score`` answers in 0..1; ``ttnn.sigmoid`` keeps that on
+        device. Each request may opt out via ``use_activation``, exactly as in
+        ``ClassifierPoolerHead``.
+
+        A batch that mixes the flag cannot be served by one device op. Upstream
+        handles it per row; rather than fall back to host arithmetic, this
+        rejects the mixed batch, because silently returning activated scores for
+        a request that asked for raw logits (or the reverse) is worse than a
+        clear error. Requests are independent, so a client can split them.
+        """
+        flags = {bool(getattr(param, "use_activation", None) is not False) for param in pooling_params}
+        if len(flags) > 1:
+            raise NotImplementedError(
+                "use_activation must be the same for every request in a batch on TT: "
+                "the activation is a single device op over the batch. Split the "
+                "requests to mix activated and raw scores."
+            )
+        if not flags or not flags.pop():
+            return logits_tt
+        self._assert_activation_is_sigmoid(self._activation(), int(logits_tt.shape[-1]))
+        return ttnn.sigmoid(logits_tt)
+
+    @staticmethod
+    def _assert_activation_is_sigmoid(activation, num_labels: int) -> None:
+        """Refuse to substitute ttnn.sigmoid for something else.
+
+        Only sigmoid has a device equivalent here, and upstream's resolver can
+        legitimately return other activations: ``PoolerIdentity`` for a
+        regression head, ``PoolerMultiLabelClassify``, a sentence-transformers
+        override, or ``PoolerClassify`` in its softmax branch when the head has
+        two or more labels. Running sigmoid in any of those cases would return a
+        wrong score silently, so check rather than assume. This model is
+        single-label, so the check passes for it.
+        """
+        classify_cls = getattr(_activation_module(), "PoolerClassify", None)
+        if classify_cls is None or not isinstance(activation, classify_cls):
+            raise NotImplementedError(
+                f"only the sigmoid classification activation has a device "
+                f"implementation; vLLM resolved {type(activation).__name__}"
+            )
+        resolved_labels = activation.num_labels
+        if resolved_labels is None:
+            resolved_labels = num_labels
+        if resolved_labels >= 2:
+            raise NotImplementedError(
+                "PoolerClassify uses softmax for a multi-label head "
+                f"(num_labels={resolved_labels}), which has no device "
+                "implementation here"
+            )

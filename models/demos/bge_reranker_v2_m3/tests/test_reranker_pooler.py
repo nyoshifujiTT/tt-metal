@@ -142,7 +142,9 @@ def test_pooler_forward_scores_flat_hidden(device, reset_seeds):
     meta = SimpleNamespace(
         pooling_cursor=cursor,
         prompt_lens=torch.tensor(real_lens),
-        pooling_params=[object()] * b,
+        # use_activation=False so this test keeps asserting on the raw logit;
+        # the activated path is covered separately below.
+        pooling_params=[SimpleNamespace(use_activation=False)] * b,
     )
 
     out = pooler.forward(flat_tt, meta)
@@ -150,6 +152,170 @@ def test_pooler_forward_scores_flat_hidden(device, reset_seeds):
     cand = torch.stack([o.reshape(1) for o in out], dim=0)  # [b, 1]
     torch.testing.assert_close(cand, ref_logits, atol=LOGIT_ATOL, rtol=LOGIT_RTOL)
 
+
+def _flat_pooler_fixture(device):
+    """Shared setup for the head-stage tests: a flat hidden, its CLS reference
+    logits, a pooler over the device head, and the matching metadata builder."""
+    from types import SimpleNamespace
+
+    d = HIDDEN_SIZE
+    real_lens = [4, 7, 2]
+    per_req = [torch.randn(li, d, dtype=torch.float32) for li in real_lens]
+    flat_ref = torch.cat(per_req, dim=0)
+    flat_bf16 = flat_ref.to(torch.bfloat16).to(torch.float32)
+    first_idx = torch.tensor([0] + torch.cumsum(torch.tensor(real_lens), 0)[:-1].tolist(), dtype=torch.int64)
+
+    state_dict = _random_state_dict()
+    ref_logits = XLMRobertaClassificationHead.from_state_dict(state_dict)(flat_bf16[first_idx]).to(torch.float32)
+
+    tt_head = XLMRobertaClassificationHeadTT.from_state_dict(device, state_dict)
+    flat_tt = to_ttnn_tensor(flat_ref, device, dtype=ttnn.bfloat16)
+
+    def meta_for(params):
+        return SimpleNamespace(
+            pooling_cursor=SimpleNamespace(first_token_indices_gpu=first_idx),
+            prompt_lens=torch.tensor(real_lens),
+            pooling_params=params,
+        )
+
+    return SimpleNamespace(
+        num_reqs=len(real_lens),
+        flat_tt=flat_tt,
+        ref_logits=ref_logits,
+        tt_head=tt_head,
+        meta_for=meta_for,
+    )
+
+
+def _pooler_with(device, tt_head, *, act_fn=None, logit_mean=None, logit_sigma=None):
+    """A pooler whose model stub carries the pooler config the head stages read.
+
+    The activation is injected rather than resolved from a real vLLM ModelConfig,
+    so these tests need no vLLM model config while still driving the production
+    code path.
+    """
+    from types import SimpleNamespace
+
+    pooler = RerankerClassifierPooler(SimpleNamespace(classifier=tt_head, device=device))
+    pooler._logit_mean = logit_mean
+    pooler._logit_sigma = logit_sigma
+    if act_fn is not None:
+        pooler._act_fn = act_fn
+    return pooler
+
+
+def _sigmoid_activation():
+    """vLLM's single-label classification activation (the one this model gets)."""
+    from vllm.model_executor.layers.pooler.activations import PoolerClassify
+
+    return PoolerClassify(num_labels=1)
+
+
+def test_pooler_applies_sigmoid_on_device(device, reset_seeds):
+    # Upstream's ClassifierPoolerHead applies the activation vLLM resolved from
+    # the HF config, and for this single-label cross-encoder that is sigmoid --
+    # so /score answers in 0..1. Nothing downstream of the pooler applies it, so
+    # the pooler must, and it must do it on device.
+    from types import SimpleNamespace
+
+    require_single_device(device)
+    fx = _flat_pooler_fixture(device)
+    pooler = _pooler_with(device, fx.tt_head, act_fn=_sigmoid_activation())
+
+    params = [SimpleNamespace(use_activation=True)] * fx.num_reqs
+    out = pooler.forward(fx.flat_tt, fx.meta_for(params))
+
+    cand = torch.stack([o.reshape(1) for o in out], dim=0)
+    torch.testing.assert_close(cand, torch.sigmoid(fx.ref_logits), atol=LOGIT_ATOL, rtol=LOGIT_RTOL)
+    assert torch.all((cand >= 0.0) & (cand <= 1.0)), "an activated score must be a probability"
+
+
+def test_pooler_activation_defaults_to_on(device, reset_seeds):
+    # use_activation=None means "the pooler's default", which upstream documents
+    # as True in most cases -- so an unset flag must still activate.
+    from types import SimpleNamespace
+
+    require_single_device(device)
+    fx = _flat_pooler_fixture(device)
+    pooler = _pooler_with(device, fx.tt_head, act_fn=_sigmoid_activation())
+
+    params = [SimpleNamespace(use_activation=None)] * fx.num_reqs
+    out = pooler.forward(fx.flat_tt, fx.meta_for(params))
+
+    cand = torch.stack([o.reshape(1) for o in out], dim=0)
+    torch.testing.assert_close(cand, torch.sigmoid(fx.ref_logits), atol=LOGIT_ATOL, rtol=LOGIT_RTOL)
+
+
+def test_pooler_honours_use_activation_false(device, reset_seeds):
+    # Opting out must give back the raw logit, not the probability.
+    from types import SimpleNamespace
+
+    require_single_device(device)
+    fx = _flat_pooler_fixture(device)
+    pooler = _pooler_with(device, fx.tt_head, act_fn=_sigmoid_activation())
+
+    params = [SimpleNamespace(use_activation=False)] * fx.num_reqs
+    out = pooler.forward(fx.flat_tt, fx.meta_for(params))
+
+    cand = torch.stack([o.reshape(1) for o in out], dim=0)
+    torch.testing.assert_close(cand, fx.ref_logits, atol=LOGIT_ATOL, rtol=LOGIT_RTOL)
+
+
+def test_pooler_rejects_mixed_use_activation(device, reset_seeds):
+    # The activation is one device op over the whole batch, so a batch that mixes
+    # the flag cannot be served correctly. Failing loudly beats returning a
+    # probability to a request that asked for a logit.
+    from types import SimpleNamespace
+
+    require_single_device(device)
+    fx = _flat_pooler_fixture(device)
+    pooler = _pooler_with(device, fx.tt_head, act_fn=_sigmoid_activation())
+
+    params = [
+        SimpleNamespace(use_activation=True),
+        SimpleNamespace(use_activation=False),
+        SimpleNamespace(use_activation=True),
+    ]
+    with pytest.raises(NotImplementedError, match="use_activation"):
+        pooler.forward(fx.flat_tt, fx.meta_for(params))
+
+
+def test_pooler_applies_logit_calibration_on_device(device, reset_seeds):
+    # ClassifierPoolerHead calibrates before activating: (logit - mean) / sigma.
+    # A checkpoint can ship these, so dropping them would silently shift scores.
+    from types import SimpleNamespace
+
+    require_single_device(device)
+    fx = _flat_pooler_fixture(device)
+    mean, sigma = 0.25, 2.0
+    pooler = _pooler_with(
+        device, fx.tt_head, act_fn=_sigmoid_activation(), logit_mean=mean, logit_sigma=sigma
+    )
+
+    params = [SimpleNamespace(use_activation=True)] * fx.num_reqs
+    out = pooler.forward(fx.flat_tt, fx.meta_for(params))
+
+    cand = torch.stack([o.reshape(1) for o in out], dim=0)
+    expected = torch.sigmoid((fx.ref_logits - mean) / sigma)
+    torch.testing.assert_close(cand, expected, atol=LOGIT_ATOL, rtol=LOGIT_RTOL)
+
+
+def test_pooler_refuses_a_non_sigmoid_activation(device, reset_seeds):
+    # ttnn.sigmoid must not stand in for an activation vLLM resolved to something
+    # else (identity for a regression head, softmax for a multi-label one), which
+    # would return a wrong score silently.
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.pooler.activations import PoolerClassify, PoolerIdentity
+
+    require_single_device(device)
+    fx = _flat_pooler_fixture(device)
+    params = [SimpleNamespace(use_activation=True)] * fx.num_reqs
+
+    for activation in (PoolerIdentity(), PoolerClassify(num_labels=3)):
+        pooler = _pooler_with(device, fx.tt_head, act_fn=activation)
+        with pytest.raises(NotImplementedError):
+            pooler.forward(fx.flat_tt, fx.meta_for(params))
 
 @pytest.mark.parametrize("rank", [3, 4], ids=["rank3", "rank4"])
 def test_append_flat_rows_handles_encoder_rank(device, rank, reset_seeds):
