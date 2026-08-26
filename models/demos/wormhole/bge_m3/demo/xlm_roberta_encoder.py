@@ -189,6 +189,40 @@ class XlmRobertaEncoder(abc.ABC):
     def get_max_batch_size(self) -> int:
         return self.max_batch_size
 
+    def warmup_model_prefill(self, *args, **kwargs) -> None:
+        """Compiles one forward per long-sequence device width.
+
+        Kernels are JIT-compiled per shape, and the compile lands on whichever
+        request first uses an unseen shape: measured on Blackhole p150 at seq
+        8192, a first-time 16-row forward took 62.6 s against an 8.0 s steady
+        state, and a first-time 11-row forward 28.1 s against 5.4 s. Serving must
+        not expose that to a user request, so the widths are compiled here, at
+        the hook vLLM already reserves for warmup
+        (``compile_or_warm_up_model`` -> ``warmup_model``), which is where the
+        decoder models do their warmup too.
+
+        Scope is the long-sequence widths (``BGE_M3_LONG_SEQ_WIDTHS``): that is
+        the set this encoder can choose between, so it is where an unseen shape
+        can appear at request time, and it is small and fixed by construction,
+        which is what makes exhaustive warmup possible.
+
+        TODO(short-seq-warmup): the shorter sequence buckets each execute one
+        fixed width, so they cannot surprise a *later* request the way the long
+        widths could, but the first request per bucket still pays its compile.
+        Warming them too means running up to 32 rows at 4096/6144 tokens, which
+        is more tokens per forward than the 8192x16 shape the upstream
+        circular-buffer fix (#41397) had to cap, so it needs its own validation
+        before being added here.
+        """
+        self._initialize_model()
+        pad_token_id = self.tokenizer.pad_token_id
+        for width in BGE_M3_LONG_SEQ_WIDTHS:
+            padded_inputs = {
+                "input_ids": torch.full((width, BGE_M3_LONG_SEQ_LEN), pad_token_id, dtype=torch.long),
+                "attention_mask": torch.ones((width, BGE_M3_LONG_SEQ_LEN), dtype=torch.long),
+            }
+            ttnn.deallocate(self._run_encoder_chunk(padded_inputs))
+
     # ---- shared encoder execution (uses self.model / self.device) ----
     def _run_encoder_chunk(self, padded_inputs: dict[str, Optional[torch.Tensor]]) -> ttnn.Tensor:
         """Runs the TT encoder on one already-padded chunk, returning the ttnn output.

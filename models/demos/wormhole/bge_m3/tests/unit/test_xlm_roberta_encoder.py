@@ -160,3 +160,46 @@ def test_post_initialize_default_is_explicit_noop():
     # method: bge-m3 deliberately does not override it.
     m = _ConcreteEncoder(device=object())
     assert m._post_initialize() is None
+
+
+def test_warmup_compiles_every_long_seq_width(monkeypatch):
+    """Each device width JIT-compiles its own kernels, and a width first seen at
+    request time makes that client wait for the compile. Warmup must therefore
+    run one forward per declared long-sequence width."""
+    monkeypatch.setattr(base_mod.ttnn, "deallocate", lambda tensor: None, raising=False)
+
+    shapes = []
+
+    class _Sub(_ConcreteEncoder):
+        def _run_encoder_chunk(self, padded_inputs):
+            shapes.append(tuple(padded_inputs["input_ids"].shape))
+            return object()
+
+    m = _Sub(device=object(), model_name="BAAI/bge-reranker-v2-m3")
+    m.tokenizer = types.SimpleNamespace(pad_token_id=1)
+    m._is_initialized = True
+    m.model = object()
+
+    m.warmup_model_prefill()
+
+    assert shapes == [(width, base_mod.BGE_M3_LONG_SEQ_LEN) for width in base_mod.BGE_M3_LONG_SEQ_WIDTHS]
+
+
+def test_warmup_initializes_the_model_first(monkeypatch):
+    """Warmup runs before any request, so it must build the model itself rather
+    than assume a forward already did."""
+    monkeypatch.setattr(base_mod.ttnn, "deallocate", lambda tensor: None, raising=False)
+
+    class _Sub(_ConcreteEncoder):
+        def _run_encoder_chunk(self, padded_inputs):
+            assert self.model is not None
+            return object()
+
+    m = _Sub(device=object(), model_name="BAAI/bge-m3")
+    monkeypatch.setattr(
+        _FakeModelArgs, "__init__", lambda self: setattr(self, "tokenizer", types.SimpleNamespace(pad_token_id=1))
+    )
+
+    m.warmup_model_prefill()
+
+    assert m._is_initialized is True
