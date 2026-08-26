@@ -55,6 +55,12 @@ PUBLISHED_CORPUS_DER = {
 # handling all move the third decimal -- but a real break moves it much further.
 CORPUS_DER_TOLERANCE = 0.05
 
+# Measured for reference: all 216 VoxConverse dev recordings through the p150,
+# embedding on device, scored 0.0705 -- below the published 0.112. Per-recording
+# DERs can exceed 1.0 where a recording holds only seconds of annotated speech
+# (the denominator is small), which is why the metric is accumulated by speech
+# time rather than averaged per file.
+
 
 def sample_audio_path() -> str:
     """The 30 s two-speaker recording shipped inside ``pyannote.audio``.
