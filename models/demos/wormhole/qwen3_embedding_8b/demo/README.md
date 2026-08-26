@@ -109,16 +109,42 @@ Slice the result back to your real batch size and L2-normalize.
 Run from the tt-metal repo root. `device` and `model_location_generator` come
 from the shared root `conftest.py` fixtures; you do not pass them yourself.
 
+Two environment variables are required, as for every other `tt_transformers`
+model (`models/tt_transformers/tt/model_config.py` reads them):
+
+- `HF_MODEL` — the checkpoint: a Hugging Face repo id (`Qwen/Qwen3-Embedding-0.6B`)
+  or a local directory holding `config.json` / `model.safetensors` / the
+  tokenizer files. Without it the run stops with *"Please set HF_MODEL to a
+  HuggingFace name"*.
+- `TT_CACHE_PATH` — a **writable** directory for the compiled weight cache. The
+  default when unset is `model_cache/$HF_MODEL/<device>`, i.e. inside the
+  checkpoint directory, which fails with `OSError: [Errno 30] Read-only file
+  system` whenever the weights are mounted read-only.
+
+```bash
+export HF_MODEL=Qwen/Qwen3-Embedding-0.6B   # or a local checkpoint directory
+export TT_CACHE_PATH=$HOME/tt_cache
+```
+
+Pass `--timeout=0` as well: the repo-wide pytest timeout (300 s) is shorter than
+the first run's kernel compilation plus prefill-trace warmup (tens of minutes on
+a single P150). In a container, the device also needs `--ipc host` and a bind
+mount of `/dev/hugepages-1G` in addition to `--device /dev/tenstorrent`.
+
 ```bash
 # pooled last-token accuracy check, 0.6B (default)
-pytest models/demos/wormhole/qwen3_embedding_8b/demo/demo.py::test_qwen3_embedding_demo -k 0.6B
+pytest models/demos/wormhole/qwen3_embedding_8b/demo/demo.py::test_qwen3_embedding_demo -k 0.6B --timeout=0
 
 # the same check on the 8B checkpoint
-pytest models/demos/wormhole/qwen3_embedding_8b/demo/demo.py::test_qwen3_embedding_demo -k 8B
+pytest models/demos/wormhole/qwen3_embedding_8b/demo/demo.py::test_qwen3_embedding_demo -k 8B --timeout=0
 
 # everything (all paths, 0.6B unless noted)
-pytest models/demos/wormhole/qwen3_embedding_8b/demo/demo.py
+pytest models/demos/wormhole/qwen3_embedding_8b/demo/demo.py --timeout=0
 ```
+
+`HF_MODEL` selects the checkpoint the model is built from, so run the 0.6B and
+8B cases separately with the matching `HF_MODEL` rather than selecting both in
+one invocation.
 
 The demo's tests, and what each proves:
 
@@ -147,6 +173,10 @@ The demo's tests, and what each proves:
 Each test logs the embedding dimension (`1024` for 0.6B, `4096` for 8B), TT L2
 norms (all `~1.0`), and the relevant cosine similarities. A passing run ends with
 the selected `test_*` cases green.
+
+Observed on a single P150 (Blackhole), `HF_MODEL` pointing at Qwen3-Embedding-0.6B:
+all six 0.6B cases pass in about 47 minutes, most of it the one-off kernel
+compilation and prefill-trace warmup.
 
 ## Known constraints
 
