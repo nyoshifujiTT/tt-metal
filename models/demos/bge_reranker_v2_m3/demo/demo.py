@@ -23,6 +23,11 @@ Covered:
   and ranked on host, demonstrating the end-user reranking shape;
 - ``run_reranker_long_seq``: an 8192-token request exercising the chunked
   long-sequence encoder path.
+- ``run_reranker_served_score_equivalence``: ties the logit this demo prints to
+  the score the served ``/score`` endpoint returns. They are different
+  quantities on purpose -- vLLM's classification pooler activates the logit, and
+  for this single-label cross-encoder that is sigmoid -- so the mapping between
+  them is pinned rather than left implied.
 
 Requires a single Tenstorrent device.
 """
@@ -127,6 +132,46 @@ def run_reranker_score(device, model_name, model_location_generator):
     return scores
 
 
+def run_reranker_served_score_equivalence(device, model_name, model_location_generator):
+    """Check the device logit maps onto the score the served API returns.
+
+    ``forward`` returns the raw classification logit, which is the model-level
+    quantity and what the HF reference above is compared against. The served
+    ``/score`` and ``/rerank`` endpoints return the *activated* score, because
+    vLLM's classification pooler applies the activation it resolves from the HF
+    config -- sigmoid for this single-label cross-encoder.
+
+    So the two APIs answer with different quantities by design, and a claim that
+    they agree has to say which quantity. This pins the bridge: the served score
+    is ``sigmoid`` of the logit this demo prints, and that lands in 0..1. Without
+    it, a future change to either side could drift them apart and nothing here
+    would notice.
+    """
+    _require_single_device(device)
+    resolved_model_name = resolve_model_name(
+        model_name, model_location_generator, download_if_ci_v2=True, ci_v2_timeout_in_s=1800
+    )
+    reranker = _build_reranker(device, resolved_model_name, DEFAULT_MAX_SEQ_LEN)
+
+    for query, doc, label in PAIRS:
+        tt_logit = _score_pair(reranker, query, doc, max_length=512)
+        served_equivalent = torch.sigmoid(torch.tensor(tt_logit))
+        logger.info(f"[{label}] logit {tt_logit:.4f} -> served score {float(served_equivalent):.6f}")
+        assert 0.0 <= float(served_equivalent) <= 1.0, "an activated score must be a probability"
+
+        hf_logit = _hf_logit(resolved_model_name, query, doc, max_length=512)
+        torch.testing.assert_close(
+            served_equivalent,
+            torch.sigmoid(torch.tensor(hf_logit)),
+            rtol=LOGIT_RTOL,
+            atol=LOGIT_ATOL,
+        )
+
+    positive = torch.sigmoid(torch.tensor(_score_pair(reranker, PAIRS[0][0], PAIRS[0][1], max_length=512)))
+    negative = torch.sigmoid(torch.tensor(_score_pair(reranker, PAIRS[1][0], PAIRS[1][1], max_length=512)))
+    assert positive > negative, "the activation must preserve the ranking (it is monotonic)"
+
+
 def run_reranker_rerank(device, model_name, model_location_generator):
     """Score one query against several documents and rank them (host-side sort)."""
     _require_single_device(device)
@@ -190,3 +235,8 @@ def test_reranker_rerank(device, model_name, model_location_generator, reset_see
 @pytest.mark.parametrize("model_name", [DEFAULT_MODEL_NAME])
 def test_reranker_long_seq(device, model_name, model_location_generator, reset_seeds):
     run_reranker_long_seq(device, model_name, model_location_generator)
+
+
+@pytest.mark.parametrize("model_name", [DEFAULT_MODEL_NAME])
+def test_reranker_served_score_equivalence(device, model_name, model_location_generator, reset_seeds):
+    run_reranker_served_score_equivalence(device, model_name, model_location_generator)
