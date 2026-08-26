@@ -10,7 +10,9 @@ from models.tt_transformers.tt.common import get_hf_tt_cache_path
 
 # Runs the bge-reranker-v2-m3 single-device fast-dispatch tests in CI (Blackhole
 # nightly-bh-models job). This entry is device-only: the end-to-end logit-vs-HF
-# test. The device-free unit tests are registered separately in
+# test plus the two component device tests it cannot localise a failure to (the
+# fp32 classification head against its host reference, and the pooler's on-device
+# CLS extraction). The device-free unit tests are registered separately in
 # tests/pipeline_reorg/models_cpu_only_unit_tests.yaml, which runs on a CPU
 # runner (no Tenstorrent device) so it does not spend scarce Blackhole time.
 @pytest.mark.parametrize(
@@ -31,6 +33,10 @@ def test_ci_dispatch(model_weights):
         [
             # single-device end-to-end logit vs HF reference
             "models/demos/bge_reranker_v2_m3/tests/test_model.py",
+            # device classification head vs host fp32 reference
+            "models/demos/bge_reranker_v2_m3/tests/test_xlm_roberta_classification_head_tt.py",
+            # device CLS extraction + head, the path the pooler drives
+            "models/demos/bge_reranker_v2_m3/tests/test_reranker_pooler.py",
         ]
         + ["-x"]  # Fail if one of the tests fails
     )
