@@ -91,10 +91,32 @@ def test_short_seq_batch_padding_to_32():
 def test_long_seq_chunks_of_16():
     ids = torch.randint(1, 50, (20, 8000), dtype=torch.long)  # long seq, B=20
     calls = _record_chunks(ids)
-    # 20 rows -> chunks of 16 => 2 chunks (16 + 4), each padded to 16 rows
+    # 20 rows -> chunks of at most 16 => 2 chunks (16 + 4). The full chunk runs
+    # at the 16-row cap; the tail chunk is padded only to its own 4 rows, since
+    # device time is linear in rows and padded rows are masked out anyway.
     assert len(calls) == 2
+    assert calls[0][0][0] == BGE_M3_LONG_SEQ_CHUNK
+    assert calls[1][0][0] == 4
+
+
+@pytest.mark.parametrize("batch,exp_width", [(1, 1), (2, 2), (3, 3), (7, 7), (16, 16)])
+def test_long_seq_pads_to_real_row_count(batch, exp_width):
+    """A long-sequence request narrower than the 16-row cap must run at its own
+    row count, not be inflated to 16 rows (that inflation cost up to 18x)."""
+    ids = torch.randint(1, 50, (batch, 8000), dtype=torch.long)
+    calls = _record_chunks(ids)
+    assert len(calls) == 1
+    assert calls[0][0][0] == exp_width
+
+
+def test_long_seq_never_exceeds_the_16_row_cap():
+    """The circular-buffer limit the upstream fix (#41397) introduced is an upper
+    bound; no chunk may run wider than it."""
+    ids = torch.randint(1, 50, (40, 8000), dtype=torch.long)
+    calls = _record_chunks(ids)
+    assert [in_shape[0] for in_shape, _ in calls] == [16, 16, 8]
     for in_shape, _ in calls:
-        assert in_shape[0] == BGE_M3_LONG_SEQ_CHUNK
+        assert in_shape[0] <= BGE_M3_LONG_SEQ_CHUNK
 
 
 def test_batch_one_no_padding():

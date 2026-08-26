@@ -233,10 +233,10 @@ class XlmRobertaEncoder(abc.ABC):
         pad_token_id = self.tokenizer.pad_token_id
         batch_size, seq_len = input_ids.shape
         padded_seq_len = get_padded_sequence_length(seq_len)
-        target_padded_batch_size = get_target_padded_batch_size(batch_size, padded_seq_len)
 
         chunk_outputs = []
         for start, end in iter_execution_ranges(batch_size, padded_seq_len):
+            target_padded_batch_size = get_target_padded_batch_size(batch_size, padded_seq_len, end - start)
             padded_inputs = _pad_chunk_inputs(
                 input_ids[start:end],
                 _slice_optional_batch_tensor(attention_mask, start, end),
@@ -279,13 +279,24 @@ def is_long_seq_8192(padded_seq_len: int) -> bool:
     return padded_seq_len == BGE_M3_LONG_SEQ_LEN
 
 
-def get_target_padded_batch_size(original_batch_size: int, padded_seq_len: int) -> int:
+def get_target_padded_batch_size(original_batch_size: int, padded_seq_len: int, chunk_batch_size: int) -> int:
     """
-    Device padding width for TT execution. Derived from the original request only
-    (same value for every chunk, including tail chunks that pad dummy rows).
+    Device padding width for TT execution of one chunk.
+
+    At the long sequence length the encoder must not exceed
+    ``BGE_M3_LONG_SEQ_CHUNK`` rows per forward (the circular-buffer limit the
+    upstream bge-m3 fix in #41397 was added for), but it does not have to reach
+    it: device time is linear in the number of rows, so padding a narrower chunk
+    up to 16 rows just pays for rows that are masked out anyway. Pad to the
+    chunk's real row count instead, which leaves the 16-row upper bound intact.
+
+    Measured on Blackhole p150 at seq 8192, one forward: 1 row 398 ms, 2 rows
+    793 ms, 3 rows 1458 ms, 5 rows 2366 ms, 7 rows 3330 ms, 8 rows 3666 ms,
+    16 rows 7295 ms - and the resulting logit is bit-identical at every width,
+    because the padded rows carry attention_mask=0.
     """
     if is_long_seq_8192(padded_seq_len):
-        return BGE_M3_LONG_SEQ_CHUNK
+        return min(chunk_batch_size, BGE_M3_LONG_SEQ_CHUNK)
     if original_batch_size == 1:
         return 1
     return BGE_M3_SHORT_SEQ_PADDED_BATCH
@@ -293,8 +304,9 @@ def get_target_padded_batch_size(original_batch_size: int, padded_seq_len: int) 
 
 def get_execution_chunk_size(original_batch_size: int, padded_seq_len: int) -> int:
     """
-    Number of real batch rows per forward. For long sequences, fixed at 16; tail
-    chunks still pad to get_target_padded_batch_size (16).
+    Number of real batch rows per forward. For long sequences, capped at 16; a
+    tail chunk holding fewer rows is padded only to its own row count (see
+    get_target_padded_batch_size).
     """
     if is_long_seq_8192(padded_seq_len):
         return BGE_M3_LONG_SEQ_CHUNK
