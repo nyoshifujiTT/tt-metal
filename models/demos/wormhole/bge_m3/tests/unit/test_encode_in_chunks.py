@@ -21,6 +21,7 @@ import torch
 
 from models.demos.wormhole.bge_m3.demo.xlm_roberta_encoder import (
     BGE_M3_LONG_SEQ_CHUNK,
+    BGE_M3_LONG_SEQ_WIDTHS,
     BGE_M3_SHORT_SEQ_PADDED_BATCH,
     XlmRobertaEncoder,
 )
@@ -92,21 +93,35 @@ def test_long_seq_chunks_of_16():
     ids = torch.randint(1, 50, (20, 8000), dtype=torch.long)  # long seq, B=20
     calls = _record_chunks(ids)
     # 20 rows -> chunks of at most 16 => 2 chunks (16 + 4). The full chunk runs
-    # at the 16-row cap; the tail chunk is padded only to its own 4 rows, since
-    # device time is linear in rows and padded rows are masked out anyway.
+    # at the 16-row cap; the tail chunk runs at the 4-row width instead of being
+    # inflated to 16, since device time is linear in rows and padded rows are
+    # masked out anyway.
     assert len(calls) == 2
     assert calls[0][0][0] == BGE_M3_LONG_SEQ_CHUNK
     assert calls[1][0][0] == 4
 
 
-@pytest.mark.parametrize("batch,exp_width", [(1, 1), (2, 2), (3, 3), (7, 7), (16, 16)])
-def test_long_seq_pads_to_real_row_count(batch, exp_width):
-    """A long-sequence request narrower than the 16-row cap must run at its own
-    row count, not be inflated to 16 rows (that inflation cost up to 18x)."""
+@pytest.mark.parametrize(
+    "batch,exp_width",
+    [(1, 1), (2, 2), (3, 4), (5, 8), (7, 8), (8, 8), (11, 16), (16, 16)],
+)
+def test_long_seq_rounds_up_to_a_width_bucket(batch, exp_width):
+    """A long-sequence request narrower than the 16-row cap runs at the smallest
+    allowed width, not inflated to 16 rows (that inflation cost up to 18x) and
+    not at an arbitrary width (each width JIT-compiles its own kernels)."""
     ids = torch.randint(1, 50, (batch, 8000), dtype=torch.long)
     calls = _record_chunks(ids)
     assert len(calls) == 1
     assert calls[0][0][0] == exp_width
+
+
+def test_long_seq_only_ever_uses_the_declared_widths():
+    """Every batch size up to the cap must land on one of the five declared
+    widths, so the whole set can be pre-compiled at startup."""
+    for batch in range(1, BGE_M3_LONG_SEQ_CHUNK + 1):
+        ids = torch.randint(1, 50, (batch, 8000), dtype=torch.long)
+        for in_shape, _ in _record_chunks(ids):
+            assert in_shape[0] in BGE_M3_LONG_SEQ_WIDTHS
 
 
 def test_long_seq_never_exceeds_the_16_row_cap():

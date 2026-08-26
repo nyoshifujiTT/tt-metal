@@ -271,6 +271,12 @@ class XlmRobertaEncoder(abc.ABC):
 # Long-sequence path uses fixed 16-wide device execution regardless of max_batch_size.
 BGE_M3_LONG_SEQ_LEN = 8192
 BGE_M3_LONG_SEQ_CHUNK = 16
+# Device widths the long-sequence path is allowed to execute at. Kernels are
+# JIT-compiled per shape, and a compile costs tens of seconds on the request
+# that triggers it, so the set of widths must stay small and fixed rather than
+# following the request size exactly. Powers of two up to the 16-row chunk cap
+# keep the wasted rows under 2x while bounding the number of shapes to five.
+BGE_M3_LONG_SEQ_WIDTHS = (1, 2, 4, 8, 16)
 # Short-sequence multi-request path pads to 32 rows for device execution.
 BGE_M3_SHORT_SEQ_PADDED_BATCH = 32
 
@@ -287,8 +293,15 @@ def get_target_padded_batch_size(original_batch_size: int, padded_seq_len: int, 
     ``BGE_M3_LONG_SEQ_CHUNK`` rows per forward (the circular-buffer limit the
     upstream bge-m3 fix in #41397 was added for), but it does not have to reach
     it: device time is linear in the number of rows, so padding a narrower chunk
-    up to 16 rows just pays for rows that are masked out anyway. Pad to the
-    chunk's real row count instead, which leaves the 16-row upper bound intact.
+    up to 16 rows just pays for rows that are masked out anyway. Pad up to the
+    smallest allowed width instead, which leaves the 16-row upper bound intact.
+
+    The width is rounded up to one of ``BGE_M3_LONG_SEQ_WIDTHS`` rather than set
+    to the exact row count, because each distinct width JIT-compiles its own
+    kernels: an unseen width costs tens of seconds on the request that hits it
+    (measured 62.6 s falling to 7.97 s over repeats at 16 rows, 28.1 s to 5.36 s
+    at 11 rows). A fixed five-width set can be compiled once and never surprises
+    a later request, while still wasting under 2x rows in the worst case.
 
     Measured on Blackhole p150 at seq 8192, one forward: 1 row 398 ms, 2 rows
     793 ms, 3 rows 1458 ms, 5 rows 2366 ms, 7 rows 3330 ms, 8 rows 3666 ms,
@@ -296,7 +309,8 @@ def get_target_padded_batch_size(original_batch_size: int, padded_seq_len: int, 
     because the padded rows carry attention_mask=0.
     """
     if is_long_seq_8192(padded_seq_len):
-        return min(chunk_batch_size, BGE_M3_LONG_SEQ_CHUNK)
+        capped = min(chunk_batch_size, BGE_M3_LONG_SEQ_CHUNK)
+        return next(width for width in BGE_M3_LONG_SEQ_WIDTHS if width >= capped)
     if original_batch_size == 1:
         return 1
     return BGE_M3_SHORT_SEQ_PADDED_BATCH
