@@ -135,8 +135,25 @@ def test_corpus_root_prefers_the_per_corpus_variable(tmp_path, monkeypatch):
     assert accuracy.corpus_root("voxconverse") is None
 
 
-def test_published_corpus_targets_cover_the_reported_benchmarks():
-    """The gate compares against a per-corpus figure, not the single-clip one."""
-    assert set(accuracy.PUBLISHED_CORPUS_DER) == {"ami", "dihard3", "voxconverse"}
+def test_published_figures_are_keyed_by_split():
+    """A split without its own published figure must not borrow another's.
+
+    VoxConverse dev scores well under the published 0.112 because that figure
+    is measured on test; gating dev against it would report a pass while
+    measuring the easier half.
+    """
+    assert accuracy.published_corpus_der("voxconverse-test") == pytest.approx(0.112)
+    assert accuracy.published_corpus_der("voxconverse-dev") is None
+    assert accuracy.published_corpus_der("nonexistent-corpus") is None
     # The single-sample gate is unrelated to these and must not be reused.
-    assert accuracy.PUBLISHED_CORPUS_DER["voxconverse"] < accuracy.ACCURACY_DER_MAX
+    assert accuracy.published_corpus_der("voxconverse-test") < accuracy.ACCURACY_DER_MAX
+
+
+def test_corpus_root_accepts_a_hyphenated_split_name(tmp_path, monkeypatch):
+    """Split names carry a hyphen; the env var spelling must still resolve."""
+    root = tmp_path / "vc-test"
+    root.mkdir()
+    monkeypatch.delenv("DIARIZATION_CORPUS_DIR", raising=False)
+    monkeypatch.setenv("DIARIZATION_VOXCONVERSE_TEST_DIR", str(root))
+
+    assert accuracy.corpus_root("voxconverse-test") == str(root)

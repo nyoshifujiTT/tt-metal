@@ -43,23 +43,36 @@ PUBLISHED_DER_REF = "https://huggingface.co/pyannote/speaker-diarization-communi
 # Published DER per corpus, which is what a corpus run can actually be compared
 # against. The single 30 s sample cannot: it is one clean two-speaker clip,
 # while these are hours of meeting and broadcast audio.
+#
+# The split matters and is part of the key. pyannote reports these on the
+# evaluation split, so scoring a development split and comparing against the
+# same number is not a like-for-like check: dev is the easier half, and a run
+# that lands *below* the published figure is a sign the comparison is wrong
+# rather than that the port is good. Measured here: VoxConverse dev scores
+# 0.0705 while the published 0.112 is a test-split figure.
 PUBLISHED_CORPUS_DER = {
-    "ami": 0.170,  # AMI, IHM
-    "dihard3": 0.202,  # DIHARD 3, full
-    "voxconverse": 0.112,  # VoxConverse v0.3
+    "ami": 0.170,  # AMI IHM, test
+    "dihard3": 0.202,  # DIHARD 3 full, eval
+    "voxconverse-test": 0.112,  # VoxConverse v0.3, test -- the published split
+}
+
+# Splits with no published figure of their own. They are still worth scoring --
+# a regression shows up on any audio -- but a run must not be compared against
+# another split's number, so they carry no target and the test reports the DER
+# without gating on it.
+CORPUS_NO_PUBLISHED_FIGURE = {
+    "voxconverse-dev",  # measured 0.0705; easier than test, not comparable
 }
 
 # How far a corpus run may sit above the published figure before it counts as a
 # regression. The published numbers come from pyannote's own harness, so an
-# exact match is not expected -- a different subset, resampling, or overlap
-# handling all move the third decimal -- but a real break moves it much further.
+# exact match is not expected -- resampling or overlap handling move the third
+# decimal -- but a real break moves it much further.
 CORPUS_DER_TOLERANCE = 0.05
 
-# Measured for reference: all 216 VoxConverse dev recordings through the p150,
-# embedding on device, scored 0.0705 -- below the published 0.112. Per-recording
-# DERs can exceed 1.0 where a recording holds only seconds of annotated speech
-# (the denominator is small), which is why the metric is accumulated by speech
-# time rather than averaged per file.
+# Per-recording DERs can exceed 1.0 where a recording holds only seconds of
+# annotated speech (the denominator is small), which is why the metric is
+# accumulated by speech time rather than averaged per file.
 
 
 def sample_audio_path() -> str:
@@ -146,12 +159,25 @@ def corpus_root(name: str = "voxconverse"):
     ``DIARIZATION_<NAME>_DIR``) at a prepared directory holding ``audio/*.wav``
     and ``rttm/*.rttm``, and the corpus test runs; otherwise it skips.
     """
-    specific = os.environ.get(f"DIARIZATION_{name.upper()}_DIR")
+    env_name = name.upper().replace("-", "_")
+    specific = os.environ.get(f"DIARIZATION_{env_name}_DIR")
     generic = os.environ.get("DIARIZATION_CORPUS_DIR")
     for candidate in (specific, generic):
         if candidate and os.path.isdir(candidate):
             return candidate
     return None
+
+
+def published_corpus_der(name: str):
+    """Published DER for a corpus split, or ``None`` when there is not one.
+
+    Returning ``None`` rather than falling back to a neighbouring split's figure
+    is deliberate: comparing a dev-split run against a test-split number reads
+    as a pass while measuring the wrong thing.
+    """
+    if name in CORPUS_NO_PUBLISHED_FIGURE:
+        return None
+    return PUBLISHED_CORPUS_DER.get(name)
 
 
 def corpus_files(root: str, limit=None):

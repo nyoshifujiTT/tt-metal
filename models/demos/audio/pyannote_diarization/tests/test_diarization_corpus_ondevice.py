@@ -41,7 +41,7 @@ from models.demos.audio.pyannote_diarization.tests.test_diarization_e2e_ondevice
     _offload_segmentation,
 )
 
-CORPUS_NAME = os.environ.get("DIARIZATION_CORPUS_NAME", "voxconverse")
+CORPUS_NAME = os.environ.get("DIARIZATION_CORPUS_NAME", "voxconverse-test")
 
 
 def _corpus_root():
@@ -89,6 +89,11 @@ def test_corpus_der_matches_the_published_figure(device, model_location_generato
     overlap handling; only a corpus with varied audio exposes that. The gate is
     the published DER plus a tolerance, because the published number comes from
     pyannote's own harness and small harness differences move it.
+
+    The split has to be the published one. Scoring a development split against
+    a test-split figure passes easily -- dev is the easier half -- and would
+    report success while measuring the wrong thing, so a split with no published
+    number of its own is reported and not gated.
     """
     root = _corpus_root()
 
@@ -98,11 +103,17 @@ def test_corpus_der_matches_the_published_figure(device, model_location_generato
 
     scored = accuracy.corpus_der(_diarize_with(pipeline), root, limit=_limit())
 
-    published = accuracy.PUBLISHED_CORPUS_DER.get(CORPUS_NAME)
-    assert published is not None, f"no published DER recorded for {CORPUS_NAME!r}"
-    ceiling = published + accuracy.CORPUS_DER_TOLERANCE
-
+    published = accuracy.published_corpus_der(CORPUS_NAME)
     worst = max(scored["per_recording"].items(), key=lambda kv: kv[1])
+    if published is None:
+        pytest.skip(
+            f"{CORPUS_NAME} DER {scored['der']:.4f} over "
+            f"{scored['num_recordings']} recordings (worst {worst[0]} at "
+            f"{worst[1]:.4f}); no published figure for this split, so there is "
+            "nothing to gate against -- use the published split to assert"
+        )
+
+    ceiling = published + accuracy.CORPUS_DER_TOLERANCE
     assert scored["der"] <= ceiling, (
         f"{CORPUS_NAME} DER {scored['der']:.4f} over {scored['num_recordings']} "
         f"recordings exceeds the published {published:.4f} + "
