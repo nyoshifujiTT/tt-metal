@@ -195,8 +195,30 @@ def test_pooler_available_before_first_forward():
     model._collect_hidden = False
 
     assert isinstance(model.pooler, RerankerClassifierPooler)
-    # get_supported_tasks works with no head built yet (static classify/score).
-    assert model.pooler.get_supported_tasks() == {"classify", "score"}
+    # get_supported_tasks works with no head built yet (it is static).
+    assert model.pooler.get_supported_tasks() == {"classify"}
+
+
+def test_supported_tasks_are_real_vllm_pooling_tasks():
+    """Every advertised task must be a name vLLM actually knows.
+
+    The list is matched against vllm.tasks.PoolingTask -- get_pooling_task()
+    selects from a fixed priority list and an explicit pooler_config.task is
+    checked for membership. A made-up name is silently ignored by the former and
+    produces a confusing error from the latter, so pin the set against upstream's
+    own enumeration rather than against a hand-written copy of it.
+    """
+    from vllm.tasks import POOLING_TASKS
+
+    from models.demos.bge_reranker_v2_m3.tt.reranker_pooler import RerankerClassifierPooler
+
+    model = BgeRerankerV2M3.__new__(BgeRerankerV2M3)
+    model.vllm_config = None
+    tasks = RerankerClassifierPooler(model).get_supported_tasks()
+
+    assert tasks, "a pooler that advertises nothing can never be selected"
+    unknown = set(tasks) - set(POOLING_TASKS)
+    assert not unknown, f"not vLLM pooling tasks: {sorted(unknown)}"
 
 
 def test_post_initialize_builds_device_head(monkeypatch):

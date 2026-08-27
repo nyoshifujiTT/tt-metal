@@ -303,9 +303,18 @@ class RerankerClassifierPooler(_PoolerBase):
         return self._act_fn
 
     def get_supported_tasks(self):
-        # Cross-encoder scoring: /score and /rerank both route through the
-        # classify/score pooling tasks (an embed Pooler would report "embed").
-        return {"classify", "score"}
+        # "classify" is the cross-encoder pooling task: vLLM maps it to the
+        # "cross-encoder" score type (tasks.py::SCORE_TYPE_MAP), which is what
+        # routes /score and /rerank here. An embed Pooler would report "embed".
+        #
+        # Only names in vllm.tasks.PoolingTask are valid. "score" is not one of
+        # them -- it is the endpoint's name, not a pooling task -- so reporting
+        # it advertised a task that cannot be selected. It happened to be
+        # harmless because get_pooling_task() picks from a fixed priority list
+        # and ignores anything else, but it would surface verbatim in the
+        # supported-task list, and asking for it explicitly (pooler_config.task)
+        # would fail the membership check with a confusing error.
+        return {"classify"}
 
     def forward(self, hidden_states: ttnn.Tensor, pooling_metadata):
         """Score a flat ``[total_tokens, hidden]`` batch into per-request logits.
