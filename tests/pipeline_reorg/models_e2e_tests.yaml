@@ -1706,3 +1706,31 @@
       tier: 2
   owner_id: U082LLYBLSW # Gabriel Tobar (CODEOWNERS @gtobarTT)
   team: models
+
+- name: bge-reranker-v2-m3 e2e tests
+  # The demo is the documented entry point and the only place the whole path is
+  # exercised end to end: encode -> device CLS -> device head -> logit, checked
+  # against the Hugging Face reference, plus the 8192-token chunked path and the
+  # logit-to-served-score bridge. The unit jobs cover the pieces, so without this
+  # the assembled model is never run in CI.
+  #
+  # Blackhole, unlike the bge-m3 entry above: this model has only been brought up
+  # and validated on p150.
+  cmd: |
+    export HF_MODEL=BAAI/bge-reranker-v2-m3
+    pytest --timeout 900 models/demos/bge_reranker_v2_m3/demo/demo.py
+  model: bge_reranker_v2_m3
+  skus:
+    # 55 s measured end to end on a p150 (4 passed in 45 s, plus process
+    # startup). 5 min leaves headroom for kernel compilation on a cold cache,
+    # which dominates a first run.
+    bh_p150:
+      timeout: 5
+      tier: 2
+  # owner_id is the Slack notify target on failure and is independent of
+  # CODEOWNERS. models/demos/bge_reranker_v2_m3 has no dedicated CODEOWNERS
+  # entry, so it falls back to the models/demos catch-all.
+  # TODO(owner): assign a real reranker owner -- add a CODEOWNERS line for
+  # models/demos/bge_reranker_v2_m3 and update this owner_id to match.
+  owner_id: U06UEFWB4P9 # Colman Glagovich (@cglagovichTT, models/demos catch-all)
+  team: models
