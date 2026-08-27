@@ -1487,8 +1487,10 @@
     $PYTEST_CMD tests/nightly/single_card/bge_reranker_v2_m3
   model: bge_reranker_v2_m3
   skus:
-    bh_p150b_civ2:
-      timeout: 30
+    # 78 s measured on a p150 for the three device suites this dispatches.
+    # 5 min leaves headroom for kernel compilation on a cold cache.
+    bh_p150:
+      timeout: 5
       tier: 2
   # owner_id is the Slack notify target on failure and is independent of
   # CODEOWNERS. models/demos/bge_reranker_v2_m3 has no dedicated CODEOWNERS
