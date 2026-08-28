@@ -1755,6 +1755,19 @@
   owner_id: U082LLYBLSW # Gabriel Tobar (CODEOWNERS @gtobarTT)
   team: models
 
+- name: Qwen3-Embedding e2e tests
+  cmd: |
+    export HF_HUB_OFFLINE=0
+    export HF_MODEL=Qwen/Qwen3-Embedding-0.6B
+    pytest --timeout 1200 models/demos/wormhole/qwen3_embedding_8b/demo/demo.py
+  model: qwen3_embedding
+  skus:
+    wh_n150:
+      timeout: 30
+      tier: 3
+  owner_id: U082LLYBLSW # Gabriel Tobar (CODEOWNERS @gtobarTT)
+  team: models
+
 # ── TT-Train (Blackhole Galaxy) ───────────────────────────────────
 
 - name: Galaxy TinyLlama 1.1B DDP=32 train e2e tests
