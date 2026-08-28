@@ -53,7 +53,11 @@ Validates the numpy op-graph against the real torch models, plus the weight-reso
 pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_common_weight_resolution.py
 pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_wespeaker_numpy_ref_parity.py
 pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_pyannet_numpy_ref_parity.py
+pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_accuracy_helpers.py
+pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_synthetic_audio.py
 ```
+
+No test needs a dataset: audio is either pyannote's bundled 30 s sample or generated from a fixed seed, so results are reproducible.
 
 ### On-device parity (p150)
 
@@ -66,6 +70,19 @@ pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_dia
 
 Pass `--device-id` to pick a device; every test takes it from the shared `device` fixture.
 
+`test_diarization_e2e_ondevice.py` covers both the bundled sample and synthetic overlapping speech, so the multi-active-speaker path through the segmentation net is exercised without downloading a corpus.
+
+### Corpus DER (benchmark, not a test)
+
+Scoring a whole diarization corpus takes hours, so it is a CLI script rather than a pytest case:
+
+```sh
+python models/demos/audio/pyannote_diarization/benchmarks/corpus_der.py \
+    --corpus /path/to/voxconverse-test --split voxconverse-test
+```
+
+This is what produces the number comparable to pyannote's published DER (measured: 0.1113 against a published 0.112 on the VoxConverse test split). See `benchmarks/README.md`.
+
 ## Details
 
 ### Structure
@@ -76,7 +93,10 @@ Pass `--device-id` to pick a device; every test takes it from the shared `device
   - `ttnn_wespeaker_resident.py` — device-resident fast path: the activation stays on device across the whole ResNet34 (input uploaded once, every conv/relu/residual runs on device, only the final feature map is downloaded); TSTP pooling and the `seg_1` linear stay on host so pyannote's exact (optionally weighted) pooling is preserved bit-for-bit.
   - `ttnn_pyannet.py` — the PyanNet SincNet + BiLSTM local-segmentation net.
 - `reference/` — numpy reference op-graphs (`wespeaker_numpy_ref.py`, `pyannet_numpy_ref.py`), each parity-checked against the real torch model.
-- `tests/` — the parity tests listed above.
+- `pipeline.py` — builds the community-1 pipeline and swaps its two nets for the ttnn ports; shared by the tests, the demo and the benchmark.
+- `accuracy.py` — diarization error rate scoring and the published-DER table, shared with tt-inference-server's eval workflow so both report the same figure.
+- `tests/` — the parity tests listed above, plus `synthetic_audio.py` and its guard.
+- `benchmarks/corpus_der.py` — corpus-scale DER, run by hand.
 - `demo/demo.py` — the runnable demo.
 
 ### What runs on device
