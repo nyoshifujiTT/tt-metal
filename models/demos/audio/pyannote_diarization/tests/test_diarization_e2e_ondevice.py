@@ -28,6 +28,8 @@ pytest.importorskip("torch")
 pytest.importorskip("ttnn")
 pytest.importorskip("pyannote.audio")
 
+import torch  # noqa: E402
+
 from models.demos.audio.pyannote_diarization import accuracy  # noqa: E402
 from models.demos.audio.pyannote_diarization import pipeline as diar_pipeline  # noqa: E402
 from models.demos.audio.pyannote_diarization.pipeline import (  # noqa: E402
@@ -90,3 +92,71 @@ def test_diarization_matches_human_annotation(device, model_location_generator, 
         f"(published DER for this model is {accuracy.PUBLISHED_DER}, see {accuracy.PUBLISHED_DER_REF})"
     )
 
+
+def _overlapping_speech(seed: int = 11, seconds: float = 20.0, sample_rate: int = 16000):
+    """Synthesise multi-speaker audio with overlap, deterministically.
+
+    The bundled sample is one clean two-speaker conversation, so it never
+    exercises overlap or a third speaker. Rather than depend on a corpus
+    download to reach those paths, build the audio here: three tone-like
+    "voices" at different pitches, with two of them deliberately speaking at
+    once in the middle.
+
+    This is not meant to be realistic enough to score a meaningful DER against
+    -- it is fed to both the host and device pipelines and only their agreement
+    is checked, which is exactly what a fidelity test needs and what makes the
+    result reproducible from a seed instead of from gigabytes of audio.
+    """
+    generator = torch.Generator().manual_seed(seed)
+    total = int(seconds * sample_rate)
+    t = torch.arange(total, dtype=torch.float32) / sample_rate
+    audio = torch.zeros(total)
+
+    # (pitch Hz, start s, end s) -- the last two overlap between 8 s and 12 s.
+    voices = [(110.0, 1.0, 9.0), (190.0, 8.0, 15.0), (260.0, 11.0, 19.0)]
+    for pitch, start, end in voices:
+        lo, hi = int(start * sample_rate), int(end * sample_rate)
+        span = t[lo:hi]
+        # A few harmonics plus an amplitude wobble, so the segmentation net has
+        # something with speech-like structure rather than a pure tone.
+        voice = sum(torch.sin(2 * torch.pi * pitch * k * span) / k for k in (1, 2, 3))
+        envelope = 0.6 + 0.4 * torch.sin(2 * torch.pi * 3.0 * span)
+        audio[lo:hi] += 0.1 * voice * envelope
+
+    audio += 0.001 * torch.randn(total, generator=generator)
+    return {"waveform": audio.unsqueeze(0), "sample_rate": sample_rate}
+
+
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
+@pytest.mark.parametrize("offload_segmentation", [False, True], ids=["embedding_only", "both_nets"])
+def test_diarization_matches_host_pipeline_on_overlapping_speech(
+    device, model_location_generator, offload_segmentation
+):
+    """Fidelity must hold on overlapping speech, not just the clean sample.
+
+    Overlap drives the segmentation net down a different path (multiple active
+    speakers in one frame) and gives the clustering more than two embeddings to
+    separate, so a port that broke either would still pass the sample test.
+    The audio is generated from a fixed seed, so this needs no corpus download
+    and cannot drift with a dataset.
+    """
+    audio = _overlapping_speech()
+
+    host = load_pipeline(model_location_generator)(audio).speaker_diarization
+
+    pipeline = load_pipeline(model_location_generator)
+    diar_pipeline.offload_embedding(pipeline, device)
+    if offload_segmentation:
+        diar_pipeline.offload_segmentation(pipeline, device)
+    on_device = pipeline(audio).speaker_diarization
+
+    assert len(speakers(on_device)) == len(speakers(host)), (
+        f"speaker count differs on overlapping speech: "
+        f"device={sorted(speakers(on_device))} host={sorted(speakers(host))}"
+    )
+
+    der = accuracy.diarization_error_rate(host, on_device)
+    assert der < accuracy.FIDELITY_DER_MAX, (
+        f"diarization error rate against the host pipeline on overlapping "
+        f"speech too high: {der}"
+    )
