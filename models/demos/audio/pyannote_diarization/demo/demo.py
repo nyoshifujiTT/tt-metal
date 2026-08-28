@@ -27,91 +27,24 @@ pytest.importorskip("torch")
 pytest.importorskip("ttnn")
 pytest.importorskip("pyannote.audio")
 
-import torch  # noqa: E402
-import torch.nn.functional as F  # noqa: E402
-
-from models.demos.audio.pyannote_diarization import common  # noqa: E402
-from models.demos.audio.pyannote_diarization.tt.ttnn_pyannet import TTNNPyanNet  # noqa: E402
-from models.demos.audio.pyannote_diarization.tt.ttnn_wespeaker import TTNNWeSpeaker  # noqa: E402
-
-
-def _install_torch_load_shim():
-    """pyannote checkpoints hold non-tensor objects; lightning>=2.6 flips the default."""
-    original = torch.load
-    if getattr(original, "_diar_shim", False):
-        return
-
-    def patched(*args, **kwargs):
-        if kwargs.get("weights_only") is None:
-            kwargs["weights_only"] = False
-        return original(*args, **kwargs)
-
-    patched._diar_shim = True
-    torch.load = patched
-
-
-def _load_pipeline(model_location_generator):
-    _install_torch_load_shim()
-    from pyannote.audio import Pipeline
-
-    config = common.resolve_weights(common.PIPELINE_RELPATH, model_location_generator)
-    pipeline = Pipeline.from_pretrained(config)
-    pipeline.to(torch.device("cpu"))
-    return pipeline
+from models.demos.audio.pyannote_diarization import pipeline as diar_pipeline  # noqa: E402
+from models.demos.audio.pyannote_diarization.pipeline import (  # noqa: E402
+    load_pipeline,
+    sample_audio_path,
+)
 
 
 def _audio(input_path):
-    if input_path:
-        return input_path
-    from pyannote.audio.sample import SAMPLE_FILE
-
-    return str(SAMPLE_FILE["audio"])
-
-
-def _offload_embedding(pipeline, device):
-    """Run the WeSpeaker ResNet34 conv backbone through ttnn."""
-    wespeaker = pipeline._embedding.model_
-    resnet = wespeaker.resnet
-    tt = TTNNWeSpeaker(wespeaker.state_dict(), device)
-    tt.use_device_elementwise = True
-
-    def backbone(feats1):
-        x = tt._relu_dev(tt._conv(feats1, tt.folded["conv1"], 1))
-        for layer, blocks in enumerate(tt.BLOCKS, start=1):
-            for block in range(blocks):
-                stride = 2 if (block == 0 and layer > 1) else 1
-                x = tt._block(x, f"resnet.layer{layer}.{block}", stride)
-        return x
-
-    def forward(fbank, weights=None):
-        feats = fbank.permute(0, 2, 1).unsqueeze(1).float()
-        outs = [backbone(feats[i : i + 1]) for i in range(feats.shape[0])]
-        frames = min(o.shape[-1] for o in outs)
-        x = torch.cat([o[..., :frames] for o in outs], dim=0)
-        return torch.tensor(0.0), resnet.seg_1(resnet.pool(x, weights=weights))
-
-    resnet.forward = forward
-
-
-def _offload_segmentation(pipeline, device):
-    """Run the PyanNet segmentation net through ttnn."""
-    model = pipeline._segmentation.model
-    sinc = model.sincnet.conv1d[0].filterbank.filters().detach().numpy()
-    tt = TTNNPyanNet(model.state_dict(), sinc, device)
-
-    def forward(waveforms):
-        logits = tt.forward_batch(waveforms.detach().numpy())
-        return F.log_softmax(torch.from_numpy(logits).float(), dim=-1)
-
-    model.forward = forward
+    """The recording to diarize: the caller's, else pyannote's bundled sample."""
+    return input_path or sample_audio_path()
 
 
 def _run(device, model_location_generator, input_path, offload_segmentation):
     audio = _audio(input_path)
-    pipeline = _load_pipeline(model_location_generator)
-    _offload_embedding(pipeline, device)
+    pipeline = load_pipeline(model_location_generator)
+    diar_pipeline.offload_embedding(pipeline, device)
     if offload_segmentation:
-        _offload_segmentation(pipeline, device)
+        diar_pipeline.offload_segmentation(pipeline, device)
 
     diarization = pipeline(audio).speaker_diarization
     turns = [
