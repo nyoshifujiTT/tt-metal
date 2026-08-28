@@ -508,15 +508,6 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         """Run the prefill body for a prepared trace variant.
 
         Shared verbatim by the compile pass and the capture pass so the two can never drift.
-
-        ``prepared["embed_terminal"]``, when set, is a callable taking the raw
-        prefill hidden states and returning the finished per-request embedding. It
-        is applied here, i.e. inside the traced body, so the whole embedding tail
-        (last-token slice + final norm + L2 normalize) is captured and one
-        execute_trace replays the entire embedding in a single device dispatch.
-        Running it here rather than at the capture site also keeps the compile pass
-        and the capture pass over the identical op set, which is the invariant this
-        method exists to guarantee.
         """
         model_id = prepared["model_id"]
         transformed_inputs = self.model[model_id].transform_and_embed_prefill_inputs_device(*device_inputs)
@@ -530,6 +521,11 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
             kv_cache=prepared["kv_cache"],
             **prepared["forward_kwargs"],
         )
+        # Embedding tail (last-token slice + final norm + L2 normalize), when the
+        # caller asked for it. Applied here so the compile pass and the capture
+        # pass run the identical body: the tail's kernels are built during compile
+        # and then recorded into the trace, so execute_trace replays the whole
+        # embedding -- forward and tail -- in a single device dispatch.
         embed_terminal = prepared.get("embed_terminal")
         if embed_terminal is not None:
             tt_out = embed_terminal(self.model[model_id], tt_out)
@@ -556,6 +552,12 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         out into :meth:`_record_trace_prefill` so every trace variant can be prepared first, and only then
         captured back to back.
         """
+        # ``embed_terminal`` (a callable taking the raw prefill hidden states and
+        # returning the finished per-request embedding) is folded into the traced
+        # body by :meth:`_prefill_trace_forward`. The embedding path is
+        # single-user, so batched capture does not support it.
+        if batch_size > 1:
+            assert embed_terminal is None, "embed_terminal is only supported for single-user prefill"
         prefill_kwargs = {
             "page_table": page_table,
             "chunk_page_table": chunk_page_table,
@@ -570,14 +572,10 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
             prefill_kwargs["global_user_id"] = global_user_id
 
         host_inputs = self.model[model_id].prepare_prefill_inputs_trace(prefill_ids, **prefill_kwargs)
-        assert (
-            embed_terminal is None or batch_size == 1
-        ), "embed_terminal is only supported for single-user prefill"
         prepared = {
             "model_id": model_id,
             "kv_cache": kv_cache,
             "forward_kwargs": forward_kwargs,
-            # Applied inside the traced body; see _prefill_trace_forward.
             "embed_terminal": embed_terminal,
             # These matrices will actually be pointing to the whole cos_matrix and sin_matrix that was allocated on device in the RotarySetup class
             "rot_mats_global": host_inputs[1],
@@ -742,8 +740,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         global_user_id = kwargs.get("global_user_id", None)
         use_start_pos = "sp1" if num_cached_tokens > 0 else "sp0"
         # Distinct trace_key for the single-trace embedding variant: it captures a
-        # different op set (forward + tail) than the plain forward trace, so the two
-        # must not share a cache entry.
+        # different op set (forward + tail) than the plain forward trace.
         embed_tag = "_embed" if embed_terminal is not None else ""
         trace_key = f"{prefill_seq_len}_{model_id}_{batch_size}_{use_start_pos}{embed_tag}"
 
@@ -1382,12 +1379,13 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                         # The trace already applied slice + final norm + L2 normalize
                         # in-device; ``logits`` is the finished, normalized embedding
                         # block. Do NOT re-run the tail -- just carry it to host.
+                        hidden_states = logits
                         prefill_results.append(
                             {
                                 "idx": idx,
                                 "model_id": model_id,
                                 "last_token_idx": last_token_idx,
-                                "hidden_states": logits.cpu(blocking=False),
+                                "hidden_states": hidden_states.cpu(blocking=False),
                                 "embed_single_trace": True,
                                 "seq_len": seq_len,
                             }
@@ -1736,12 +1734,12 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                 rot_mats_local=rot_mats_local_prefill,
                 user_id=user_id,
                 page_table=page_table_tt,
-                # get_last_token=-1 skips the in-forward slice/norm/lm_head and
-                # returns the full pre-norm hidden states. Batched prefill needs
-                # that because it splits the rows itself; embeddings need it
-                # because the caller reuses process_hidden_states_after_prefill_trace
-                # for output bit-identical to the trace-capture path.
-                get_last_token=(-1 if (batch_size > 1 or return_hidden_states) else (last_token_idx // 32) * 32),
+                # For embeddings we need the full pre-norm hidden states (exactly what
+                # the trace-capture path returns); get_last_token=-1 skips the
+                # in-forward slice/norm/lm_head so the caller can reuse
+                # process_hidden_states_after_prefill_trace for bit-identical output.
+                # Batched prefill (batch_size > 1) also needs the full tensor.
+                get_last_token=-1 if (return_hidden_states or batch_size > 1) else (last_token_idx // 32) * 32,
                 kv_cache=kv_cache,
                 batch_size=batch_size,
             )
