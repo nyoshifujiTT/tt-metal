@@ -336,7 +336,7 @@ models:
     bh_sc1: 20
   e2e_tier1:
     wh_n150: 28
-    wh_galaxy_perf: 120
+    wh_galaxy_perf: 215
     bh_p150: 27
     bh_quietbox_2: 255
     bh_galaxy: 78
@@ -346,7 +346,11 @@ models:
     wh_llmbox_perf: 266
     wh_n150: 45
     wh_n300: 6
-    bh_p150: 26
+    # 31 = the 26 min of upstream entries (Gemma-4-12B 6, GPT-OSS 20B 15,
+    # Shallow UNet 5) plus the 5 min bge-reranker-v2-m3 e2e entry. Raised with
+    # the test rather than squeezed in: the previous 26 was exactly the sum of
+    # the upstream entries, so there was no headroom left to take.
+    bh_p150: 31
     bh_p300: 42
     bh_quietbox_2: 186
   e2e_tier3:
@@ -358,20 +362,26 @@ models:
     bh_p300: 8
     bh_quietbox_2: 42
   unit:
-    wh_llmbox: 25
-    wh_galaxy_perf: 10
     # Device-free (host-side) models unit budget: the bge-reranker-v2-m3
     # host-side suite runs on a CPU runner (cpu_medium, no Tenstorrent device),
     # so it must not consume a Wormhole/Blackhole budget. The scaleout pipeline
     # already budgets cpu_medium; this is the models pipeline's own entry.
+    #
+    # The wh_llmbox / wh_galaxy_perf entries that used to sit here went away
+    # upstream in 68c6f277c28, which moved the last legacy T3000 models job to
+    # the tiered pipelines and dropped this key. Only cpu_medium is kept: the
+    # CPU-only pipeline (models-cpu-only-tests-impl.yaml) still verifies against
+    # the plain `unit` category, so removing the key outright would fail its
+    # budget check with "Could not find a 'time_budget' for Team 'models',
+    # Workflow 'unit', SKU 'cpu_medium'".
     cpu_medium: 15
   # Per-tier unit budgets. Consumed by the tiered model pipelines; the plain `unit`
-  # key is used for the non-tiered pipelines (galaxy-unit, t3000-unit).
+  # key is used for the non-tiered pipelines and the CPU-only pipeline.
   unit_tier1:
-    wh_llmbox: 100
+    wh_llmbox: 150
     wh_n150: 110
-    wh_galaxy: 235
-    wh_galaxy_perf: 45
+    wh_galaxy: 240
+    wh_galaxy_perf: 60
     bh_p150: 20
     bh_quietbox_2: 390
     bh_galaxy: 75
@@ -396,15 +406,13 @@ models:
     bh_quietbox_2: 21
   integration:
     wh_llmbox: 0
-  perf:
-    wh_galaxy_perf: 55
   device_perf:
     wh_n150: 20
+    wh_galaxy_perf: 25
     bh_p150: 20
     bh_p300: 20
     bh_quietbox_2: 80
   demo:
-    wh_galaxy_perf: 125
     bh_galaxy: 470
     bh_sc1: 488
     bh_sc1_high_power: 166
