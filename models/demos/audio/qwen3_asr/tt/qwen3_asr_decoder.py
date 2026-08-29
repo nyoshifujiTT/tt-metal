@@ -36,6 +36,29 @@ from models.tt_transformers.tt.model import Transformer
 EOS_TOKEN_IDS = (151643, 151645)
 
 
+def apply_repetition_penalty(logits, seen_ids, penalty):
+    """vLLM repetition penalty, applied in place on a 1-D logit row.
+
+    Positive logits are divided by ``penalty`` and negative ones multiplied, for
+    every token id in ``seen_ids``.
+
+    ``seen_ids`` must be the union of the PROMPT token ids and the ids generated
+    so far. vLLM's ``apply_penalties`` builds ``prompt_mask | output_mask`` and
+    penalises both (see ``_custom_ops.apply_repetition_penalties_torch``);
+    penalising only the generated ids is HF transformers' behaviour and decodes
+    differently.
+    """
+    if penalty is None or penalty == 1.0 or seen_ids is None or len(seen_ids) == 0:
+        return logits
+    ids = torch.tensor(sorted({int(i) for i in seen_ids}), dtype=torch.long)
+    ids = ids[ids < logits.shape[-1]]
+    if ids.numel() == 0:
+        return logits
+    selected = logits[ids]
+    logits[ids] = torch.where(selected > 0, selected / penalty, selected * penalty)
+    return logits
+
+
 class Qwen3ASRDecoder(Transformer):
     @property
     def generator(self):
@@ -109,19 +132,32 @@ class Qwen3ASRDecoder(Transformer):
         return full.float(), S
 
     @torch.no_grad()
-    def generate(self, inputs_embeds, max_new_tokens=64, eos_id=None):
+    def generate(
+        self,
+        inputs_embeds,
+        max_new_tokens=64,
+        eos_id=None,
+        repetition_penalty=1.0,
+        prompt_ids=None,
+    ):
         """Greedy decode.
 
         ``eos_id`` accepts a single id or a collection; it defaults to every stop
-        id the checkpoint declares (see EOS_TOKEN_IDS)."""
+        id the checkpoint declares (see EOS_TOKEN_IDS).
+
+        ``repetition_penalty`` mirrors the OpenAI/vLLM request parameter and must
+        match whatever the serving path is asked for, or the two decode different
+        token sequences from identical logits. ``prompt_ids`` are the prompt token
+        ids: vLLM penalises prompt tokens as well as generated ones."""
         if eos_id is None:
             eos_ids = EOS_TOKEN_IDS
         elif isinstance(eos_id, int):
             eos_ids = (eos_id,)
         else:
             eos_ids = tuple(eos_id)
+        seen = [] if prompt_ids is None else [int(i) for i in prompt_ids]
         logits, S = self.prefill_logits(inputs_embeds)
-        nxt = int(logits.argmax())
+        nxt = int(apply_repetition_penalty(logits.reshape(-1), seen, repetition_penalty).argmax())
         out = [nxt]
         pos = S
         gen = self.generator
@@ -139,8 +175,8 @@ class Qwen3ASRDecoder(Transformer):
                 enable_trace=False,
                 read_from_device=True,
             )
-            dl = (dl[0] if isinstance(dl, tuple) else dl).squeeze().float()
-            nxt = int(dl.argmax())
+            dl = (dl[0] if isinstance(dl, tuple) else dl).squeeze().float().reshape(-1)
+            nxt = int(apply_repetition_penalty(dl, seen + out, repetition_penalty).argmax())
             out.append(nxt)
             pos += 1
         if out and out[-1] in eos_ids:
