@@ -13,7 +13,7 @@ padding is not transparent to the transcript.
 """
 
 import os
-import sys
+import types
 
 import torch
 
@@ -38,28 +38,52 @@ def test_encode_mel_accepts_the_real_frame_count():
     assert "valid_len=valid_len" in src
 
 
-def test_mask_is_none_when_nothing_is_padded():
-    sys.path.insert(0, os.path.abspath(TT))
-    import audio_encoder as tt_enc
-
-    assert tt_enc.build_pad_mask(100, None, None) is None
-    assert tt_enc.build_pad_mask(100, 100, None) is None
-    assert tt_enc.build_pad_mask(100, 200, None) is None
-
-
-def test_mask_hides_exactly_the_padded_tail(monkeypatch):
-    sys.path.insert(0, os.path.abspath(TT))
-    import audio_encoder as tt_enc
-
-    captured = {}
-
-    def fake_from_torch(tensor, **kwargs):
-        captured["mask"] = tensor
+def _recorder(capture):
+    def from_torch(tensor, **kwargs):
+        capture["mask"] = tensor
         return "TT_MASK"
 
-    monkeypatch.setattr(tt_enc.ttnn, "from_torch", fake_from_torch)
-    out = tt_enc.build_pad_mask(8, 3, device=None)
-    assert out == "TT_MASK"
+    return from_torch
+
+
+def _build_pad_mask(capture):
+    """Compile build_pad_mask alone, with a recording ttnn stub.
+
+    Importing audio_encoder pulls in the whole ttnn extension, which needs a
+    matching device build; the mask itself is pure torch, so extract just that
+    function via the AST and give it a stub. That keeps the behavioural check
+    runnable anywhere and still fails if the real logic drifts.
+    """
+    import ast
+
+    src = _read(os.path.join(TT, "audio_encoder.py"))
+    tree = ast.parse(src)
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "build_pad_mask":
+            stub = types.SimpleNamespace(
+                bfloat16="bf16",
+                TILE_LAYOUT="tile",
+                DRAM_MEMORY_CONFIG="dram",
+                from_torch=_recorder(capture),
+            )
+            namespace = {"torch": torch, "ttnn": stub}
+            module = ast.Module(body=[node], type_ignores=[])
+            exec(compile(module, "audio_encoder.py", "exec"), namespace)  # noqa: S102 - our own source
+            return namespace["build_pad_mask"]
+    raise AssertionError("build_pad_mask not found")
+
+
+def test_mask_is_none_when_nothing_is_padded():
+    build_pad_mask = _build_pad_mask({})
+    assert build_pad_mask(100, None, None) is None
+    assert build_pad_mask(100, 100, None) is None
+    assert build_pad_mask(100, 200, None) is None
+
+
+def test_mask_hides_exactly_the_padded_tail():
+    captured = {}
+    build_pad_mask = _build_pad_mask(captured)
+    assert build_pad_mask(8, 3, device=None) == "TT_MASK"
     mask = captured["mask"]
     assert mask.shape == (1, 1, 8, 8)
     assert torch.isfinite(mask[..., :3]).all(), "real positions stay visible"
