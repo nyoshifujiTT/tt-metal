@@ -23,11 +23,37 @@ trace opt-in per call, so we keep the shared decode path without the instability
 
 prefill (embeds) -> greedy decode loop (token ids) -> text.
 """
+import os
+
 import torch
 
 import ttnn
 from models.tt_transformers.tt.generator import Generator
+from models.tt_transformers.tt.common import get_block_size, num_blocks_in_seq
 from models.tt_transformers.tt.model import Transformer
+
+
+# Weight dtype for the text decoder. A serving stack that builds the decoder with
+# bfloat8_b and a demo that builds it with bfloat16 decode the same clip
+# differently ("コース" instead of "構成"), which looks like a model bug but is
+# just a different quantisation. Default to bfloat8_b and make it explicit.
+_DTYPES = {"bfloat8_b": ttnn.bfloat8_b, "bfloat16": ttnn.bfloat16}
+
+
+def decoder_weight_dtype():
+    """ttnn dtype for the decoder weights, overridable via QWEN3ASR_DECODER_DTYPE."""
+    name = os.environ.get("QWEN3ASR_DECODER_DTYPE", "bfloat8_b")
+    if name not in _DTYPES:
+        raise ValueError(f"QWEN3ASR_DECODER_DTYPE must be one of {sorted(_DTYPES)}, got {name!r}")
+    return _DTYPES[name]
+
+
+# Capture a decode trace. Without it every decode step pays full per-op host
+# dispatch: measured 489 ms/token untraced on p150 versus 113 ms traced, which is
+# what makes an untraced front-end look ~4x slower than a traced serving path for
+# the same model. Override with QWEN3ASR_DECODE_TRACE=0 if a deployment hits the
+# long-run trace instability noted in the README.
+DECODE_TRACE = os.environ.get("QWEN3ASR_DECODE_TRACE", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 # Stop ids from the checkpoint's generation_config ("eos_token_id": [151643,
@@ -94,12 +120,18 @@ class Qwen3ASRDecoder(Transformer):
         return tuple(out)
 
     @torch.no_grad()
-    def prefill_logits(self, inputs_embeds):
+    def prefill_logits(self, inputs_embeds, page_table=None, kv_cache=None):
         """Run prefill on merged embeddings via the shared Generator single-user text
-        path; return last-token logits (torch, vocab) and populate the internal KV cache
-        for decoding. Pads the sequence to a multiple of 512, min 512 (the Blackhole
+        path; return last-token logits (torch, vocab) and populate the KV cache for
+        decoding. Pads the sequence to a multiple of 512, min 512 (the Blackhole
         prefill_len_cutoff / MLP reshape rule — see the comment on S_pad below); causal
-        masking makes the trailing pad positions invisible to the last real token."""
+        masking makes the trailing pad positions invisible to the last real token.
+
+        ``page_table``/``kv_cache`` opt into paged KV. They default to None, which
+        keeps the self-allocating single-shot behaviour. A serving stack that runs
+        paged KV must pass them, because paged and non-paged decode dispatch to
+        DIFFERENT SDPA kernels (paged_scaled_dot_product_attention_decode vs
+        scaled_dot_product_attention_decode) and do not produce the same output."""
         S = inputs_embeds.shape[-2]
         last = S - 1
         # Always pad prefill to a multiple of 512 (the Blackhole prefill_len_cutoff), min 512.
@@ -118,12 +150,24 @@ class Qwen3ASRDecoder(Transformer):
         # + the shared ttnn_prefill_forward. Non-paged single-shot (page_table/kv_cache=None):
         # S_pad <= max_seq_len (2048) <= max_prefill_chunk_size, so it stays on the single-chunk
         # path (no paging required). It applies get_last_token=(last // 32) * 32 internally.
+        # A paged prefill must see the user's page-table row trimmed to the blocks
+        # the PADDED length covers, which is what Generator._get_prefill_user_page_table
+        # does; handing it every block of the user's range makes the kernel attend
+        # over KV pages beyond the prompt.
+        prefill_page_table = page_table
+        if page_table is not None and kv_cache is not None:
+            num_blocks = num_blocks_in_seq(S_pad, get_block_size(kv_cache))
+            prefill_page_table = page_table[0:1]
+            if prefill_page_table.shape[1] < num_blocks:
+                padding = torch.ones(1, num_blocks - prefill_page_table.shape[1], dtype=torch.int32) * -1
+                prefill_page_table = torch.cat([prefill_page_table, padding], dim=1)
+            prefill_page_table = prefill_page_table[:, :num_blocks]
         tt_logits = self.generator.prefill_forward_single_user_text(
             inputs_embeds,
-            page_table=None,
+            page_table=prefill_page_table,
             user_id=0,
             last_token_idx=last,
-            kv_cache=None,
+            kv_cache=kv_cache,
             batch_size=1,
         )
         tt_logits = ttnn.from_device(tt_logits)
@@ -139,6 +183,8 @@ class Qwen3ASRDecoder(Transformer):
         eos_id=None,
         repetition_penalty=1.0,
         prompt_ids=None,
+        page_table=None,
+        kv_cache=None,
     ):
         """Greedy decode.
 
@@ -156,7 +202,7 @@ class Qwen3ASRDecoder(Transformer):
         else:
             eos_ids = tuple(eos_id)
         seen = [] if prompt_ids is None else [int(i) for i in prompt_ids]
-        logits, S = self.prefill_logits(inputs_embeds)
+        logits, S = self.prefill_logits(inputs_embeds, page_table=page_table, kv_cache=kv_cache)
         nxt = int(apply_repetition_penalty(logits.reshape(-1), seen, repetition_penalty).argmax())
         out = [nxt]
         pos = S
@@ -170,9 +216,9 @@ class Qwen3ASRDecoder(Transformer):
             dl = gen.decode_forward(
                 torch.tensor([[nxt]], dtype=torch.long),
                 torch.tensor([pos]),
-                page_table=None,
-                kv_cache=None,
-                enable_trace=False,
+                page_table=page_table,
+                kv_cache=kv_cache,
+                enable_trace=DECODE_TRACE,
                 read_from_device=True,
             )
             dl = (dl[0] if isinstance(dl, tuple) else dl).squeeze().float().reshape(-1)
