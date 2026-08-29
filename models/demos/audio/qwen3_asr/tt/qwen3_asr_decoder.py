@@ -48,6 +48,21 @@ def decoder_weight_dtype():
     return _DTYPES[name]
 
 
+# Every prefill is padded to ONE bucket so a long-lived process only ever
+# compiles/executes a single prefill program shape. tt-metal has a length-keyed
+# program-cache collision (the prefill matmul hash does not cover the reshaped
+# dim -3), tracked as tenstorrent/tt-metal#49451: mixing a 512-padded and a
+# 1024-padded prefill in one process TT_FATALs, and even where it survives the
+# same audio transcribes differently ("構成" vs "コース") depending on which
+# bucket it landed in.
+#
+# The bucket therefore has to be IDENTICAL across every front-end that shares a
+# process or is compared against another. 512 covers the prompts this model sees
+# (~30s clip -> ~390 audio tokens + prompt); raise QWEN3ASR_PREFILL_PIN if a
+# deployment needs longer single-shot clips, but raise it for ALL front-ends.
+PREFILL_PIN_LEN = int(os.environ.get("QWEN3ASR_PREFILL_PIN", "512"))
+
+
 # Capture a decode trace. Without it every decode step pays full per-op host
 # dispatch: measured 489 ms/token untraced on p150 versus 113 ms traced, which is
 # what makes an untraced front-end look ~4x slower than a traced serving path for
@@ -143,7 +158,7 @@ class Qwen3ASRDecoder(Transformer):
         # always <=512 tokens, so min-512 pins every request to the single [1,1,512,d] shape and
         # sidesteps the collision. Caps single-shot at max_seq_len (2048 -> ~150s); trailing pad is
         # causal-masked. See README "Known limitations" and docs/prefill_program_cache_collision_issue.md.
-        S_pad = ((S + 511) // 512) * 512
+        S_pad = max(((S + 511) // 512) * 512, PREFILL_PIN_LEN)
         if S_pad != S:
             inputs_embeds = torch.nn.functional.pad(inputs_embeds, (0, 0, 0, S_pad - S))
         # Generator's single-user text prefill calls our embeds-aware prepare_inputs_prefill

@@ -39,6 +39,7 @@ from models.tt_transformers.tt.generator_vllm import allocate_vllm_kv_cache
 from models.tt_transformers.tt.model_config import ModelArgs
 
 from .qwen3_asr_decoder import DECODE_TRACE as _DECODER_DECODE_TRACE
+from .qwen3_asr_decoder import PREFILL_PIN_LEN as _DECODER_PREFILL_PIN_LEN
 from .qwen3_asr_decoder import Qwen3ASRDecoder
 
 from vllm.model_executor.models.interfaces import (
@@ -82,7 +83,7 @@ DECODE_TRACE = _DECODER_DECODE_TRACE
 # decoder for later requests. A single 1024-token pin covers up to ~30s clips
 # (30s -> ~390 audio tokens + prompt < 1024), the WhisperFeatureExtractor cap.
 # Override with QWEN3ASR_PREFILL_PIN if a deployment needs a different bucket.
-PREFILL_PIN_LEN = int(os.environ.get("QWEN3ASR_PREFILL_PIN", "1024"))
+PREFILL_PIN_LEN = _DECODER_PREFILL_PIN_LEN
 
 # The audio encoder runs conv2d(batch_size=n_chunks) + SDPA(seq=n_chunks*13)
 # where n_chunks = ceil(mel_frames / 100), i.e. its program shape scales with
