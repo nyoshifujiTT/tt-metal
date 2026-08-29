@@ -1,21 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
-"""Guard the synthetic audio the on-device overlap test depends on."""
+"""Guard the multi-speaker audio the on-device overlap test depends on.
 
+The overlap test is only worth running if its input really holds two
+distinguishable speakers talking over each other. An earlier version of this
+fixture synthesised pitched tones, which pyannote labelled as a single speaker
+-- the on-device test still passed while covering neither overlap nor speaker
+separation. These checks make that failure mode visible.
+"""
 import pytest
 
 pytest.importorskip("torch")
+pytest.importorskip("pyannote.audio")
 
 import torch  # noqa: E402
 
 from models.demos.audio.pyannote_diarization.tests.synthetic_audio import (  # noqa: E402
+    overlap_window,
     overlapping_speech,
 )
-
-
-OVERLAP_WINDOWS = ((8.0, 9.0), (11.0, 15.0))
-SINGLE_SPEAKER_WINDOWS = ((3.0, 7.0), (9.5, 10.5), (16.0, 18.0))
 
 
 def _rms(waveform, sample_rate, start, end):
@@ -23,29 +27,44 @@ def _rms(waveform, sample_rate, start, end):
     return float(span.pow(2).mean().sqrt())
 
 
-def test_synthetic_audio_really_overlaps_and_is_reproducible():
-    """Guard the fixture the overlap test depends on.
-
-    If the voice schedule is ever edited so the windows stop overlapping, the
-    on-device test would still pass while silently no longer covering overlap.
-    Two speakers at once are louder than one, so the RMS separates the cases;
-    and the audio must be identical run to run, which is the whole reason for
-    generating it instead of downloading a corpus.
-    """
+def test_audio_is_reproducible():
+    """Derived from the shipped wav, so two calls must be bit-identical."""
     first = overlapping_speech()
     second = overlapping_speech()
     assert torch.equal(first["waveform"], second["waveform"])
-
-    waveform, sample_rate = first["waveform"][0], first["sample_rate"]
-    quietest_overlap = min(
-        _rms(waveform, sample_rate, *w) for w in OVERLAP_WINDOWS
-    )
-    loudest_single = max(
-        _rms(waveform, sample_rate, *w) for w in SINGLE_SPEAKER_WINDOWS
-    )
-    assert quietest_overlap > loudest_single, (
-        f"overlap windows {OVERLAP_WINDOWS} are not louder than the "
-        f"single-speaker ones: {quietest_overlap} vs {loudest_single}"
-    )
+    assert first["sample_rate"] == second["sample_rate"]
 
 
+def test_middle_section_really_has_two_speakers_mixed():
+    """Two voices summed are louder than either alone."""
+    audio = overlapping_speech()
+    waveform, sample_rate = audio["waveform"][0], audio["sample_rate"]
+    total = waveform.shape[-1] / sample_rate
+    third = total / 3.0
+
+    first_alone = _rms(waveform, sample_rate, 0.0, third)
+    overlapped = _rms(waveform, sample_rate, *overlap_window(audio))
+    second_alone = _rms(waveform, sample_rate, 2.0 * third, total)
+
+    assert overlapped > first_alone
+    assert overlapped > second_alone
+
+
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
+def test_pyannote_hears_two_speakers(device, model_location_generator):
+    """The fixture is worthless unless pyannote itself separates the speakers.
+
+    This is the check that would have caught the tone-based fixture: it found
+    exactly one speaker, so the overlap test it fed was comparing two runs on
+    audio that exercised none of what it claimed to.
+    """
+    from models.demos.audio.pyannote_diarization import pipeline as diar_pipeline
+
+    diarization = diar_pipeline.load_pipeline(model_location_generator)(
+        overlapping_speech()
+    ).speaker_diarization
+
+    speakers = diar_pipeline.speakers(diarization)
+    assert len(speakers) >= 2, (
+        f"the fixture must hold speakers pyannote can tell apart, got {speakers}"
+    )

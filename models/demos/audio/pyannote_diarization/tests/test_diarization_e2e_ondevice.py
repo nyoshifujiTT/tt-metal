@@ -101,11 +101,13 @@ def test_diarization_matches_host_pipeline_on_overlapping_speech(
 ):
     """Fidelity must hold on overlapping speech, not just the clean sample.
 
-    Overlap drives the segmentation net down a different path (multiple active
-    speakers in one frame) and gives the clustering more than two embeddings to
-    separate, so a port that broke either would still pass the sample test.
-    The audio is generated from a fixed seed, so this needs no corpus download
-    and cannot drift with a dataset.
+    Overlap drives the segmentation net down a different path -- multiple
+    speakers active in one frame -- which the bundled sample never does, so a
+    port that broke it would still pass the sample test.
+
+    The audio is the sample's own two speakers rearranged to talk over each
+    other, so it needs no corpus download and stays real speech; see
+    synthetic_audio for why tones do not work here.
     """
     audio = overlapping_speech()
 
