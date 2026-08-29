@@ -30,6 +30,12 @@ from models.tt_transformers.tt.generator import Generator
 from models.tt_transformers.tt.model import Transformer
 
 
+# Stop ids from the checkpoint's generation_config ("eos_token_id": [151643,
+# 151645]). Callers that stop on only one of them keep decoding past a valid stop
+# and emit tokens the reference implementation never produces.
+EOS_TOKEN_IDS = (151643, 151645)
+
+
 class Qwen3ASRDecoder(Transformer):
     @property
     def generator(self):
@@ -103,7 +109,17 @@ class Qwen3ASRDecoder(Transformer):
         return full.float(), S
 
     @torch.no_grad()
-    def generate(self, inputs_embeds, max_new_tokens=64, eos_id=151645):
+    def generate(self, inputs_embeds, max_new_tokens=64, eos_id=None):
+        """Greedy decode.
+
+        ``eos_id`` accepts a single id or a collection; it defaults to every stop
+        id the checkpoint declares (see EOS_TOKEN_IDS)."""
+        if eos_id is None:
+            eos_ids = EOS_TOKEN_IDS
+        elif isinstance(eos_id, int):
+            eos_ids = (eos_id,)
+        else:
+            eos_ids = tuple(eos_id)
         logits, S = self.prefill_logits(inputs_embeds)
         nxt = int(logits.argmax())
         out = [nxt]
@@ -114,7 +130,7 @@ class Qwen3ASRDecoder(Transformer):
         # (the wide reduction costs more than the logits host transfer), and a non-traced decode
         # stays stable across the mixed request shapes of a long-lived server (a persistent
         # decode trace did not — see README "Known limitations").
-        while len(out) < max_new_tokens and nxt != eos_id:
+        while len(out) < max_new_tokens and nxt not in eos_ids:
             dl = gen.decode_forward(
                 torch.tensor([[nxt]], dtype=torch.long),
                 torch.tensor([pos]),
@@ -127,6 +143,6 @@ class Qwen3ASRDecoder(Transformer):
             nxt = int(dl.argmax())
             out.append(nxt)
             pos += 1
-        if out and out[-1] == eos_id:
+        if out and out[-1] in eos_ids:
             out = out[:-1]
         return out
