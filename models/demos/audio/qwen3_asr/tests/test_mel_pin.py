@@ -23,6 +23,7 @@ import torch
 
 HERE = os.path.dirname(__file__)
 TT = os.path.join(HERE, "..", "tt")
+EVAL = os.path.join(HERE, "..", "eval", "corpus_eval.py")
 
 
 def _read(path):
@@ -51,7 +52,7 @@ def _fn(path, name):
 
 def test_no_constant_silence_column_anywhere():
     # Measured worse than plain zero padding; keep it out of both front-ends.
-    for path in (os.path.join(TT, "generator_vllm.py"),):
+    for path in (os.path.join(TT, "generator_vllm.py"), EVAL):
         src = _read(path)
         assert "silence_col" not in src
         assert "_silence_mel_value" not in src
@@ -64,7 +65,7 @@ def test_served_path_pins_without_zeros():
 
 
 def test_pin_truncates_when_longer():
-    for path, name in ((os.path.join(TT, "generator_vllm.py"), "_pin_mel"),):
+    for path, name in ((EVAL, "pin_mel"), (os.path.join(TT, "generator_vllm.py"), "_pin_mel")):
         pin = _fn(path, name)
         mel = torch.arange(4 * 10, dtype=torch.float32).reshape(4, 10)
         out = pin(mel, 6)
@@ -73,7 +74,7 @@ def test_pin_truncates_when_longer():
 
 
 def test_pin_is_a_noop_at_exact_width():
-    for path, name in ((os.path.join(TT, "generator_vllm.py"), "_pin_mel"),):
+    for path, name in ((EVAL, "pin_mel"), (os.path.join(TT, "generator_vllm.py"), "_pin_mel")):
         pin = _fn(path, name)
         mel = torch.ones(4, 8)
         assert torch.equal(pin(mel, 8), mel)
@@ -81,7 +82,7 @@ def test_pin_is_a_noop_at_exact_width():
 
 def test_pin_replicates_the_last_real_frame_when_shorter():
     # A frame from this recording, not a synthetic constant.
-    for path, name in ((os.path.join(TT, "generator_vllm.py"), "_pin_mel"),):
+    for path, name in ((EVAL, "pin_mel"), (os.path.join(TT, "generator_vllm.py"), "_pin_mel")):
         pin = _fn(path, name)
         mel = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
         out = pin(mel, 5)
@@ -106,3 +107,14 @@ def test_adapter_reuses_the_upstream_decoder():
     assert "from .qwen3_asr_decoder import Qwen3ASRDecoder" in src
     assert "class Qwen3ASRPagedDecoder" not in src
     assert "decoder.prepare_inputs_prefill(\n                merged.unsqueeze(0)," in src
+
+
+def test_eval_keeps_the_extractor_width():
+    # WhisperFeatureExtractor already returns a fixed 3000-frame mel whose tail is
+    # genuine silence (it zero-extends the WAVEFORM and runs the filterbank over
+    # the whole 30s window). Slicing that to the real frames and re-padding is
+    # strictly worse - measured against the unpadded CPU reference: extractor tail
+    # 0.0904, zero padding 0.0971, constant silence column 0.0988.
+    src = _read(EVAL)
+    assert "mel = pin_mel(mel, MEL_PIN)" in src
+    assert "mel = mel[:, :nf]" not in src, "do not slice away the extractor's own tail"

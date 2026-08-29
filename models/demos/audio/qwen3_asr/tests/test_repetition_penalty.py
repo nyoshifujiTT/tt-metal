@@ -89,3 +89,11 @@ def test_generate_threads_prompt_ids():
     assert "seen + out" in src, "the penalty must see prompt ids plus generated ids"
 
 
+
+
+def test_eval_defaults_to_the_deployment_preset():
+    path = os.path.join(os.path.dirname(__file__), "..", "eval", "corpus_eval.py")
+    src = open(path).read()
+    assert 'os.environ.get("QWEN3ASR_EVAL_REPETITION_PENALTY", "1.1")' in src
+    assert "repetition_penalty=a.repetition_penalty" in src
+    assert "prompt_ids=input_ids" in src, "the eval must pass the prompt ids"
