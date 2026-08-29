@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.join(ROOT, "reference"))
 sys.path.insert(0, os.path.join(ROOT, "tt"))
 import audio_encoder as tt_enc  # noqa: E402
 import audio_encoder_ref as ref  # noqa: E402
-from qwen3_asr_decoder import Qwen3ASRDecoder  # noqa: E402
+from qwen3_asr_decoder import Qwen3ASRDecoder, decoder_weight_dtype  # noqa: E402
 
 GOLDEN = os.environ.get("GOLDEN_DIR", "/golden")
 CKPT = os.environ.get("HF_MODEL", "/ttwork/qwen3_asr_text_decoder")
@@ -71,9 +71,8 @@ def main():
         enc_params = tt_enc.preprocess_weights(w, dev)
         args = ModelArgs(dev, max_batch_size=1, max_seq_len=1024)
         sd = args.load_state_dict()
-        model = Qwen3ASRDecoder(
-            args, ttnn.bfloat16, dev, sd, args.weight_cache_path(ttnn.bfloat16), use_paged_kv_cache=False
-        )
+        dtype = decoder_weight_dtype()
+        model = Qwen3ASRDecoder(args, dtype, dev, sd, args.weight_cache_path(dtype), use_paged_kv_cache=False)
         t_setup = time.time() - t0
 
         def run_once():
