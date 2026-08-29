@@ -159,9 +159,14 @@ def preprocess_weights(w, device):
 _PE_CACHE = {}
 
 
-def encode_mel(mel, params, device):
+def encode_mel(mel, params, device, valid_frames=None):
     """Full-TT encoder from mel (num_mel, T): TT conv2d frontend -> +PE -> transformer
-    -> projector. Returns audio embeds (S, output_dim) as torch."""
+    -> projector. Returns audio embeds (S, output_dim) as torch.
+
+    ``valid_frames`` is the number of REAL mel frames when the caller padded
+    ``mel`` to a fixed length. It is converted to encoder positions and used to
+    mask the padded tail out of attention; without it the padding materially
+    changes the encoder output (measured up to 70% relative on short clips)."""
     conv = conv_frontend_tt(mel, params["conv_w"], params["conv_out_w"], device)  # (S,1024) torch
     per_chunk = 13
     if per_chunk not in _PE_CACHE:
@@ -176,10 +181,14 @@ def encode_mel(mel, params, device):
     pe = _PE_CACHE[per_chunk]
     n = conv.shape[0] // per_chunk
     x_host = (conv.reshape(n, per_chunk, D_MODEL) + pe.unsqueeze(0)).reshape(-1, D_MODEL)
-    return encode(x_host, params, device)
+    valid_len = None
+    if valid_frames is not None and valid_frames < mel.shape[1]:
+        # The conv frontend emits per_chunk positions for every MEL_CHUNK frames.
+        valid_len = -(-int(valid_frames) // (N_WINDOW * 2)) * per_chunk
+    return encode(x_host, params, device, valid_len=valid_len)
 
 
-def _layer(x, lp, device):
+def _layer(x, lp, device, attn_mask=None):
     core = ttnn.CoreGrid(y=device.compute_with_storage_grid_size().y, x=device.compute_with_storage_grid_size().x)
     residual = x  # (1,1,S,D)
     h = ttnn.layer_norm(x, weight=lp["ln1_w"], bias=lp["ln1_b"], epsilon=LN_EPS, compute_kernel_config=HIFI4)
@@ -197,6 +206,7 @@ def _layer(x, lp, device):
         q,
         k,
         v,
+        attn_mask=attn_mask,
         is_causal=False,
         scale=HEAD_DIM**-0.5,
     )
@@ -237,9 +247,36 @@ def _layer(x, lp, device):
     return x
 
 
-def encode(x_host, params, device):
+def build_pad_mask(seq_len, valid_len, device):
+    """Additive attention mask that hides padded encoder positions.
+
+    The encoder runs full bidirectional attention. A caller that pins the mel
+    input to a fixed frame count (the vLLM serving path does, so the encoder
+    keeps one program shape) turns the padded tail into real key/value
+    positions that every real token attends to. Measured against the CPU
+    reference that shifts the encoder output by up to 70% RELATIVE on short
+    clips, so the padding is not transparent to the transcript.
+    """
+    if valid_len is None or valid_len >= seq_len:
+        return None
+    mask = torch.zeros(1, 1, seq_len, seq_len, dtype=torch.float32)
+    mask[:, :, :, valid_len:] = float("-inf")
+    return ttnn.from_torch(
+        mask,
+        dtype=ttnn.bfloat16,
+        layout=ttnn.TILE_LAYOUT,
+        device=device,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    )
+
+
+def encode(x_host, params, device, valid_len=None):
     """x_host: (S, D_MODEL) torch tensor = conv frontend output WITH positional embedding
-    already added (done on host, see reference.conv_frontend + sinusoids). Returns (S, output_dim) torch."""
+    already added (done on host, see reference.conv_frontend + sinusoids). Returns (S, output_dim) torch.
+
+    ``valid_len`` is the number of REAL encoder positions; anything past it is
+    padding introduced by pinning the mel length and is masked out of attention.
+    """
     S = x_host.shape[0]
     x = ttnn.from_torch(
         x_host.unsqueeze(0).unsqueeze(0),
@@ -248,16 +285,28 @@ def encode(x_host, params, device):
         device=device,
         memory_config=ttnn.DRAM_MEMORY_CONFIG,
     )  # (1,1,S,D)
-    for lp in params["layers"]:
-        x = _layer(x, lp, device)
-    x = ttnn.layer_norm(
+    attn_mask = build_pad_mask(S, valid_len, device)
+    try:
+        for lp in params["layers"]:
+            x = _layer(x, lp, device, attn_mask=attn_mask)
+    finally:
+        if attn_mask is not None:
+            ttnn.deallocate(attn_mask)
+    # Deallocate each intermediate on reassignment. ttnn ops return NEW device
+    # tensors; without freeing the consumed input here, ln_post / proj1 / proj2
+    # each leak their input tensor per call, accumulating DRAM across requests in
+    # a long-lived server until allocation fails and the device wedges.
+    x_ln = ttnn.layer_norm(
         x, weight=params["lnpost_w"], bias=params["lnpost_b"], epsilon=LN_EPS, compute_kernel_config=HIFI4
     )
+    ttnn.deallocate(x)
     core = ttnn.CoreGrid(y=device.compute_with_storage_grid_size().y, x=device.compute_with_storage_grid_size().x)
-    x = ttnn.linear(
-        x, params["proj1_w"], bias=params["proj1_b"], activation="gelu", core_grid=core, compute_kernel_config=HIFI4
+    x_p1 = ttnn.linear(
+        x_ln, params["proj1_w"], bias=params["proj1_b"], activation="gelu", core_grid=core, compute_kernel_config=HIFI4
     )
-    x = ttnn.linear(x, params["proj2_w"], bias=params["proj2_b"], core_grid=core, compute_kernel_config=HIFI4)
+    ttnn.deallocate(x_ln)
+    x = ttnn.linear(x_p1, params["proj2_w"], bias=params["proj2_b"], core_grid=core, compute_kernel_config=HIFI4)
+    ttnn.deallocate(x_p1)
     out = ttnn.to_torch(x).reshape(-1, OUTPUT_DIM)[:S].float()
     ttnn.deallocate(x)
     return out
