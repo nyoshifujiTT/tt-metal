@@ -3,14 +3,28 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-vLLM Integration for Qwen3-Embedding-8B Model
+Qwen3-Embedding on Tenstorrent devices.
 
-This module provides vLLM integration for the Qwen3-Embedding model, enabling
-OpenAI Embedding API compatibility through vLLM's serving infrastructure.
+``Qwen3ForEmbedding`` runs the checkpoint's transformer stack through
+tt_transformers' prefill path and exposes the two results callers ask for,
+named after the stage of the model they stop at:
 
-Usage:
-    The model can be registered with vLLM's ModelRegistry and served via
-    the OpenAI Embedding API endpoint.
+``encode``
+    The finished embedding. Runs all three stages of the checkpoint's
+    ``modules.json`` -- Transformer, Pooling(lasttoken), Normalize -- folded
+    into one prefill trace, so a single ``execute_trace`` replay produces
+    unit-norm ``[batch, hidden]`` rows with no host post-processing. This is
+    what a caller that owns no pooling layer wants: the standalone demo and
+    tt-media-server.
+
+``encode_token_hidden_states``
+    The stage before pooling: the flat ``[total_tokens, hidden]`` per-token
+    layout. vLLM owns a ``Pooler`` that performs the pooling and normalization
+    itself, and its pooling runner indexes that token axis before calling it.
+
+Serving through vLLM does not use this class directly. The plugin resolves
+``models.demos.qwen3_embedding.tt.generator_vllm:Qwen3EmbeddingForTTvLLM``,
+a thin subclass that adds the pooling contract on top of this one.
 """
 
 from typing import Optional
@@ -42,9 +56,10 @@ class Qwen3ForEmbedding:
         max_seq_len: int = 8192,  # Qwen3-Embedding supports up to 8192
         act_dtype=ttnn.bfloat16,
         weight_dtype=ttnn.bfloat8_b,
-        model_name: str = "Qwen/Qwen3-Embedding-8B",
+        model_name: Optional[str] = None,
         vllm_config=None,
         prefix: str = "",
+        hf_config: Optional[transformers.PretrainedConfig] = None,
         **kwargs,
     ):
         """
@@ -57,9 +72,16 @@ class Qwen3ForEmbedding:
             max_seq_len: Maximum sequence length (default 8192 for Qwen3-Embedding)
             act_dtype: Activation data type
             weight_dtype: Weight data type
-            model_name: HuggingFace model name
+            model_name: HuggingFace model id or local path. Only used to load the
+                config when ``hf_config`` is not supplied (e.g. direct/metal-only
+                instantiation). Standard HuggingFace resolution applies, so a local
+                cache or pre-staged directory is honoured. There is no hardcoded
+                default: callers that do not pass ``hf_config`` must name the model.
             vllm_config: vLLM configuration (passed by vLLM wrapper)
             prefix: Model prefix (passed by vLLM wrapper)
+            hf_config: Config already resolved by the caller (vLLM / tt-inference-
+                server pass ``model_config.hf_config`` here). When present it is used
+                as-is; the model is never re-fetched.
             **kwargs: Additional arguments passed by vLLM wrapper
         """
         # Extract device from vllm_config if provided (vLLM wrapper case)
@@ -81,8 +103,23 @@ class Qwen3ForEmbedding:
         if vllm_config is not None:
             self.vllm_config = vllm_config
 
-        # Load config
-        self.config = transformers.AutoConfig.from_pretrained(model_name)
+        # Resolve the model config. Prefer the config the caller already resolved
+        # and handed in (vLLM / tt-inference-server pass model_config.hf_config into
+        # initialize_vllm_model). Re-fetching it here would (1) redundantly download
+        # a config the caller already has, and (2) force a hardcoded repo id, which
+        # ignores a pre-staged local directory and cannot serve a different
+        # checkpoint (0.6B vs 8B) or run offline. When no config is handed in
+        # (direct / metal-only instantiation), load it from the explicitly named
+        # model via standard HuggingFace resolution (local cache honoured).
+        if hf_config is not None:
+            self.config = hf_config
+        elif model_name is not None:
+            self.config = transformers.AutoConfig.from_pretrained(model_name)
+        else:
+            raise ValueError(
+                "Qwen3ForEmbedding requires either 'hf_config' (passed by vLLM / "
+                "tt-inference-server) or an explicit 'model_name' to load the config."
+            )
 
         # Initialize model and generator (will be set up during first forward pass)
         self.model = None
@@ -141,6 +178,7 @@ class Qwen3ForEmbedding:
                 max_batch_size=max_batch_size,
                 max_seq_len=max_seq_len,
                 vllm_config=vllm_config,
+                hf_config=hf_config,
             )
         else:
             # Fallback for direct instantiation (not wrapped)
@@ -149,6 +187,7 @@ class Qwen3ForEmbedding:
                 model_location_generator=model_location_generator,
                 max_batch_size=max_batch_size,
                 max_seq_len=max_seq_len,
+                hf_config=hf_config,
             )
 
     def _initialize_model(self, batch_size: int, sequence_length: int):
@@ -236,15 +275,58 @@ class Qwen3ForEmbedding:
 
         self._is_initialized = True
 
+    def encode(self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Public API: the finished embedding, pooled and L2-normalized on device.
+
+        This is the model as Qwen3-Embedding officially defines it: the three
+        stages of its ``modules.json`` -- Transformer, Pooling(lasttoken),
+        Normalize -- all applied, so the caller receives unit-norm vectors of
+        shape ``[batch, hidden]``. The whole tail (last-token slice, final norm,
+        L2 normalize) is folded into the prefill trace, so one ``execute_trace``
+        replay produces the finished result with no host post-processing.
+
+        Use this from any caller that wants embeddings: the standalone metal
+        demo and tt-media-server. Callers that own a pooling layer of their own
+        -- vLLM, whose ``Pooler`` performs the pooling and normalization itself
+        -- must use :meth:`encode_token_hidden_states` instead, because pooling
+        an already-pooled tensor is meaningless.
+        """
+        return self.forward(input_ids, attention_mask, embed_single_trace=True)
+
+    def encode_token_hidden_states(
+        self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Public API: per-token hidden states, the stage right before pooling.
+
+        Returns the flat ``[total_tokens, hidden]`` layout -- every scheduled
+        request's real tokens concatenated on the token axis in request order,
+        with the final norm applied and no last-token slice. This is the input
+        contract of vLLM's pooling runner, which indexes that token axis with a
+        ``PoolingMetadata`` cursor before handing the tensor to ``model.pooler``.
+
+        This is the same computation :meth:`encode` performs, stopped one stage
+        earlier: both run the identical prefill and final norm, and ``encode``
+        merely continues into the slice and the L2 normalize. Returning the
+        pooled tensor here instead would be silently wrong -- the runner would
+        read the batch axis as if it were the token axis.
+        """
+        return self.forward(input_ids, attention_mask, return_full_hidden_states=True)
+
     def forward(
         self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
+        return_full_hidden_states: bool = False,
+        embed_single_trace: bool = False,
     ) -> torch.Tensor:
         """
         Forward pass for embedding generation (prefill-only).
+
+        Shared implementation behind the two public entry points
+        (:meth:`encode` and :meth:`encode_token_hidden_states`); which stage the
+        result stops at is selected by the two flags below.
 
         This is the main interface method called by vLLM for embedding inference.
         Unlike generation models, embedding models only have prefill (no decode step).
@@ -258,11 +340,34 @@ class Qwen3ForEmbedding:
             token_type_ids: Optional token type IDs tensor (not used for Qwen3)
             position_ids: Optional position IDs tensor
 
+        Args (cont.):
+            return_full_hidden_states: when True, return the per-token hidden
+                states ``[total_tokens, hidden]`` (final norm applied, no last-token
+                slice) instead of the pooled ``[batch, hidden]``. This is the flat
+                layout the upstream-conforming vLLM pooling runner feeds to the
+                model's ``Pooler``; the default (False) keeps the legacy pooled
+                output for the plain-vLLM / demo path.
+
         Returns:
-            Embeddings tensor of shape (batch_size, embedding_dim)
+            Embeddings tensor of shape (batch_size, embedding_dim), or -- when
+            ``return_full_hidden_states`` -- the per-token ``[total_tokens, hidden]``.
         """
         batch_size, seq_len = input_ids.shape
         logger.debug(f"Qwen3-Embedding forward: processing batch_size={batch_size}, seq_len={seq_len}")
+
+        if not (return_full_hidden_states or embed_single_trace):
+            # Qwen3-Embedding's modules.json is Transformer -> Pooling(lasttoken)
+            # -> Normalize, so a pooled-but-unnormalized vector is not a result
+            # the model defines. There used to be a third way out of here that
+            # returned exactly that, and every caller reaching it had to know to
+            # normalize afterwards -- tt-media-server did not, and served
+            # non-unit-norm vectors for as long as it used this path.
+            raise ValueError(
+                "forward() produces either the finished embedding or the stage "
+                "before pooling; ask for one by name (encode() or "
+                "encode_token_hidden_states()) rather than calling forward() "
+                "with neither flag set."
+            )
 
         # Ensure batch size and sequence length are within limits
         assert batch_size <= self.max_batch_size, f"Batch size {batch_size} exceeds max {self.max_batch_size}"
@@ -356,19 +461,26 @@ class Qwen3ForEmbedding:
             prompt_lens=[original_seq_len] * batch_size,  # Use original_seq_len, not padded seq_len!
             enable_trace=True,  # Explicitly enable trace for best performance
             return_hidden_states=True,  # Return hidden states before LM head, not logits
+            return_full_hidden_states=return_full_hidden_states,
+            embed_single_trace=embed_single_trace,
         )
 
-        # hidden_states shape: [batch_size, hidden_size]
-        # This is the last token's hidden state after layer norm, before LM head
-        # For Qwen3-Embedding, this is the correct embedding output
-        embeddings = hidden_states
+        if return_full_hidden_states:
+            # prefill_forward_text returned a per-user list of [seq_i, hidden]
+            # tensors (final norm applied, no last-token slice). For the flat
+            # pooling contract every scheduled request's real tokens are
+            # concatenated on the token axis in request order.
+            per_user = [h for h in hidden_states if h is not None]
+            return torch.cat(per_user, dim=0)
 
-        # Ensure output is 2D: [batch_size, embedding_dim]
-        if embeddings.dim() == 1 and batch_size == 1:
+        # prefill_forward_text folded slice + final norm + L2 normalize into the
+        # prefill trace, so hidden_states is already the finished, normalized
+        # embedding [batch, dim]. Return it as-is (no host pooling / normalize).
+        embeddings = hidden_states
+        if embeddings.dim() == 1:
             embeddings = embeddings.unsqueeze(0)
         elif embeddings.dim() > 2:
             embeddings = embeddings.view(batch_size, -1)
-
         return embeddings
 
     def get_embedding_dim(self) -> int:
@@ -391,30 +503,3 @@ class Qwen3ForEmbedding:
         """
         # Pooling is handled in forward() method, so no separate pooler needed
         self.pooler = None
-
-
-def register_model():
-    """
-    Register the Qwen3-Embedding model with vLLM's ModelRegistry.
-
-    This function should be called to make the model available to vLLM.
-    Typically called from vLLM's model registration code.
-
-    Note: The actual registration happens in tt-vllm-plugin's register_models()
-    function, which registers "TTQwen3Model" -> Qwen3ForEmbedding.
-    This function is kept for compatibility but may not be called directly.
-    """
-    try:
-        from vllm.model_executor.model_loader import ModelRegistry
-
-        # Register as TTQwen3Model (TT-prefixed version for TT platform)
-        ModelRegistry.register_model(
-            "TTQwen3Model",
-            Qwen3ForEmbedding,
-        )
-        logger.info("Successfully registered TTQwen3Model (Qwen3-Embedding-8B) with vLLM ModelRegistry")
-    except ImportError:
-        logger.warning(
-            "vLLM ModelRegistry not available. "
-            "Make sure vLLM is installed and the model is registered in vLLM's model loader."
-        )

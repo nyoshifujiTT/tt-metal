@@ -511,7 +511,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         """
         model_id = prepared["model_id"]
         transformed_inputs = self.model[model_id].transform_and_embed_prefill_inputs_device(*device_inputs)
-        return self.model[model_id].ttnn_prefill_forward(
+        tt_out = self.model[model_id].ttnn_prefill_forward(
             x=transformed_inputs[0],
             rot_mats_global=prepared["rot_mats_global"],
             rot_mats_local=prepared["rot_mats_local"],
@@ -521,6 +521,15 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
             kv_cache=prepared["kv_cache"],
             **prepared["forward_kwargs"],
         )
+        # Embedding tail (last-token slice + final norm + L2 normalize), when the
+        # caller asked for it. Applied here so the compile pass and the capture
+        # pass run the identical body: the tail's kernels are built during compile
+        # and then recorded into the trace, so execute_trace replays the whole
+        # embedding -- forward and tail -- in a single device dispatch.
+        embed_terminal = prepared.get("embed_terminal")
+        if embed_terminal is not None:
+            tt_out = embed_terminal(self.model[model_id], tt_out)
+        return tt_out
 
     def _prepare_trace_prefill(
         self,
@@ -533,6 +542,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         batch_size=1,
         user_id=0,
         start_pos=0,
+        embed_terminal=None,
     ):
         """Phase 1 of prefill trace setup: run the compile pass and allocate the persistent trace inputs.
 
@@ -542,6 +552,12 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         out into :meth:`_record_trace_prefill` so every trace variant can be prepared first, and only then
         captured back to back.
         """
+        # ``embed_terminal`` (a callable taking the raw prefill hidden states and
+        # returning the finished per-request embedding) is folded into the traced
+        # body by :meth:`_prefill_trace_forward`. The embedding path is
+        # single-user, so batched capture does not support it.
+        if batch_size > 1:
+            assert embed_terminal is None, "embed_terminal is only supported for single-user prefill"
         prefill_kwargs = {
             "page_table": page_table,
             "chunk_page_table": chunk_page_table,
@@ -560,6 +576,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
             "model_id": model_id,
             "kv_cache": kv_cache,
             "forward_kwargs": forward_kwargs,
+            "embed_terminal": embed_terminal,
             # These matrices will actually be pointing to the whole cos_matrix and sin_matrix that was allocated on device in the RotarySetup class
             "rot_mats_global": host_inputs[1],
             "rot_mats_local": host_inputs[2],
@@ -717,11 +734,15 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         prefill_seq_len=None,
         batch_size=1,
         num_cached_tokens=0,
+        embed_terminal=None,
         **kwargs,
     ):
         global_user_id = kwargs.get("global_user_id", None)
         use_start_pos = "sp1" if num_cached_tokens > 0 else "sp0"
-        trace_key = f"{prefill_seq_len}_{model_id}_{batch_size}_{use_start_pos}"
+        # Distinct trace_key for the single-trace embedding variant: it captures a
+        # different op set (forward + tail) than the plain forward trace.
+        embed_tag = "_embed" if embed_terminal is not None else ""
+        trace_key = f"{prefill_seq_len}_{model_id}_{batch_size}_{use_start_pos}{embed_tag}"
 
         use_prefix_caching = num_cached_tokens > 0
         chunk_start_idx = num_cached_tokens
@@ -758,6 +779,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                 batch_size=batch_size,
                 user_id=user_id,
                 start_pos=chunk_start_idx,
+                embed_terminal=embed_terminal,
             )
 
             trace_id, tt_out_trace, *device_inputs = self._record_trace_prefill(prepared)
@@ -853,6 +875,8 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         sampling_params: SamplingParams | None = None,
         start_pos: list[int] = None,  # Cached prefixes lengths
         return_hidden_states=False,
+        return_full_hidden_states=False,
+        embed_single_trace=False,
         warmup_prefill=True,
         **kwargs,
     ):
@@ -920,6 +944,13 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         max_batch_size_per_model = self.model_args[0].max_batch_size
 
         # Output shape depends on whether we're returning logits or hidden states
+        if return_full_hidden_states:
+            # Flat/per-token pooling contract: keep every token's hidden state.
+            # The per-user hidden tensors have different seq lengths, so they can't
+            # share one preallocated [batch, hidden] buffer -- collect them in a
+            # list indexed by user slot instead.
+            assert return_hidden_states, "return_full_hidden_states requires return_hidden_states"
+            output_full_hidden = [None] * batch_size
         if return_hidden_states:
             # For hidden states, output shape is [batch_size, hidden_size]
             # Note: dim is the hidden dimension size
@@ -1168,6 +1199,18 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                 )
 
             if enable_trace_current_prompt:
+                embed_terminal = None
+                if embed_single_trace and not use_batched_prefill:
+                    # Fold the embedding tail (last-token slice + final norm + L2
+                    # normalize) into the prefill trace so execute_trace replays the
+                    # whole embedding in one device dispatch. last_token_idx is fixed
+                    # for this (prefill_seq_len) trace, so it is baked into the slice.
+                    _lti = last_token_idx
+
+                    def embed_terminal(model, hidden):
+                        normed = model.process_hidden_states_after_prefill_trace(hidden, _lti)
+                        return model.l2_normalize_hidden(normed)
+
                 logits = self._easy_trace_prefill(
                     prefill_ids,
                     page_table=page_table_user,
@@ -1179,6 +1222,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     prefill_seq_len=prefill_seq_len,
                     batch_size=padded_batch if use_batched_prefill else 1,
                     num_cached_tokens=0 if use_batched_prefill else num_cached_tokens,
+                    embed_terminal=embed_terminal,
                     **local_kwargs,
                 )
             else:
@@ -1191,6 +1235,8 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     model_id=model_id,
                     num_cached_tokens=0 if use_batched_prefill else num_cached_tokens,
                     batch_size=padded_batch if use_batched_prefill else 1,
+                    return_hidden_states=return_hidden_states,
+                    return_full_hidden_states=return_full_hidden_states,
                     **local_kwargs,
                 )
             if use_batched_prefill:
@@ -1282,6 +1328,15 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     )
                 else:
                     if return_hidden_states:
+                        if return_full_hidden_states:
+                            self._extract_batched_prefill_full_hidden(
+                                logits,
+                                model_id=model_id,
+                                empty_slots=empty_slots,
+                                prompt_lens=prompt_lens,
+                                output_full_hidden=output_full_hidden,
+                            )
+                            break
                         # Embedding models: trace returns hidden states; extract last-token hidden per slot
                         slot_hidden_list = []
                         for local_idx, slot in enumerate(empty_slots):
@@ -1289,6 +1344,13 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                             slot_hidden = self.model[model_id].process_hidden_states_after_prefill_trace(
                                 user_hidden, last_token_idx[slot]
                             )
+                            if embed_single_trace:
+                                # The batched capture cannot host the embedding tail
+                                # (embed_terminal is single-user), so the L2 normalize
+                                # that the single-user trace folds in is applied here
+                                # instead -- still on device, right after the slice and
+                                # final norm, before anything reaches the host.
+                                slot_hidden = self.model[model_id].l2_normalize_hidden(slot_hidden)
                             slot_hidden_list.append((local_idx, slot_hidden, last_token_idx[slot]))
                         ttnn.synchronize_device(self.model[model_id].mesh_device)
                         dim = self.model[model_id].args.dim
@@ -1320,15 +1382,36 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     last_token_idx_for_trace = last_token_idx - num_cached_tokens
 
                 if return_hidden_states:
-                    hidden_states = self.model[model_id].process_hidden_states_after_prefill_trace(
-                        logits, last_token_idx_for_trace
-                    )
+                    if embed_single_trace:
+                        # The trace already applied slice + final norm + L2 normalize
+                        # in-device; ``logits`` is the finished, normalized embedding
+                        # block. Do NOT re-run the tail -- just carry it to host.
+                        hidden_states = logits
+                        prefill_results.append(
+                            {
+                                "idx": idx,
+                                "model_id": model_id,
+                                "last_token_idx": last_token_idx,
+                                "hidden_states": hidden_states.cpu(blocking=False),
+                                "embed_single_trace": True,
+                                "seq_len": seq_len,
+                            }
+                        )
+                        continue
+                    if return_full_hidden_states:
+                        hidden_states = self.model[model_id].process_full_hidden_states_after_prefill_trace(logits)
+                    else:
+                        hidden_states = self.model[model_id].process_hidden_states_after_prefill_trace(
+                            logits, last_token_idx_for_trace
+                        )
                     prefill_results.append(
                         {
                             "idx": idx,
                             "model_id": model_id,
                             "last_token_idx": last_token_idx,
                             "hidden_states": hidden_states.cpu(blocking=False),
+                            "full_hidden": return_full_hidden_states,
+                            "seq_len": seq_len,
                         }
                     )
                     continue
@@ -1336,7 +1419,39 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     logits = self.model[model_id].process_logits_after_prefill_trace(logits, last_token_idx_for_trace)
             else:
                 if return_hidden_states:
-                    raise NotImplementedError("return_hidden_states=True requires enable_trace=True")
+                    # Non-trace prefill path for embedding models.
+                    #
+                    # prefill_forward_single_user_text was called with
+                    # return_hidden_states=True, so `logits` here is the full
+                    # pre-norm hidden-states tensor (get_last_token=-1), exactly
+                    # what the trace-capture path produces. Reuse the very same
+                    # trace post-processing (slice last token + final norm, stop
+                    # before the LM head) so the numerics are bit-identical to the
+                    # trace path and no embedding-specific branch leaks into the
+                    # generic generative forward(). This makes embeddings work at
+                    # any (also non-trace-supported) sequence length; trace is a
+                    # host-dispatch perf optimization, not a correctness gate.
+                    last_token_idx_for_trace = last_token_idx
+                    if not use_batched_prefill and num_cached_tokens > 0:
+                        last_token_idx_for_trace = last_token_idx - num_cached_tokens
+                    if return_full_hidden_states:
+                        hidden_states = self.model[model_id].process_full_hidden_states_after_prefill_trace(logits)
+                    else:
+                        hidden_states = self.model[model_id].process_hidden_states_after_prefill_trace(
+                            logits, last_token_idx_for_trace
+                        )
+                    prefill_results.append(
+                        {
+                            "idx": idx,
+                            "model_id": model_id,
+                            "last_token_idx": last_token_idx,
+                            "hidden_states": hidden_states.cpu(blocking=False),
+                            "full_hidden": return_full_hidden_states,
+                            "seq_len": seq_len,
+                        }
+                    )
+                    # continue with the next user
+                    continue
 
             self._append_prefill_result(
                 prefill_results,
@@ -1357,9 +1472,16 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                 ttnn.synchronize_device(self.model[model_id].mesh_device)
 
                 if "hidden_states" in res:
-                    output_tensor[idx] = self.model[model_id].process_output_prefill_hidden_states(
-                        res["hidden_states"], last_token_idx=(last_token_idx_relative % 32)
-                    )
+                    if res.get("full_hidden"):
+                        # Flat/per-token pooling contract: keep the whole [seq, dim]
+                        # hidden for this user (the vLLM Pooler selects + normalizes).
+                        output_full_hidden[idx] = self.model[model_id].process_output_prefill_full_hidden_states(
+                            res["hidden_states"], seq_len=res["seq_len"]
+                        )
+                    else:
+                        output_tensor[idx] = self.model[model_id].process_output_prefill_hidden_states(
+                            res["hidden_states"], last_token_idx=(last_token_idx_relative % 32)
+                        )
                 elif res["sampling"]:
                     tt_tokens = res["logits"][0]
                     tt_log_probs = res["logits"][1]
@@ -1384,10 +1506,41 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
 
         logger.info(f"Finished prefill for all users up to {batch_seq_len} tokens, Starting decode...")
 
+        if return_full_hidden_states:
+            return output_full_hidden
         if sampling_executed:
             return output_tokens, reformat_logprobs(output_log_probs, batch_size)
         else:
             return output_tensor
+
+    def _extract_batched_prefill_full_hidden(
+        self, logits, *, model_id, empty_slots, prompt_lens, output_full_hidden
+    ):
+        """Fill ``output_full_hidden`` from a batched-prefill trace output.
+
+        Batched prefill runs every scheduled request in one pass, so the trace
+        output carries all slots at once and has to be split per slot. This is
+        the flat/per-token pooling counterpart of the last-token extraction
+        beside it: the whole sequence is final-normed with no last-token slice,
+        because on this path the vLLM Pooler -- not the generator -- selects and
+        normalizes the pooled vector.
+
+        Without it the batched path left ``output_full_hidden`` all-None while
+        reporting success, and the caller's concatenation of the per-user
+        tensors died with "torch.cat(): expected a non-empty list of Tensors"
+        (observed serving Qwen3-Embedding-0.6B on p150, where a two-input
+        request takes the batched path).
+        """
+        slot_full_hidden = []
+        for local_idx, slot in enumerate(empty_slots):
+            user_hidden = logits[slot : slot + 1, :, :, :]
+            full_hidden = self.model[model_id].process_full_hidden_states_after_prefill_trace(user_hidden)
+            slot_full_hidden.append((local_idx, full_hidden.cpu(blocking=False)))
+        ttnn.synchronize_device(self.model[model_id].mesh_device)
+        for local_idx, full_hidden_host in slot_full_hidden:
+            output_full_hidden[local_idx] = self.model[model_id].process_output_prefill_full_hidden_states(
+                full_hidden_host, seq_len=int(prompt_lens[local_idx])
+            )
 
     def _paged_prefill_block_size(self, kv_cache):
         """Block size for chunked-prefill page-table padding/slicing.
@@ -1438,11 +1591,30 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         model_id=-1,
         num_cached_tokens: int = 0,
         batch_size=1,
+        return_hidden_states=False,
+        return_full_hidden_states=False,
         **kwargs,
     ):
         seq_len = tokens.shape[-1]
         use_chunked_prefill = seq_len > self.model_args[model_id].max_prefill_chunk_size
         use_prefix_caching = num_cached_tokens > 0
+        if return_hidden_states and (use_chunked_prefill or use_prefix_caching):
+            # Embedding (last-token hidden-states) extraction is only correct for a
+            # single, non-chunked prefill. On the chunked / prefix-caching path the
+            # last-token hidden state is produced per chunk with a self-generated
+            # page table, which does NOT match the single-shot reference and yields
+            # a silently wrong embedding (observed cos ~0.85 vs the reference on the
+            # 4096x2 chunked path). Fail loud instead of returning a corrupt vector.
+            # To serve longer inputs as a single chunk, raise max_prefill_chunk_size
+            # (e.g. the MAX_PREFILL_CHUNK_SIZES_DIV1024 catalog entry, or the
+            # MAX_PREFILL_CHUNK_SIZE env) so seq_len <= max_prefill_chunk_size.
+            raise NotImplementedError(
+                "return_hidden_states=True (embedding) is not supported on the chunked / "
+                "prefix-caching prefill path: seq_len="
+                f"{seq_len} > max_prefill_chunk_size={self.model_args[model_id].max_prefill_chunk_size} "
+                f"(or num_cached_tokens={num_cached_tokens} > 0). Increase max_prefill_chunk_size so the "
+                "request is prefilled as a single chunk."
+            )
         if use_chunked_prefill or use_prefix_caching:
             """
             Chunked prefill requires paged attention. There are some strange constraints which we must meet:
@@ -1569,7 +1741,12 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                 rot_mats_local=rot_mats_local_prefill,
                 user_id=user_id,
                 page_table=page_table_tt,
-                get_last_token=-1 if batch_size > 1 else (last_token_idx // 32) * 32,
+                # For embeddings we need the full pre-norm hidden states (exactly what
+                # the trace-capture path returns); get_last_token=-1 skips the
+                # in-forward slice/norm/lm_head so the caller can reuse
+                # process_hidden_states_after_prefill_trace for bit-identical output.
+                # Batched prefill (batch_size > 1) also needs the full tensor.
+                get_last_token=-1 if (return_hidden_states or batch_size > 1) else (last_token_idx // 32) * 32,
                 kv_cache=kv_cache,
                 batch_size=batch_size,
             )

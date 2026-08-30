@@ -367,6 +367,41 @@ class Transformer(LightweightModule):
         )
         return hidden_states
 
+    def process_full_hidden_states_after_prefill_trace(self, hidden_states):
+        """Final-norm every prefill token and return the full per-token hidden.
+
+        Same as :meth:`process_hidden_states_after_prefill_trace` but WITHOUT the
+        last-token slice: the final layer norm (before the LM head) is applied to
+        the whole sequence, so the result is the per-token hidden-states tensor
+        ``[1, 1, seq, hidden]`` rather than a single pooled row.
+
+        Pooling models served through the upstream-conforming vLLM pooling runner
+        need this flat per-token layout: the runner hands the whole tensor to the
+        model's ``Pooler`` (LAST / CLS / MEAN), which selects and normalizes the
+        pooled vector itself. Extracting the last token here would pre-pool and
+        break that contract. Additive helper; the existing last-token method is
+        left untouched so the generative and legacy embedding paths are unchanged.
+        """
+        hidden_states = self.norm(hidden_states, mode="prefill")
+        hidden_states = ttnn.to_layout(
+            hidden_states, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG
+        )
+        return hidden_states
+
+    def l2_normalize_hidden(self, hidden_states, eps: float = 1e-12):
+        """L2-normalize the last (hidden) dimension on device.
+
+        ``F.normalize(x, p=2, dim=-1)`` computed with ttnn ops so the whole
+        embedding tail (last-token slice -> final norm -> L2 normalize) can live
+        inside a single prefill trace: ``x * rsqrt(sum(x^2, dim=-1) + eps)``.
+        The result is byte-comparable to the host ``F.normalize`` the demo/pooler
+        applied before, but stays on device (no host round-trip).
+        """
+        squared = ttnn.square(hidden_states)
+        sum_sq = ttnn.sum(squared, dim=-1, keepdim=True)
+        inv_norm = ttnn.rsqrt(ttnn.add(sum_sq, eps))
+        return ttnn.multiply(hidden_states, inv_norm)
+
     def prepare_prefill_inputs_trace(
         self,
         tokens,
@@ -673,6 +708,23 @@ class Transformer(LightweightModule):
         else:
             # Hidden states are sharded, concatenation is correct
             return concatenated[0, 0, last_token_idx, :]
+
+    def process_output_prefill_full_hidden_states(self, tt_out, seq_len):
+        """Host-compose the full per-token hidden into ``[seq_len, dim]`` torch.
+
+        Counterpart of :meth:`process_output_prefill_hidden_states` for the
+        flat/per-token pooling contract: instead of picking one last-token row it
+        keeps every real token's hidden (dropping only right-padding beyond
+        ``seq_len``). Replicated-across-devices output is de-duplicated to the
+        first device's ``dim`` columns, exactly as the last-token variant does.
+        """
+        assert tt_out.storage_type() == ttnn.StorageType.HOST, "Expected host tensor"
+        concatenated = self.concat_host_output(tt_out)
+        if concatenated.shape[-1] > self.args.dim:
+            hidden = concatenated[0, 0, :, : self.args.dim]
+        else:
+            hidden = concatenated[0, 0, :, :]
+        return hidden[:seq_len, :]
 
     def process_output_decode(self, tt_out, B, S=1, is_tokens=False, is_log_probs=False):
         """

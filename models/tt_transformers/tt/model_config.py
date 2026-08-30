@@ -2463,7 +2463,18 @@ class ModelArgs:
                 "Phi-3-mini-128k-instruct": {"N150": 32, "N300": 64, "T3K": 128, "TG": 128, "P150x4": 128},
                 "QwQ-32B": {"N150": None, "N300": None, "T3K": 64, "TG": 128, "P150x4": 128},
                 "Qwen3-32B": {"N150": None, "N300": None, "T3K": 64, "TG": 128, "P150x4": 128},
-                "Qwen3-Embedding-8B": {"N150": 4, "N300": 64, "T3K": 128, "TG": 128, "P150x4": 128},
+                # Single-card P150 chunk size = 8 (=8192) so the whole 8192 context
+                # is prefilled as a SINGLE chunk. This is a CORRECTNESS requirement
+                # for embeddings, not a perf knob: on the chunked path (e.g. the
+                # default fallback of 4 => 4096, giving 4096x2) the per-chunk
+                # last-token hidden state does not match the single-shot reference
+                # and silently yields a wrong embedding (cos ~0.85). The companion
+                # generator change hard-fails embeddings on the chunked path, so a
+                # single P150 must prefill 8192 in one chunk. Verified on p150x1 for
+                # both sizes: 8192 single-chunk (non-trace) fits L1, no OOM, cos=1.0
+                # vs the reference (0.6B and 8B).
+                "Qwen3-Embedding-8B": {"N150": 4, "N300": 64, "T3K": 128, "TG": 128, "P150": 8, "P150x4": 128},
+                "Qwen3-Embedding-0.6B": {"P150": 8},
                 "Phi-4": {"N150": 4, "N300": 64, "T3K": 128, "TG": 128, "P150x4": 128},
                 "Mistral-Small-3.1-24B": {"N150": 8, "N300": 128, "T3K": 128, "TG": 128, "P150x4": 128},
                 "gemma-2-2b": {
@@ -2543,7 +2554,28 @@ class ModelArgs:
                 "N300": [128, 1024, 2048, 4096, 8192],
                 "T3K": [128, 1024, 2048, 4096, 8192],
                 "TG": [128, 1024, 2048, 4096, 8192],
+                # Single-card P150: trace up to 4096 only, deliberately WITHOUT
+                # 8192. The chunk-size entry makes 8192 a single (non-chunked)
+                # prefill, so capped_warmup_seq_len is 8192 and listing 8192 here
+                # would make warmup try to CAPTURE an 8192 trace. On a single p150
+                # that is not stable (measured on p150x1: the 8B model crashes
+                # warmup with a device "Bus error", and even 0.6B does not reliably
+                # survive the 8192 traced path). 8192 is therefore left as a
+                # single-chunk NON-trace prefill for BOTH sizes (correct, only
+                # slightly slower on the longest bucket; trace is a performance
+                # optimization, not a correctness requirement).
+                "P150": [128, 1024, 2048, 4096],
                 "P150x4": [128, 1024, 2048, 4096, 8192],
+            },
+            "Qwen3-Embedding-0.6B": {
+                # Single-card P150: trace up to 4096 only (same as 8B above). 8192
+                # is a single-chunk non-trace prefill; capturing an 8192 trace is
+                # not stable on a single p150 (see the 8B note above). Trace is a
+                # performance optimization only, so 8192 non-trace is still correct
+                # (cos=1.0 vs the reference).
+                # TODO(perf): if an 8192 prefill trace is ever made to fit/stabilize
+                # on a single p150, add 8192 here to trace the longest bucket too.
+                "P150": [128, 1024, 2048, 4096],
             },
             "Llama-3.2-3B": {
                 "N150": [],
