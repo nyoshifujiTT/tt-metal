@@ -34,6 +34,7 @@ def _load_adapter_with_stub_base(monkeypatch):
         def __init__(self, *args, **kwargs):
             self.forward_kwargs = None
             self.pooler = None  # the real base does this too
+            self.model = None  # the real base builds it on the first forward
 
         def forward(self, input_ids, **kwargs):
             self.forward_kwargs = kwargs
@@ -145,38 +146,29 @@ def test_base_assigning_pooler_none_does_not_break_the_property(monkeypatch):
     assert type(model).pooler.fget is not None
     assert model._pooler is None
 
-def test_pooler_is_built_with_the_vllm_embedding_factory(monkeypatch):
-    """The pooler must come from vLLM's own embedding-pooler constructor.
+def test_pooler_pools_on_device_from_the_resolved_config(monkeypatch):
+    """The pooler must be the device one, wired to the resolved PoolerConfig.
 
-    Not a hand-rolled Pooler: ``DispatchPooler.for_embedding`` is what vLLM's own
-    embedding adapters call (vllm/model_executor/models/adapters.py), so using it
-    keeps pooling type, activation and normalization identical to every other
-    backend. Patched here so the assertion holds without instantiating a real
-    Pooler (whose constructor signature is vLLM-version specific).
+    vLLM's own ``DispatchPooler`` reduces in torch on the host, which would move
+    every token's hidden state off the device to keep one row per request. The
+    device pooler does the same reduction with ttnn ops, taking its directives
+    from the same ``PoolerConfig`` so ``normalize`` still follows the served
+    configuration.
     """
     cls = _load_adapter_with_stub_base(monkeypatch)
     model = cls()
 
     sentinel_config = object()
-    sentinel_pooler = object()
     monkeypatch.setattr(model, "_resolve_pooler_config", lambda: sentinel_config)
 
-    seen = {}
+    from models.demos.qwen3_embedding.tt.pooler import Qwen3EmbeddingDevicePooler
 
-    class _StubDispatchPooler:
-        @staticmethod
-        def for_embedding(pooler_config):
-            seen["config"] = pooler_config
-            return sentinel_pooler
-
-    pooler_mod = types.ModuleType("vllm.model_executor.layers.pooler")
-    pooler_mod.DispatchPooler = _StubDispatchPooler
-    monkeypatch.setitem(sys.modules, pooler_mod.__name__, pooler_mod)
-
-    assert model.pooler is sentinel_pooler
-    assert seen["config"] is sentinel_config
+    pooler = model.pooler
+    assert isinstance(pooler, Qwen3EmbeddingDevicePooler)
+    assert pooler._pooler_config is sentinel_config
+    assert pooler.get_supported_tasks() == {"embed"}
     # Built once and cached.
-    assert model.pooler is sentinel_pooler
+    assert model.pooler is pooler
 
 
 def test_pooler_is_built_during_construction_when_a_vllm_config_is_present(monkeypatch):
@@ -184,9 +176,9 @@ def test_pooler_is_built_during_construction_when_a_vllm_config_is_present(monke
 
     That is the only window in which vLLM's current-config context is set: the
     TT loader wraps ``initialize_vllm_model`` in ``set_current_vllm_config``,
-    and the pooling methods underneath ``DispatchPooler`` resolve the config
-    through ``get_current_vllm_config()`` in their ``__init__``. Building the
-    pooler lazily on first access instead moved construction into
+    and a Pooler's components may resolve the config through
+    ``get_current_vllm_config()`` in their ``__init__``. Building the pooler
+    lazily on first access instead moved construction into
     ``get_supported_tasks``, outside that context, and serving
     Qwen3-Embedding-0.6B on p150 failed at startup with "Current vLLM config is
     not set".
@@ -194,18 +186,6 @@ def test_pooler_is_built_during_construction_when_a_vllm_config_is_present(monke
     cls = _load_adapter_with_stub_base(monkeypatch)
 
     sentinel_config = object()
-    sentinel_pooler = object()
-    seen = {}
-
-    class _StubDispatchPooler:
-        @staticmethod
-        def for_embedding(pooler_config):
-            seen["config"] = pooler_config
-            return sentinel_pooler
-
-    pooler_mod = types.ModuleType("vllm.model_executor.layers.pooler")
-    pooler_mod.DispatchPooler = _StubDispatchPooler
-    monkeypatch.setitem(sys.modules, pooler_mod.__name__, pooler_mod)
 
     class _WithVllmConfig(cls):
         def __init__(self):
@@ -218,8 +198,10 @@ def test_pooler_is_built_during_construction_when_a_vllm_config_is_present(monke
 
     model = _WithVllmConfig()
 
-    assert seen["config"] is sentinel_config, "the pooler must be built in __init__"
-    assert model._pooler is sentinel_pooler
+    from models.demos.qwen3_embedding.tt.pooler import Qwen3EmbeddingDevicePooler
+
+    assert isinstance(model._pooler, Qwen3EmbeddingDevicePooler), "the pooler must be built in __init__"
+    assert model._pooler._pooler_config is sentinel_config
 
 
 def test_construction_without_a_vllm_config_defers_instead_of_failing(monkeypatch):

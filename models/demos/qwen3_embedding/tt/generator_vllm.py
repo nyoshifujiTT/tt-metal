@@ -75,21 +75,25 @@ class Qwen3EmbeddingForTTvLLM(Qwen3ForEmbedding):
         )
 
     def _build_pooler(self):
-        from vllm.model_executor.layers.pooler import DispatchPooler
+        from models.demos.qwen3_embedding.tt.pooler import Qwen3EmbeddingDevicePooler
 
-        return DispatchPooler.for_embedding(self._resolve_pooler_config())
+        return Qwen3EmbeddingDevicePooler(self.model, self._resolve_pooler_config())
 
     @property
     def pooler(self):
-        """The vLLM Pooler that turns flat hidden states into embeddings.
+        """The Pooler that turns per-token hidden states into embeddings.
 
-        ``DispatchPooler.for_embedding`` builds the standard embedding pooler for
-        the resolved ``PoolerConfig`` -- the configured pooling type plus the
-        activation/normalization the task implies. It is the same constructor
-        vLLM's own embedding adapters use (see
-        ``vllm/model_executor/models/adapters.py``), so normalization stays where
-        vLLM puts it on every other backend instead of being re-implemented in
-        the runner or in this adapter.
+        vLLM's own ``DispatchPooler`` would do this in torch on the host, which
+        means moving every token's hidden state off the device and then keeping
+        one row per request. :class:`Qwen3EmbeddingDevicePooler` performs the
+        same reduction with ttnn ops -- and with the model's own last-token slice
+        and L2 normalize, the ones the standalone demo runs inside its prefill
+        trace -- so only the finished vector crosses to the host and the served
+        numbers are the device path's own.
+
+        It still takes its directives from the ``PoolerConfig`` vLLM resolved,
+        so ``normalize`` follows the served configuration exactly as it does on
+        any other backend.
         """
         if self._pooler is None:
             # Only reachable when the instance was built without a vLLM config;
