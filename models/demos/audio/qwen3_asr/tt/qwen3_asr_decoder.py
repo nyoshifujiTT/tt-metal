@@ -146,7 +146,10 @@ class Qwen3ASRDecoder(Transformer):
         keeps the self-allocating single-shot behaviour. A serving stack that runs
         paged KV must pass them, because paged and non-paged decode dispatch to
         DIFFERENT SDPA kernels (paged_scaled_dot_product_attention_decode vs
-        scaled_dot_product_attention_decode) and do not produce the same output."""
+        scaled_dot_product_attention_decode) and do not produce the same output.
+
+        ``kv_cache`` is the per-submesh structure allocate_vllm_kv_cache returns
+        (``list[submesh][layer][k, v]``); this single-replica path uses submesh 0."""
         S = inputs_embeds.shape[-2]
         last = S - 1
         # Always pad prefill to a multiple of 512 (the Blackhole prefill_len_cutoff), min 512.
@@ -169,9 +172,14 @@ class Qwen3ASRDecoder(Transformer):
         # the PADDED length covers, which is what Generator._get_prefill_user_page_table
         # does; handing it every block of the user's range makes the kernel attend
         # over KV pages beyond the prompt.
+        # prefill_forward_single_user_text hands kv_cache straight to the model, so
+        # it wants THIS replica's layer list, while decode_forward indexes
+        # kv_cache[model_id]. Unwrap submesh 0 here (single replica) rather than at
+        # the caller, so both paths can be given the same structure.
+        model_kv_cache = kv_cache[0] if kv_cache is not None else None
         prefill_page_table = page_table
-        if page_table is not None and kv_cache is not None:
-            num_blocks = num_blocks_in_seq(S_pad, get_block_size(kv_cache))
+        if page_table is not None and model_kv_cache is not None:
+            num_blocks = num_blocks_in_seq(S_pad, get_block_size(model_kv_cache))
             prefill_page_table = page_table[0:1]
             if prefill_page_table.shape[1] < num_blocks:
                 padding = torch.ones(1, num_blocks - prefill_page_table.shape[1], dtype=torch.int32) * -1
@@ -182,7 +190,7 @@ class Qwen3ASRDecoder(Transformer):
             page_table=prefill_page_table,
             user_id=0,
             last_token_idx=last,
-            kv_cache=kv_cache,
+            kv_cache=model_kv_cache,
             batch_size=1,
         )
         tt_logits = ttnn.from_device(tt_logits)
