@@ -74,13 +74,17 @@ def build_paged_kv(model, max_seq_len):
         PAGE_BLOCK_SIZE,
         args.head_dim,
     )
+    # allocate_vllm_kv_cache returns list[submesh][layer][k, v]. Generator indexes
+    # it as kv_cache[model_id], so keep the submesh dimension; stripping it here
+    # makes the ops read a layer's [k, v] pair as if it were the submesh list and
+    # then treat n_kv_heads as the block count ("max_num_blocks=8").
     kv_cache = allocate_vllm_kv_cache(
         shape,
         dtype=torch.bfloat16,
         num_layers=args.n_layers,
         dp_model=[model],
         tt_cache_path=args.model_cache_path,
-    )[0]
+    )
     # One live user in slot 0, but the decode program is built for
     # args.max_batch_size, so the page table needs that many rows. Give every
     # slot its own disjoint block range so idle slots can never alias slot 0.

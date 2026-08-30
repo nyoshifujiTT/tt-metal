@@ -48,7 +48,7 @@ def test_paged_prefill_trims_the_page_table():
     # Generator._get_prefill_user_page_table trims to the blocks the PADDED
     # length covers; handing over the whole range attends past the prompt.
     src = _read(DECODER)
-    assert "num_blocks_in_seq(S_pad, get_block_size(kv_cache))" in src
+    assert "num_blocks_in_seq(S_pad, get_block_size(model_kv_cache))" in src
     assert "prefill_page_table[:, :num_blocks]" in src
     assert "from models.tt_transformers.tt.common import get_block_size, num_blocks_in_seq" in src
 
@@ -89,3 +89,22 @@ def test_idle_decode_slots_are_parked_at_zero():
     # Idle slots must not index a live KV page.
     src = _read(DECODER)
     assert "positions[0] = pos" in src
+
+
+def test_kv_cache_submesh_dimension_is_handled_in_one_place():
+    # allocate_vllm_kv_cache returns list[submesh][layer][k, v]. The two shared
+    # entry points disagree on what they want: prefill_forward_single_user_text
+    # passes kv_cache straight to the model (so it needs THIS replica's layer
+    # list) while decode_forward indexes kv_cache[model_id]. Unwrapping at the
+    # caller made the paged ops read a layer's [k, v] pair as the submesh list and
+    # report n_kv_heads as the block count ("max_num_blocks=8").
+    src = _read(DECODER)
+    assert "model_kv_cache = kv_cache[0] if kv_cache is not None else None" in src
+    assert "kv_cache=model_kv_cache," in src, "prefill takes the unwrapped list"
+    assert "get_block_size(model_kv_cache)" in src
+
+
+def test_eval_keeps_the_submesh_dimension():
+    eval_src = _read(os.path.join(HERE, "..", "eval", "corpus_eval.py"))
+    body = eval_src[eval_src.index("def build_paged_kv") : eval_src.index("def feat_len")]
+    assert "tt_cache_path=args.model_cache_path,\n    )\n" in body, "must not strip [0] at the caller"
