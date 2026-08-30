@@ -36,14 +36,18 @@ def _load_adapter_with_stub_base(monkeypatch):
             self.pooler = None  # the real base does this too
             self.model = None  # the real base builds it on the first forward
 
-        def forward(self, input_ids, **kwargs):
+        def forward(self, input_ids, attention_mask=None, **kwargs):
+            kwargs["attention_mask"] = attention_mask
             self.forward_kwargs = kwargs
             # Stand in for the flat per-token hidden states.
             return torch.zeros(int(input_ids.numel()), 8)
 
+        # Defined the way the real base defines it -- in terms of forward -- so
+        # that an override reaching for it instead of for the base's forward
+        # recurses here too, rather than only on the device.
         def encode_token_hidden_states(self, input_ids, attention_mask=None, **kwargs):
             self.token_hidden_kwargs = kwargs
-            return torch.zeros(int(input_ids.numel()), 8)
+            return self.forward(input_ids, attention_mask=attention_mask, return_full_hidden_states=True, **kwargs)
 
     base_mod.Qwen3ForEmbedding = _StubBase
     monkeypatch.setitem(sys.modules, base_mod.__name__, base_mod)
@@ -62,6 +66,7 @@ def test_forward_requests_the_flat_per_token_layout(monkeypatch):
     # The pooling runner indexes the flat token axis; a pooled return (1 row
     # here) would be misread as if that axis were the tokens.
     assert out.shape[0] == 4
+    assert model.forward_kwargs["return_full_hidden_states"] is True
 
 
 def test_forward_accepts_positions_for_the_vllm_signature_check(monkeypatch):
@@ -71,7 +76,7 @@ def test_forward_accepts_positions_for_the_vllm_signature_check(monkeypatch):
     # vLLM's _check_vllm_model_forward requires input_ids + positions kwargs.
     model.forward(input_ids=torch.zeros(1, 2, dtype=torch.long), positions=torch.zeros(2))
     # positions is accepted and dropped: the base never uses it.
-    assert model.token_hidden_kwargs == {}
+    assert model.forward_kwargs["return_full_hidden_states"] is True
 
 
 def test_forward_accepts_the_runners_explicit_request_for_full_hidden(monkeypatch):
@@ -86,7 +91,23 @@ def test_forward_accepts_the_runners_explicit_request_for_full_hidden(monkeypatc
     )
 
     assert out.shape[0] == 4
-    assert model.token_hidden_kwargs == {}
+
+
+def test_forward_does_not_call_back_into_itself(monkeypatch):
+    # encode_token_hidden_states is defined in terms of forward, and forward is
+    # overridden here. Reaching for the named accessor rather than the base's
+    # forward therefore recurses until the stack ends -- which on the device
+    # took down the whole engine on the first served request, with the API only
+    # reporting that the engine had died.
+    cls = _load_adapter_with_stub_base(monkeypatch)
+    model = cls()
+
+    model.forward(input_ids=torch.zeros(1, 4, dtype=torch.long))
+
+    # The base's forward ran; the named accessor -- which would have come back
+    # through this override -- did not.
+    assert model.forward_kwargs is not None
+    assert not hasattr(model, "token_hidden_kwargs")
 
 
 def test_forward_refuses_to_return_an_already_pooled_tensor(monkeypatch):

@@ -38,9 +38,13 @@ def _adapter_with_stub_base(monkeypatch):
             self.init_kwargs = kwargs
             self.pooler = None  # the real base does this too
 
-        def forward(self, input_ids, **kwargs):
+        def forward(self, input_ids, attention_mask=None, **kwargs):
+            kwargs["attention_mask"] = attention_mask
             self.forward_kwargs = kwargs
-            # Pooled [batch, hidden], which is what MEDIA expects.
+            # The base returns whichever stage was asked for: the flat
+            # per-token layout, or the finished pooled one.
+            if kwargs.get("return_full_hidden_states"):
+                return torch.zeros(int(input_ids.numel()), 8)
             return torch.zeros(int(input_ids.shape[0]), 8)
 
         def encode(self, input_ids, attention_mask=None):
@@ -48,10 +52,11 @@ def _adapter_with_stub_base(monkeypatch):
             return torch.zeros(int(input_ids.shape[0]), 8)
 
         def encode_token_hidden_states(self, input_ids, attention_mask=None, **kwargs):
+            # Defined the way the real base defines it -- in terms of forward --
+            # so an override that reaches for it recurses here too.
             self.token_hidden_kwargs = kwargs
             self.token_hidden_mask = attention_mask
-            # Flat [total_tokens, hidden].
-            return torch.zeros(int(input_ids.numel()), 8)
+            return self.forward(input_ids, attention_mask=attention_mask, return_full_hidden_states=True, **kwargs)
 
     base_mod.Qwen3ForEmbedding = _StubBase
     monkeypatch.setitem(sys.modules, base_mod.__name__, base_mod)
@@ -92,15 +97,17 @@ def test_adapter_forward_returns_the_pre_pooling_layout(monkeypatch):
     assert out.shape[0] == 64
 
 
-def test_adapter_names_the_stage_instead_of_flagging_forward(monkeypatch):
+def test_adapter_asks_for_the_layout_per_call_without_recursing(monkeypatch):
     cls = _adapter_with_stub_base(monkeypatch)
     model = cls(device=types.SimpleNamespace(), model_name="Qwen/Qwen3-Embedding-8B")
 
     model.forward(torch.zeros(2, 8, dtype=torch.long), attention_mask=torch.ones(2, 8))
 
-    # Setting return_full_hidden_states on the shared forward would make the
-    # flat layout the behaviour of every call reaching this class, which is how
-    # the media runner ended up misreading its result.
-    assert model.forward_kwargs is None, "the adapter must not drive the base's forward flags"
-    assert model.token_hidden_kwargs == {}
-    assert model.token_hidden_mask is not None, "the attention mask must reach the model"
+    # The adapter asks the base for the pre-pooling layout explicitly, on that
+    # call only -- rather than defaulting the flag on the shared entry point,
+    # which is how the media runner ended up misreading its result.
+    assert model.forward_kwargs["return_full_hidden_states"] is True
+    assert model.forward_kwargs["attention_mask"] is not None, "the attention mask must reach the model"
+    # And it does not route through the named accessor, which is defined in
+    # terms of forward and would come straight back into the override.
+    assert not hasattr(model, "token_hidden_kwargs")

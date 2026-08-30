@@ -163,6 +163,11 @@ class Qwen3EmbeddingForTTvLLM(Qwen3ForEmbedding):
         ``return_full_hidden_states=True``. Accept and drop it: agreeing is not
         a reason to route the call back through the flag, and refusing would
         make the two ways of saying the same thing disagree.
+
+        The base implementation is called directly rather than through
+        ``encode_token_hidden_states``, which is defined in terms of ``forward``
+        -- and ``forward`` is this override, so going through the named accessor
+        would call straight back into here.
         """
         requested_full = kwargs.pop("return_full_hidden_states", True)
         if not requested_full:
@@ -172,4 +177,9 @@ class Qwen3EmbeddingForTTvLLM(Qwen3ForEmbedding):
                 "return an already-pooled tensor. Use Qwen3ForEmbedding.encode() "
                 "for the finished embedding."
             )
-        return self.encode_token_hidden_states(input_ids, kwargs.pop("attention_mask", None), **kwargs)
+        return super().forward(
+            input_ids,
+            kwargs.pop("attention_mask", None),
+            return_full_hidden_states=True,
+            **kwargs,
+        )
