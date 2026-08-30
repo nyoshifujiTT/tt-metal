@@ -574,14 +574,19 @@ class TTQwen3ASRForConditionalGeneration(WarmupForwardMixin, SupportsMultiModal,
     def warmup_model_prefill(self, kv_cache, enable_trace, can_sample_on_device, greedy_only: bool = False) -> None:
         logger.warning("Warmup model prefill is a no-op for Qwen3-ASR TT adapter (prefill is not traced)")
 
-    # Decode warmup always runs so every decode op is COMPILED into the program
-    # cache up front (this alone keeps steady-state stable, per the worklog:
-    # "trace_mode=none + warmup -> 50/50, 30/30 no wedge"). With the default
-    # DECODE_TRACE=1 we also CAPTURE the decode trace UP FRONT here -- before any
-    # request -- so the capture never happens lazily on the first request, which
-    # would hit tt-metal's "Allocating device buffers is unsafe due to the
-    # existence of an active trace" path. When DECODE_TRACE=0 we force
-    # enable_trace=False so warmup compiles the ops without capturing a trace.
+    # Decode warmup runs so every decode op is COMPILED into the program cache up
+    # front (this alone keeps steady-state stable, per the worklog:
+    # "trace_mode=none + warmup -> 50/50, 30/30 no wedge"), and with the default
+    # DECODE_TRACE=1 it also CAPTURES the decode trace before any request, so the
+    # capture never happens lazily on the first one -- that would hit tt-metal's
+    # "Allocating device buffers is unsafe due to the existence of an active
+    # trace" path.
+    #
+    # The runner calls this TWICE: once with enable_trace=False to compile, then
+    # again with enable_trace=True to capture. Forcing the trace on in the first
+    # call made both passes do the capture work, and the compile pass alone cost
+    # 162 s of a 327 s startup. Honour the caller's flag and only override it to
+    # disable tracing when DECODE_TRACE=0.
     def warmup_model_decode(self, *args, **kwargs) -> None:
         if not DECODE_TRACE:
             kwargs["enable_trace"] = False
