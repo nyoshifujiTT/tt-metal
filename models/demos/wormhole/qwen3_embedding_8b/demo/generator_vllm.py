@@ -341,6 +341,20 @@ class Qwen3ForEmbedding:
         batch_size, seq_len = input_ids.shape
         logger.debug(f"Qwen3-Embedding forward: processing batch_size={batch_size}, seq_len={seq_len}")
 
+        if not (return_full_hidden_states or embed_single_trace):
+            # Qwen3-Embedding's modules.json is Transformer -> Pooling(lasttoken)
+            # -> Normalize, so a pooled-but-unnormalized vector is not a result
+            # the model defines. There used to be a third way out of here that
+            # returned exactly that, and every caller reaching it had to know to
+            # normalize afterwards -- tt-media-server did not, and served
+            # non-unit-norm vectors for as long as it used this path.
+            raise ValueError(
+                "forward() produces either the finished embedding or the stage "
+                "before pooling; ask for one by name (encode() or "
+                "encode_token_hidden_states()) rather than calling forward() "
+                "with neither flag set."
+            )
+
         # Ensure batch size and sequence length are within limits
         assert batch_size <= self.max_batch_size, f"Batch size {batch_size} exceeds max {self.max_batch_size}"
         assert seq_len <= self.max_seq_len, f"Sequence length {seq_len} exceeds max {self.max_seq_len}"
@@ -445,26 +459,14 @@ class Qwen3ForEmbedding:
             per_user = [h for h in hidden_states if h is not None]
             return torch.cat(per_user, dim=0)
 
-        if embed_single_trace:
-            # prefill_forward_text folded slice + final norm + L2 normalize into the
-            # prefill trace, so hidden_states is already the finished, normalized
-            # embedding [batch, dim]. Return it as-is (no host pooling / normalize).
-            embeddings = hidden_states
-            if embeddings.dim() == 1:
-                embeddings = embeddings.unsqueeze(0)
-            return embeddings
-
-        # hidden_states shape: [batch_size, hidden_size]
-        # This is the last token's hidden state after layer norm, before LM head
-        # For Qwen3-Embedding, this is the correct embedding output
+        # prefill_forward_text folded slice + final norm + L2 normalize into the
+        # prefill trace, so hidden_states is already the finished, normalized
+        # embedding [batch, dim]. Return it as-is (no host pooling / normalize).
         embeddings = hidden_states
-
-        # Ensure output is 2D: [batch_size, embedding_dim]
-        if embeddings.dim() == 1 and batch_size == 1:
+        if embeddings.dim() == 1:
             embeddings = embeddings.unsqueeze(0)
         elif embeddings.dim() > 2:
             embeddings = embeddings.view(batch_size, -1)
-
         return embeddings
 
     def get_embedding_dim(self) -> int:

@@ -98,30 +98,33 @@ def _reference_embedding(model_name: str, tokenizer, prompt: str) -> torch.Tenso
 
 
 def _tt_embedding(generator_model: Qwen3ForEmbedding, tokenizer, prompt: str) -> torch.Tensor:
-    """TT device path: forward last-token hidden -> L2 normalize (host)."""
+    """TT device path via the public finished-embedding entry point.
+
+    ``encode`` runs the model's own three stages -- transformer, last-token
+    pooling, L2 normalize -- inside a single prefill trace, so the vector comes
+    back finished and unit-norm with no host post-processing.
+    """
     batch = tokenizer([prompt], padding=False, truncation=True, max_length=DEFAULT_SEQUENCE_LENGTH, return_tensors="pt")
     input_ids = batch["input_ids"]
     attention_mask = batch["attention_mask"]
-    tt_hidden = generator_model.forward(input_ids=input_ids, attention_mask=attention_mask).to(torch.float32)
-    if tt_hidden.dim() == 1:
-        tt_hidden = tt_hidden.unsqueeze(0)
-    return F.normalize(tt_hidden, p=2, dim=1)
+    emb = generator_model.encode(input_ids, attention_mask).to(torch.float32)
+    if emb.dim() == 1:
+        emb = emb.unsqueeze(0)
+    return emb
 
 
 def _tt_embedding_from_full_hidden(generator_model: Qwen3ForEmbedding, tokenizer, prompt: str) -> torch.Tensor:
     """TT device path via the FLAT per-token contract.
 
-    Requests ``return_full_hidden_states=True`` (the layout the vLLM pooling
-    runner feeds to ``model.pooler``), then does host-side LAST pooling + L2
-    normalize -- exactly what the standard vLLM embed Pooler does. Must match the
-    pooled last-token path bit-for-bit, proving the flat forward preserves the
-    embedding numerics.
+    Asks for ``encode_token_hidden_states`` (the layout the vLLM pooling runner
+    feeds to ``model.pooler``), then does host-side LAST pooling + L2 normalize
+    -- exactly what the standard vLLM embed Pooler does. Must match the finished
+    ``encode`` path, proving the pre-pooling stage preserves the numerics.
     """
     batch = tokenizer([prompt], padding=False, truncation=True, max_length=DEFAULT_SEQUENCE_LENGTH, return_tensors="pt")
-    full_hidden = generator_model.forward(
-        input_ids=batch["input_ids"],
-        attention_mask=batch["attention_mask"],
-        return_full_hidden_states=True,
+    full_hidden = generator_model.encode_token_hidden_states(
+        batch["input_ids"],
+        batch["attention_mask"],
     ).to(torch.float32)
     # full_hidden: [total_tokens, hidden]; LAST pooling picks the final token.
     last_token = full_hidden[-1:, :]
@@ -131,17 +134,14 @@ def _tt_embedding_from_full_hidden(generator_model: Qwen3ForEmbedding, tokenizer
 def _tt_embedding_single_trace(generator_model: Qwen3ForEmbedding, tokenizer, prompt: str) -> torch.Tensor:
     """TT device path with the WHOLE embedding folded into one prefill trace.
 
-    ``embed_single_trace=True`` makes forward return the finished, L2-normalized
-    embedding computed entirely on device in a single execute_trace replay (last-
-    token slice + final norm + L2 normalize are captured in the trace). No host
-    pooling or normalization is applied here.
+    Same call as :func:`_tt_embedding` -- kept as a separate name so the test
+    that cross-checks it against the host-pooled flat path reads clearly.
+    ``encode`` computes the finished, L2-normalized embedding entirely on device
+    in a single execute_trace replay (last-token slice + final norm + L2
+    normalize are captured in the trace); no host pooling is applied here.
     """
     batch = tokenizer([prompt], padding=False, truncation=True, max_length=DEFAULT_SEQUENCE_LENGTH, return_tensors="pt")
-    emb = generator_model.forward(
-        input_ids=batch["input_ids"],
-        attention_mask=batch["attention_mask"],
-        embed_single_trace=True,
-    ).to(torch.float32)
+    emb = generator_model.encode(batch["input_ids"], batch["attention_mask"]).to(torch.float32)
     if emb.dim() == 1:
         emb = emb.unsqueeze(0)
     return emb
@@ -302,17 +302,14 @@ def run_qwen3_embedding_batched(device, prompts, model_name, sequence_length, mo
         max_length=sequence_length,
         return_tensors="pt",
     )
-    tt_hidden = generator_model.forward(
-        input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]
-    ).to(torch.float32)
-    if tt_hidden.dim() == 1:
-        tt_hidden = tt_hidden.unsqueeze(0)
-    tt_batched = F.normalize(tt_hidden, p=2, dim=1)
+    tt_batched = generator_model.encode(batch["input_ids"], batch["attention_mask"]).to(torch.float32)
+    if tt_batched.dim() == 1:
+        tt_batched = tt_batched.unsqueeze(0)
 
     assert tt_batched.shape[0] == batch_size, f"expected {batch_size} rows, got {tt_batched.shape[0]}"
     assert torch.allclose(
         tt_batched.norm(dim=1), torch.ones(batch_size), atol=1e-2
-    ), "batched TT embeddings are not L2-normalized"
+    ), "batched TT embeddings are not L2-normalized on device"
 
     # Single-device B=1 reference for the same prompts (own generator to avoid
     # cross-contaminating the batched model's state).

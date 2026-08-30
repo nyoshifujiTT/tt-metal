@@ -1344,6 +1344,13 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                             slot_hidden = self.model[model_id].process_hidden_states_after_prefill_trace(
                                 user_hidden, last_token_idx[slot]
                             )
+                            if embed_single_trace:
+                                # The batched capture cannot host the embedding tail
+                                # (embed_terminal is single-user), so the L2 normalize
+                                # that the single-user trace folds in is applied here
+                                # instead -- still on device, right after the slice and
+                                # final norm, before anything reaches the host.
+                                slot_hidden = self.model[model_id].l2_normalize_hidden(slot_hidden)
                             slot_hidden_list.append((local_idx, slot_hidden, last_token_idx[slot]))
                         ttnn.synchronize_device(self.model[model_id].mesh_device)
                         dim = self.model[model_id].args.dim

@@ -24,6 +24,8 @@ the routing from each public method into it is exercised.
 
 import torch
 
+import pytest
+
 from models.demos.wormhole.qwen3_embedding_8b.demo.generator_vllm import Qwen3ForEmbedding
 
 
@@ -84,3 +86,21 @@ def test_the_public_api_is_public():
     for name in ("encode", "encode_token_hidden_states"):
         assert not name.startswith("_")
         assert callable(getattr(Qwen3ForEmbedding, name))
+
+
+class _NoDevice(Qwen3ForEmbedding):
+    """Enough of the wrapper to reach the stage check, without a device."""
+
+    def __init__(self):  # noqa: D107
+        self.max_batch_size = 4
+        self.max_seq_len = 128
+
+
+def test_forward_refuses_to_produce_an_unnormalized_pooled_vector():
+    # Qwen3-Embedding's modules.json ends in a Normalize stage, so a pooled but
+    # unnormalized vector is not one of the model's defined results. Callers
+    # that reached it had to know to normalize afterwards, and one did not.
+    model = _NoDevice()
+
+    with pytest.raises(ValueError, match="encode"):
+        model.forward(torch.zeros(1, 8, dtype=torch.long))
