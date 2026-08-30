@@ -3,14 +3,28 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-vLLM Integration for Qwen3-Embedding-8B Model
+Qwen3-Embedding on Tenstorrent devices.
 
-This module provides vLLM integration for the Qwen3-Embedding model, enabling
-OpenAI Embedding API compatibility through vLLM's serving infrastructure.
+``Qwen3ForEmbedding`` runs the checkpoint's transformer stack through
+tt_transformers' prefill path and exposes the two results callers ask for,
+named after the stage of the model they stop at:
 
-Usage:
-    The model can be registered with vLLM's ModelRegistry and served via
-    the OpenAI Embedding API endpoint.
+``encode``
+    The finished embedding. Runs all three stages of the checkpoint's
+    ``modules.json`` -- Transformer, Pooling(lasttoken), Normalize -- folded
+    into one prefill trace, so a single ``execute_trace`` replay produces
+    unit-norm ``[batch, hidden]`` rows with no host post-processing. This is
+    what a caller that owns no pooling layer wants: the standalone demo and
+    tt-media-server.
+
+``encode_token_hidden_states``
+    The stage before pooling: the flat ``[total_tokens, hidden]`` per-token
+    layout. vLLM owns a ``Pooler`` that performs the pooling and normalization
+    itself, and its pooling runner indexes that token axis before calling it.
+
+Serving through vLLM does not use this class directly. The plugin resolves
+``models.demos.qwen3_embedding.tt.generator_vllm:Qwen3EmbeddingForTTvLLM``,
+a thin subclass that adds the pooling contract on top of this one.
 """
 
 from typing import Optional

@@ -14,14 +14,14 @@ context at 8192 for the P150 bring-up.
 
 ## Low-level model creation
 
-`Qwen3ForEmbedding` (from `generator_vllm.py`) is the metal embedding model. For a
+`Qwen3ForEmbedding` (from `model.py`) is the metal embedding model. For a
 single device, construct it directly with an explicit checkpoint name; the config
 is resolved through standard Hugging Face rules (local cache honoured, no
 hardcoded repo id):
 
 ```python
 import ttnn
-from models.demos.wormhole.qwen3_embedding_8b.demo.generator_vllm import Qwen3ForEmbedding
+from models.demos.wormhole.qwen3_embedding_8b.demo.model import Qwen3ForEmbedding
 
 device = ttnn.open_device(device_id=0)
 
@@ -190,7 +190,7 @@ compilation and prefill-trace warmup.
 ## Reference
 
 - `models/demos/wormhole/qwen3_embedding_8b/demo/demo.py` — this demo.
-- `models/demos/wormhole/qwen3_embedding_8b/demo/generator_vllm.py` — the
+- `models/demos/wormhole/qwen3_embedding_8b/demo/model.py` — the
   `Qwen3ForEmbedding` metal model.
 - `models/demos/qwen3_embedding/tt/generator_vllm.py` — the vLLM pooling adapter
   that wraps the same forward path for serving.
