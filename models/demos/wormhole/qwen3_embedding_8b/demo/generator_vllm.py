@@ -261,6 +261,43 @@ class Qwen3ForEmbedding:
 
         self._is_initialized = True
 
+    def encode(self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Public API: the finished embedding, pooled and L2-normalized on device.
+
+        This is the model as Qwen3-Embedding officially defines it: the three
+        stages of its ``modules.json`` -- Transformer, Pooling(lasttoken),
+        Normalize -- all applied, so the caller receives unit-norm vectors of
+        shape ``[batch, hidden]``. The whole tail (last-token slice, final norm,
+        L2 normalize) is folded into the prefill trace, so one ``execute_trace``
+        replay produces the finished result with no host post-processing.
+
+        Use this from any caller that wants embeddings: the standalone metal
+        demo and tt-media-server. Callers that own a pooling layer of their own
+        -- vLLM, whose ``Pooler`` performs the pooling and normalization itself
+        -- must use :meth:`encode_token_hidden_states` instead, because pooling
+        an already-pooled tensor is meaningless.
+        """
+        return self.forward(input_ids, attention_mask, embed_single_trace=True)
+
+    def encode_token_hidden_states(
+        self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Public API: per-token hidden states, the stage right before pooling.
+
+        Returns the flat ``[total_tokens, hidden]`` layout -- every scheduled
+        request's real tokens concatenated on the token axis in request order,
+        with the final norm applied and no last-token slice. This is the input
+        contract of vLLM's pooling runner, which indexes that token axis with a
+        ``PoolingMetadata`` cursor before handing the tensor to ``model.pooler``.
+
+        This is the same computation :meth:`encode` performs, stopped one stage
+        earlier: both run the identical prefill and final norm, and ``encode``
+        merely continues into the slice and the L2 normalize. Returning the
+        pooled tensor here instead would be silently wrong -- the runner would
+        read the batch axis as if it were the token axis.
+        """
+        return self.forward(input_ids, attention_mask, return_full_hidden_states=True)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -272,6 +309,10 @@ class Qwen3ForEmbedding:
     ) -> torch.Tensor:
         """
         Forward pass for embedding generation (prefill-only).
+
+        Shared implementation behind the two public entry points
+        (:meth:`encode` and :meth:`encode_token_hidden_states`); which stage the
+        result stops at is selected by the two flags below.
 
         This is the main interface method called by vLLM for embedding inference.
         Unlike generation models, embedding models only have prefill (no decode step).
