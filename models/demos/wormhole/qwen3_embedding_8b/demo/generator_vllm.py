@@ -489,30 +489,3 @@ class Qwen3ForEmbedding:
         """
         # Pooling is handled in forward() method, so no separate pooler needed
         self.pooler = None
-
-
-def register_model():
-    """
-    Register the Qwen3-Embedding model with vLLM's ModelRegistry.
-
-    This function should be called to make the model available to vLLM.
-    Typically called from vLLM's model registration code.
-
-    Note: The actual registration happens in tt-vllm-plugin's register_models()
-    function, which registers "TTQwen3Model" -> Qwen3ForEmbedding.
-    This function is kept for compatibility but may not be called directly.
-    """
-    try:
-        from vllm.model_executor.model_loader import ModelRegistry
-
-        # Register as TTQwen3Model (TT-prefixed version for TT platform)
-        ModelRegistry.register_model(
-            "TTQwen3Model",
-            Qwen3ForEmbedding,
-        )
-        logger.info("Successfully registered TTQwen3Model (Qwen3-Embedding-8B) with vLLM ModelRegistry")
-    except ImportError:
-        logger.warning(
-            "vLLM ModelRegistry not available. "
-            "Make sure vLLM is installed and the model is registered in vLLM's model loader."
-        )
