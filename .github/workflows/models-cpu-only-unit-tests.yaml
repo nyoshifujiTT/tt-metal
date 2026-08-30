@@ -1,0 +1,74 @@
+name: "(Models) CPU-only unit tests"
+
+on:
+  workflow_dispatch:
+    inputs:
+      models-to-run:
+        description: 'List of requested models as JSON array, for example: ["bge_reranker_v2_m3"]. Default is ''all'''
+        default: "all"
+        type: string
+      platform:
+        required: false
+        type: choice
+        default: "Ubuntu 22.04"
+        options:
+          - "Ubuntu 22.04"
+          - "Ubuntu 24.04"
+        description: "Platform to build and test"
+      build-type:
+        required: false
+        type: choice
+        default: Release
+        options:
+          - Release
+          - Debug
+          - RelWithDebInfo
+          - ASan
+          - TSan
+        description: "Build type configuration"
+  workflow_call:
+    inputs:
+      models-to-run:
+        required: false
+        type: string
+        default: "all"
+      platform:
+        required: false
+        type: string
+        default: "Ubuntu 22.04"
+      build-type:
+        required: false
+        type: string
+        default: "Release"
+  schedule:
+    - cron: "0 5 * * *"
+
+jobs:
+  check-harbor:
+    uses: ./.github/workflows/check-harbor.yaml
+
+  build-artifact:
+    needs: check-harbor
+    uses: ./.github/workflows/build-artifact.yaml
+    permissions:
+      contents: read
+      packages: write
+    secrets: inherit
+    with:
+      harbor-prefix: ${{ needs.check-harbor.outputs.harbor-prefix }}
+      build-type: ${{ inputs.build-type || 'Release' }}
+      build-wheel: true
+      platform: ${{ inputs.platform || 'Ubuntu 22.04' }}
+
+  models-cpu-only-unit-tests:
+    needs: [check-harbor, build-artifact]
+    uses: ./.github/workflows/models-cpu-only-tests-impl.yaml
+    secrets: inherit
+    with:
+      tests-yaml-path: ./tests/pipeline_reorg/models_cpu_only_unit_tests.yaml
+      test-category: unit
+      runs-on-sku: cpu_medium
+      docker-image: ${{ needs.build-artifact.outputs.dev-docker-image }}
+      build-artifact-name: ${{ needs.build-artifact.outputs.build-artifact-name }}
+      wheel-artifact-name: ${{ needs.build-artifact.outputs.wheel-artifact-name }}
+      per-test-timeout: 15

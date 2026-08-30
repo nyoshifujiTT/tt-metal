@@ -12,7 +12,7 @@ import ttnn
 from models.common.auto_compose import to_torch_auto_compose
 from models.common.utility_functions import comp_pcc
 from models.demos.wormhole.bge_m3.demo.generator_vllm import BgeM3ForEmbedding
-from models.demos.wormhole.bge_m3.tt.common import create_tt_model
+from models.demos.wormhole.bge_m3.tt.common import create_tt_model, resolve_model_name
 
 DEFAULT_MODEL_NAME = "BAAI/bge-m3"
 DEFAULT_SEQUENCE_LENGTH = 8192
@@ -35,12 +35,6 @@ inputs = [
 def _require_single_device(device) -> None:
     if hasattr(device, "get_num_devices") and device.get_num_devices() != 1:
         raise ValueError("BGE-M3 demo currently expects a single device")
-
-
-def _resolve_model_name(model_name, model_location_generator):
-    if model_location_generator is None:
-        return model_name
-    return str(model_location_generator(model_name))
 
 
 def _to_ttnn_ids(ids: torch.Tensor, device, dtype=ttnn.uint32) -> ttnn.Tensor:
@@ -160,7 +154,7 @@ def _log_pooled_embedding_comparison(
 
 def run_bge_demo_inference(device, inputs, model_name, sequence_length, model_location_generator):
     _require_single_device(device)
-    resolved_model_name = _resolve_model_name(model_name, model_location_generator)
+    resolved_model_name = resolve_model_name(model_name, model_location_generator)
 
     model_args, tt_model, _ = create_tt_model(
         mesh_device=device,
@@ -204,7 +198,7 @@ def run_bge_demo_inference(device, inputs, model_name, sequence_length, model_lo
 
 
 def run_bge_vllm_demo(device, inputs, model_name, sequence_length, model_location_generator):
-    resolved_model_name = _resolve_model_name(model_name, model_location_generator)
+    resolved_model_name = resolve_model_name(model_name, model_location_generator)
 
     generator_model = BgeM3ForEmbedding(
         device=device,

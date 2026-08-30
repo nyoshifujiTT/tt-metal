@@ -15,6 +15,7 @@ from models.demos.wormhole.bge_m3.demo.m3_scores import (
     compute_dense_score_torch,
     compute_sparse_score_torch,
 )
+from models.demos.wormhole.bge_m3.tt.common import resolve_model_name
 
 MODEL_NAME = "BAAI/bge-m3"
 MAX_MODEL_LEN = 512
@@ -64,12 +65,6 @@ def _log_score(label: str, measured: float, reference: float) -> None:
 def _require_single_device(device) -> None:
     if hasattr(device, "get_num_devices") and device.get_num_devices() != 1:
         raise ValueError("BGE-M3 generator tests currently expect a single device")
-
-
-def _resolve_model_name(model_name, model_location_generator):
-    if model_location_generator is None:
-        return model_name
-    return str(model_location_generator(model_name))
 
 
 def _build_generator_model(
@@ -135,7 +130,7 @@ def _run_generator_embeddings(
 
 def _load_reference_outputs(device, model_name, sequence_length, model_location_generator):
     _require_single_device(device)
-    resolved_model_name = _resolve_model_name(model_name, model_location_generator)
+    resolved_model_name = resolve_model_name(model_name, model_location_generator)
     max_batch_size = max(len(sentences_1), len(sentences_2), 1)
     generator_model, model_args = _build_generator_model(device, resolved_model_name, sequence_length, max_batch_size)
     return {
