@@ -13,16 +13,12 @@ process, so the test needs no checked-in fixture data.
 """
 import pytest
 
-pytest.importorskip("torch")
-pytest.importorskip("ttnn")
-pytest.importorskip("pyannote.audio")
+import numpy as np
+import torch
+from pyannote.audio import Model
 
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-from pyannote.audio import Model  # noqa: E402
-
-from models.demos.audio.pyannote_diarization import common  # noqa: E402
-from models.demos.audio.pyannote_diarization.tt.ttnn_wespeaker import TTNNWeSpeaker  # noqa: E402
+from models.demos.audio.pyannote_diarization import common
+from models.demos.audio.pyannote_diarization.tt.ttnn_wespeaker import TTNNWeSpeaker
 
 
 @pytest.fixture(scope="module")

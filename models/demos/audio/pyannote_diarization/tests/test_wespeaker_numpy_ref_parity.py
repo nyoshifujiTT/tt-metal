@@ -9,15 +9,12 @@ Skipped automatically when torch/pyannote are unavailable.
 """
 import pytest
 
-pytest.importorskip("torch")
-pytest.importorskip("pyannote.audio")
+import numpy as np
+import torch
+from pyannote.audio import Model
 
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-from pyannote.audio import Model  # noqa: E402
-
-from models.demos.audio.pyannote_diarization import common  # noqa: E402
-from models.demos.audio.pyannote_diarization.reference.wespeaker_numpy_ref import WeSpeakerNumpyRef  # noqa: E402
+from models.demos.audio.pyannote_diarization import common
+from models.demos.audio.pyannote_diarization.reference.wespeaker_numpy_ref import WeSpeakerNumpyRef
 
 
 def test_numpy_ref_matches_torch_wespeaker_resnet34(model_location_generator):

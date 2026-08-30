@@ -8,10 +8,7 @@ functions, so a change here moves both reported numbers; they are pinned.
 """
 import pytest
 
-pytest.importorskip("pyannote.core")
-pytest.importorskip("pyannote.metrics")
-
-from models.demos.audio.pyannote_diarization import accuracy  # noqa: E402
+from models.demos.audio.pyannote_diarization import accuracy
 
 
 def test_rttm_onset_duration_becomes_onset_offset(tmp_path):
@@ -73,8 +70,7 @@ def test_thresholds_keep_fidelity_stricter_than_absolute_accuracy():
 
 def _write_rttm(path, turns):
     lines = [
-        f"SPEAKER rec 1 {start:.3f} {end - start:.3f} <NA> <NA> {speaker} <NA> <NA>\n"
-        for speaker, start, end in turns
+        f"SPEAKER rec 1 {start:.3f} {end - start:.3f} <NA> <NA> {speaker} <NA> <NA>\n" for speaker, start, end in turns
     ]
     path.write_text("".join(lines))
 

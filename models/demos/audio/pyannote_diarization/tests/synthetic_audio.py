@@ -44,22 +44,15 @@ def overlapping_speech():
     """
     import soundfile as sf
 
-    samples, sample_rate = sf.read(
-        accuracy.sample_audio_path(), dtype="float32", always_2d=True
-    )
+    samples, sample_rate = sf.read(accuracy.sample_audio_path(), dtype="float32", always_2d=True)
     mono = samples[:, 0]
     reference = accuracy.load_rttm(accuracy.sample_reference_path())
 
     longest = _longest_turn_per_speaker(reference)
     if len(longest) < 2:
-        raise RuntimeError(
-            f"the bundled annotation must hold at least two speakers, found "
-            f"{sorted(longest)}"
-        )
+        raise RuntimeError(f"the bundled annotation must hold at least two speakers, found " f"{sorted(longest)}")
 
-    (start_a, end_a, _), (start_b, end_b, _) = (
-        longest[speaker] for speaker in sorted(longest)[:2]
-    )
+    (start_a, end_a, _), (start_b, end_b, _) = (longest[speaker] for speaker in sorted(longest)[:2])
     first = mono[int(start_a * sample_rate) : int(end_a * sample_rate)]
     second = mono[int(start_b * sample_rate) : int(end_b * sample_rate)]
 

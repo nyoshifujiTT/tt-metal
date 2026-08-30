@@ -161,9 +161,11 @@ def corpus_root(name: str = "voxconverse"):
     """Local directory holding a diarization corpus, or ``None`` if unset.
 
     Corpora are hundreds of files and gigabytes, so they are never downloaded
-    by a test run. Point ``DIARIZATION_CORPUS_DIR`` (or the per-corpus
+    automatically. Point ``DIARIZATION_CORPUS_DIR`` (or the per-corpus
     ``DIARIZATION_<NAME>_DIR``) at a prepared directory holding ``audio/*.wav``
-    and ``rttm/*.rttm``, and the corpus test runs; otherwise it skips.
+    and ``rttm/*.rttm``. Callers decide what to do when this returns ``None``;
+    the eval says so in its log and scores the bundled sample instead, which is
+    reported as a different measurement rather than as a corpus result.
     """
     env_name = name.upper().replace("-", "_")
     specific = os.environ.get(f"DIARIZATION_{env_name}_DIR")

@@ -11,12 +11,9 @@ separation. These checks make that failure mode visible.
 """
 import pytest
 
-pytest.importorskip("torch")
-pytest.importorskip("pyannote.audio")
+import torch
 
-import torch  # noqa: E402
-
-from models.demos.audio.pyannote_diarization.tests.synthetic_audio import (  # noqa: E402
+from models.demos.audio.pyannote_diarization.tests.synthetic_audio import (
     overlap_window,
     overlapping_speech,
 )
@@ -60,11 +57,7 @@ def test_pyannote_hears_two_speakers(device, model_location_generator):
     """
     from models.demos.audio.pyannote_diarization import pipeline as diar_pipeline
 
-    diarization = diar_pipeline.load_pipeline(model_location_generator)(
-        overlapping_speech()
-    ).speaker_diarization
+    diarization = diar_pipeline.load_pipeline(model_location_generator)(overlapping_speech()).speaker_diarization
 
     speakers = diar_pipeline.speakers(diarization)
-    assert len(speakers) >= 2, (
-        f"the fixture must hold speakers pyannote can tell apart, got {speakers}"
-    )
+    assert len(speakers) >= 2, f"the fixture must hold speakers pyannote can tell apart, got {speakers}"

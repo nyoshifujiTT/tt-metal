@@ -111,9 +111,7 @@ def main(argv=None) -> int:
             offload_segmentation(pipeline, device)
 
         started = time.monotonic()
-        scored = accuracy.corpus_der(
-            diarize_with(pipeline), args.corpus, limit=args.limit
-        )
+        scored = accuracy.corpus_der(diarize_with(pipeline), args.corpus, limit=args.limit)
         elapsed = time.monotonic() - started
     finally:
         ttnn.close_device(device)
@@ -121,10 +119,7 @@ def main(argv=None) -> int:
     published = accuracy.published_corpus_der(args.split)
     worst = sorted(scored["per_recording"].items(), key=lambda kv: -kv[1])[:3]
 
-    print(
-        f"{args.split}: DER={scored['der']:.5f} over "
-        f"{scored['num_recordings']} recordings in {elapsed:.0f}s"
-    )
+    print(f"{args.split}: DER={scored['der']:.5f} over " f"{scored['num_recordings']} recordings in {elapsed:.0f}s")
     print(f"worst: {[(name, round(der, 4)) for name, der in worst]}")
     if published is None:
         # Deliberately not compared against another split's figure: that is how
@@ -134,10 +129,7 @@ def main(argv=None) -> int:
     else:
         ceiling = published + accuracy.CORPUS_DER_TOLERANCE
         verdict = scored["der"] <= ceiling
-        print(
-            f"published={published:.4f} ceiling={ceiling:.4f} -> "
-            f"{'PASS' if verdict else 'FAIL'}"
-        )
+        print(f"published={published:.4f} ceiling={ceiling:.4f} -> " f"{'PASS' if verdict else 'FAIL'}")
 
     if args.output:
         with open(args.output, "w") as f:

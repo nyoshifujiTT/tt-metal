@@ -10,9 +10,6 @@ torch/pyannote so it is CI-safe.
 """
 import pytest
 
-pytest.importorskip("torch")
-pytest.importorskip("pyannote.audio")
-
 import numpy as np
 import torch
 import torch.nn.functional as F

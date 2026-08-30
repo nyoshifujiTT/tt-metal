@@ -24,16 +24,12 @@ fixture is needed.
 """
 import pytest
 
-pytest.importorskip("torch")
-pytest.importorskip("ttnn")
-pytest.importorskip("pyannote.audio")
-
-from models.demos.audio.pyannote_diarization import accuracy  # noqa: E402
-from models.demos.audio.pyannote_diarization.tests.synthetic_audio import (  # noqa: E402
+from models.demos.audio.pyannote_diarization import accuracy
+from models.demos.audio.pyannote_diarization.tests.synthetic_audio import (
     overlapping_speech,
 )
-from models.demos.audio.pyannote_diarization import pipeline as diar_pipeline  # noqa: E402
-from models.demos.audio.pyannote_diarization.pipeline import (  # noqa: E402
+from models.demos.audio.pyannote_diarization import pipeline as diar_pipeline
+from models.demos.audio.pyannote_diarization.pipeline import (
     load_pipeline,
     sample_audio_path,
     speakers,
@@ -126,6 +122,5 @@ def test_diarization_matches_host_pipeline_on_overlapping_speech(
 
     der = accuracy.diarization_error_rate(host, on_device)
     assert der < accuracy.FIDELITY_DER_MAX, (
-        f"diarization error rate against the host pipeline on overlapping "
-        f"speech too high: {der}"
+        f"diarization error rate against the host pipeline on overlapping " f"speech too high: {der}"
     )

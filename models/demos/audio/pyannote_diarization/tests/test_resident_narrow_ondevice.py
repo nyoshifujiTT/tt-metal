@@ -18,17 +18,13 @@ and the CI SKU/topology handling apply; ``l1_small_size`` is requested through
 """
 import pytest
 
-pytest.importorskip("torch")
-pytest.importorskip("ttnn")
-pytest.importorskip("pyannote.audio")
+import numpy as np
+import torch
+from pyannote.audio import Model
 
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-from pyannote.audio import Model  # noqa: E402
-
-from models.demos.audio.pyannote_diarization import common  # noqa: E402
-from models.demos.audio.pyannote_diarization.reference.wespeaker_numpy_ref import WeSpeakerNumpyRef  # noqa: E402
-from models.demos.audio.pyannote_diarization.tt.ttnn_wespeaker_resident import TTNNWeSpeakerResident  # noqa: E402
+from models.demos.audio.pyannote_diarization import common
+from models.demos.audio.pyannote_diarization.reference.wespeaker_numpy_ref import WeSpeakerNumpyRef
+from models.demos.audio.pyannote_diarization.tt.ttnn_wespeaker_resident import TTNNWeSpeakerResident
 
 
 @pytest.fixture(scope="module")

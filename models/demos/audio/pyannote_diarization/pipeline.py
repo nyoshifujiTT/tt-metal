@@ -6,8 +6,7 @@
 The pipeline is pyannote's own; what this module adds is the wiring that swaps
 the two neural nets for their ttnn ports. It lives beside the ports rather than
 inside a test so that tests, the demo and the corpus benchmark all drive the
-same code -- previously the benchmark had to import from a test module, which
-dragged pytest's ``importorskip`` into a plain CLI run.
+same code, rather than the benchmark having to import from a test module.
 
 Clustering, the speaker-count decision and all the pre/post-processing stay on
 host: they are not neural nets, and pyannote runs them on CPU on GPU too.

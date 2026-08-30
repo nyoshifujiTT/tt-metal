@@ -23,12 +23,8 @@ pytest --disable-warnings --input-path=/path/to/audio.wav \\
 import pytest
 from loguru import logger
 
-pytest.importorskip("torch")
-pytest.importorskip("ttnn")
-pytest.importorskip("pyannote.audio")
-
-from models.demos.audio.pyannote_diarization import pipeline as diar_pipeline  # noqa: E402
-from models.demos.audio.pyannote_diarization.pipeline import (  # noqa: E402
+from models.demos.audio.pyannote_diarization import pipeline as diar_pipeline
+from models.demos.audio.pyannote_diarization.pipeline import (
     load_pipeline,
     sample_audio_path,
 )
