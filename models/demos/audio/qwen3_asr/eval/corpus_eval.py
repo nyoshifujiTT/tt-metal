@@ -201,6 +201,14 @@ def main():
                 wav, sr = sf.read(path, dtype="float32")
                 if wav.ndim > 1:
                     wav = wav.mean(1)
+                # Standard ASR speed metrics divide by the ORIGINAL waveform
+                # duration, not by a padded/feature length: RTF = processing /
+                # audio, RTFx = audio / processing (vLLM's own ASR benchmark and
+                # the Open ASR Leaderboard both do this). Deriving it from the mel
+                # frame count instead silently changes the denominator - measured
+                # 1649.4 s of "audio" for clips that are really 1892.0 s, a 1.147x
+                # error that made this eval incomparable with the served one.
+                clip_seconds = len(wav) / float(sr)
                 feats = fe([wav], sampling_rate=16000, return_tensors="pt", return_attention_mask=True)
                 mel = feats["input_features"][0].float()
                 nf = int(feats["attention_mask"][0].sum()) if "attention_mask" in feats else mel.shape[1]
@@ -242,7 +250,7 @@ def main():
                 lat = time.time() - t0
 
                 hyp = parse_asr(dec_tok.decode(out, skip_special_tokens=False))
-                audio_total += nf / 100.0
+                audio_total += clip_seconds
                 refs.append(norm_ja(ref_txt))
                 hyps.append(norm_ja(hyp))
                 recs.append({"path": path, "ref": ref_txt, "hyp": hyp, "lat_s": round(lat, 3), "enc_s": round(t_encode, 3), "gen_s": round(t_gen, 3), "toks": len(out)})
@@ -263,7 +271,16 @@ def main():
         "corpus_cer": round(cer, 4) if cer is not None else None,
         "wall_s": round(wall, 2),
         "audio_s": round(audio_total, 1),
-        "throughput_audio_per_s": round(audio_total / wall, 3) if wall else None,
+        # Standard ASR speed metrics. rtfx = audio / processing (higher is
+        # faster, >1 means faster than real time); rtf is its reciprocal. Both
+        # use the ORIGINAL waveform duration, matching vLLM's ASR benchmark and
+        # the Open ASR Leaderboard so the numbers can be compared with published
+        # ones. NOTE: this eval drives the model directly and sequentially, so
+        # its rtfx is a single-stream figure and is NOT interchangeable with a
+        # served benchmark's, which includes HTTP and can run requests
+        # concurrently.
+        "rtfx": round(audio_total / wall, 3) if wall else None,
+        "rtf": round(wall / audio_total, 4) if audio_total else None,
     }
     with open(a.output, "w") as fh:
         json.dump({"report": report, "samples": recs}, fh, ensure_ascii=False, indent=2)
