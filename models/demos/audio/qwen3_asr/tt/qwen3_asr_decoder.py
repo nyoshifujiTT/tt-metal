@@ -227,16 +227,25 @@ class Qwen3ASRDecoder(Transformer):
         # (the wide reduction costs more than the logits host transfer), and a non-traced decode
         # stays stable across the mixed request shapes of a long-lived server (a persistent
         # decode trace did not — see README "Known limitations").
+        # The decode graph is built for args.max_batch_size, and
+        # prepare_decode_inputs_host asserts the token batch matches it, so feed a
+        # B-wide step with this single user in slot 0 and read slot 0 back. Idle
+        # slots are parked at position 0 so they cannot touch a live KV page.
+        batch = int(getattr(self.args, "max_batch_size", 1) or 1)
         while len(out) < max_new_tokens and nxt not in eos_ids:
+            tokens = torch.zeros(batch, 1, dtype=torch.long)
+            tokens[0, 0] = nxt
+            positions = torch.zeros(batch, dtype=torch.int64)
+            positions[0] = pos
             dl = gen.decode_forward(
-                torch.tensor([[nxt]], dtype=torch.long),
-                torch.tensor([pos]),
+                tokens,
+                positions,
                 page_table=page_table,
                 kv_cache=kv_cache,
                 enable_trace=DECODE_TRACE,
                 read_from_device=True,
             )
-            dl = (dl[0] if isinstance(dl, tuple) else dl).squeeze().float().reshape(-1)
+            dl = (dl[0] if isinstance(dl, tuple) else dl).float().reshape(batch, -1)[0]
             nxt = int(apply_repetition_penalty(dl, seen + out, repetition_penalty).argmax())
             out.append(nxt)
             pos += 1

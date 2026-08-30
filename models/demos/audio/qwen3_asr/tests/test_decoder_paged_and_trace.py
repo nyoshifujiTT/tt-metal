@@ -70,3 +70,22 @@ def test_weight_dtype_defaults_to_bfloat8_b():
     src = _read(DECODER)
     assert 'os.environ.get("QWEN3ASR_DECODER_DTYPE", "bfloat8_b")' in src
     assert "def decoder_weight_dtype()" in src
+
+
+def test_decode_feeds_the_full_configured_batch():
+    # tt_transformers builds the decode graph for args.max_batch_size and
+    # prepare_decode_inputs_host asserts the token batch matches it, so a
+    # single-user decode still has to submit a B-wide step and read slot 0.
+    # Submitting a 1-wide step raised
+    # "Batch size 1 must be equal to max_batch_size 4" for every clip.
+    src = _read(DECODER)
+    assert 'batch = int(getattr(self.args, "max_batch_size", 1) or 1)' in src
+    assert "tokens = torch.zeros(batch, 1, dtype=torch.long)" in src
+    assert "positions = torch.zeros(batch, dtype=torch.int64)" in src
+    assert ".reshape(batch, -1)[0]" in src, "only slot 0 belongs to this user"
+
+
+def test_idle_decode_slots_are_parked_at_zero():
+    # Idle slots must not index a live KV page.
+    src = _read(DECODER)
+    assert "positions[0] = pos" in src
