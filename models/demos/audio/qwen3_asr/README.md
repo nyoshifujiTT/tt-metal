@@ -175,3 +175,16 @@ match a vLLM serving run rather than to look good in isolation:
 CER is computed after NFKC normalisation and punctuation stripping. Scoring one
 side with a stricter normalisation than the other is not a model difference: it
 accounted for most of an apparent 8-point CER gap during bring-up.
+
+Speed is reported as `rtfx` (audio seconds processed per wall-clock second) and
+its reciprocal `rtf`, both divided by the ORIGINAL waveform duration. That is the
+definition vLLM's own ASR benchmark and the Open ASR Leaderboard use, so the
+numbers can be held against published ones. Deriving the duration from the mel
+frame count instead inflates it by the extractor's 30s padding — measured 1892.0 s
+of real audio reported as 1649.4 s, a 1.147x error.
+
+`rtfx` here is a **single-stream** figure: this eval drives the model directly,
+one clip at a time, and times only encode + decode. A served benchmark measures a
+different thing (HTTP and multipart included, requests possibly concurrent), so
+the two `rtfx` values describe different workloads and must not be compared as if
+they were the same measurement.
