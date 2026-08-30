@@ -108,3 +108,16 @@ def test_eval_keeps_the_submesh_dimension():
     eval_src = _read(os.path.join(HERE, "..", "eval", "corpus_eval.py"))
     body = eval_src[eval_src.index("def build_paged_kv") : eval_src.index("def feat_len")]
     assert "tt_cache_path=args.model_cache_path,\n    )\n" in body, "must not strip [0] at the caller"
+
+
+def test_prefill_delegates_the_page_table_conversion():
+    # An earlier bring-up drove ttnn_prefill_forward directly and had to hand it
+    # the ttnn-converted page table itself (passing the host copy raises a pybind
+    # TypeError in paged_fill_cache). Going through
+    # Generator.prefill_forward_single_user_text means the conversion happens
+    # inside prepare_inputs_prefill, so the decoder must NOT re-implement it.
+    src = _read(DECODER)
+    code = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
+    assert "prefill_forward_single_user_text" in code, "prefill must go through the Generator"
+    assert "ttnn_prefill_forward(" not in code, "do not re-drive the low-level prefill"
+    assert "tt_page_table" not in code, "the Generator owns the host->ttnn conversion"
