@@ -267,6 +267,31 @@ class TTQwen3ASRForConditionalGeneration(WarmupForwardMixin, SupportsMultiModal,
         "supports_async_decode": True,
     }
 
+    @classmethod
+    def get_max_tokens_all_users(
+        cls,
+        model_name: str = "",
+        num_devices: int = 1,
+        tt_data_parallel: int = 1,
+        max_model_len: int = 0,
+        max_num_seqs: int = 1,
+        **kwargs,
+    ) -> int:
+        """All-user KV-cache token capacity.
+
+        The plugin sizes the paged KV cache from this number. Without it the
+        fallback in ``get_num_available_blocks_tt`` is 131072 tokens, which for
+        this model means 2052 blocks where 132 suffice (max_model_len 2048 x
+        max_num_seqs 4 / block 64, plus the planner's per-user padding) - a 15.5x
+        over-allocation that costs real startup time, because every block is a
+        zero tensor written to device up front.
+
+        ASR requests are bounded: a single clip is capped at the feature
+        extractor's 30s window, so no request can exceed ``max_model_len``. The
+        exact capacity is therefore known rather than guessed.
+        """
+        return max(int(max_model_len), 1) * max(int(max_num_seqs), 1)
+
     def __init__(self, decoder, model_args, mesh_device, audio_params, text_embed, tokenizer=None):
         # composition over the tt_transformers Generator (as qwen3_vl does)
         self._ttt_generator = TTTGenerator([decoder], [model_args], mesh_device, tokenizer=tokenizer)
