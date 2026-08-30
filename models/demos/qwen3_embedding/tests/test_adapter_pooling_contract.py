@@ -40,6 +40,10 @@ def _load_adapter_with_stub_base(monkeypatch):
             # Stand in for the flat per-token hidden states.
             return torch.zeros(int(input_ids.numel()), 8)
 
+        def encode_token_hidden_states(self, input_ids, attention_mask=None, **kwargs):
+            self.token_hidden_kwargs = kwargs
+            return torch.zeros(int(input_ids.numel()), 8)
+
     base_mod.Qwen3ForEmbedding = _StubBase
     monkeypatch.setitem(sys.modules, base_mod.__name__, base_mod)
     sys.modules.pop("models.demos.qwen3_embedding.tt.generator_vllm", None)
@@ -52,11 +56,11 @@ def test_forward_requests_the_flat_per_token_layout(monkeypatch):
     cls = _load_adapter_with_stub_base(monkeypatch)
     model = cls()
 
-    model.forward(input_ids=torch.zeros(1, 4, dtype=torch.long))
+    out = model.forward(input_ids=torch.zeros(1, 4, dtype=torch.long))
 
-    assert model.forward_kwargs["return_full_hidden_states"] is True, (
-        "the pooling runner indexes the flat token axis; a pooled return would be misread"
-    )
+    # The pooling runner indexes the flat token axis; a pooled return (1 row
+    # here) would be misread as if that axis were the tokens.
+    assert out.shape[0] == 4
 
 
 def test_forward_accepts_positions_for_the_vllm_signature_check(monkeypatch):
@@ -65,15 +69,8 @@ def test_forward_accepts_positions_for_the_vllm_signature_check(monkeypatch):
 
     # vLLM's _check_vllm_model_forward requires input_ids + positions kwargs.
     model.forward(input_ids=torch.zeros(1, 2, dtype=torch.long), positions=torch.zeros(2))
-
-
-def test_caller_can_still_override_the_layout(monkeypatch):
-    cls = _load_adapter_with_stub_base(monkeypatch)
-    model = cls()
-
-    model.forward(input_ids=torch.zeros(1, 2, dtype=torch.long), return_full_hidden_states=False)
-
-    assert model.forward_kwargs["return_full_hidden_states"] is False
+    # positions is accepted and dropped: the base never uses it.
+    assert model.token_hidden_kwargs == {}
 
 
 def test_is_pooling_model_is_advertised(monkeypatch):

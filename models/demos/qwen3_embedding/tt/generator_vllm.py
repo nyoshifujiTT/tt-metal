@@ -137,9 +137,22 @@ class Qwen3EmbeddingForTTvLLM(Qwen3ForEmbedding):
         positions: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
-        # Flat per-token hidden states: the layout the pooling runner indexes with
-        # PoolingMetadata before handing it to the Pooler. Forced here (rather
-        # than left to the caller) because the runner never passes it and a pooled
-        # return would be misread as token-major.
-        kwargs.setdefault("return_full_hidden_states", True)
-        return super().forward(input_ids, **kwargs)
+        """Forward the pooling runner's call to the model's pre-pooling stage.
+
+        The runner indexes the flat ``[total_tokens, hidden]`` token axis with a
+        ``PoolingMetadata`` cursor before handing the tensor to ``pooler``, so
+        this hands back exactly what
+        :meth:`Qwen3ForEmbedding.encode_token_hidden_states` produces -- no
+        keyword juggling of its own.
+
+        It used to reach this layout by setting ``return_full_hidden_states`` on
+        the base's ``forward`` with ``setdefault``, i.e. by flipping a flag on
+        the shared entry point rather than by naming the stage it wants. Calling
+        the named accessor states the requirement instead of configuring it, and
+        leaves ``forward``'s flags to the base.
+
+        Note that this layout is specific to the vLLM pooling contract: a caller
+        without a Pooler must not come through this class. See
+        :meth:`Qwen3ForEmbedding.encode` for that case.
+        """
+        return self.encode_token_hidden_states(input_ids, kwargs.pop("attention_mask", None), **kwargs)
