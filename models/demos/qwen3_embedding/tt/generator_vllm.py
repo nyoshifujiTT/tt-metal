@@ -154,5 +154,18 @@ class Qwen3EmbeddingForTTvLLM(Qwen3ForEmbedding):
         Note that this layout is specific to the vLLM pooling contract: a caller
         without a Pooler must not come through this class. See
         :meth:`Qwen3ForEmbedding.encode` for that case.
+
+        The runner states the same requirement on its side by passing
+        ``return_full_hidden_states=True``. Accept and drop it: agreeing is not
+        a reason to route the call back through the flag, and refusing would
+        make the two ways of saying the same thing disagree.
         """
+        requested_full = kwargs.pop("return_full_hidden_states", True)
+        if not requested_full:
+            raise ValueError(
+                "Qwen3EmbeddingForTTvLLM serves the vLLM pooling contract, whose "
+                "runner pools the per-token hidden states itself; it cannot "
+                "return an already-pooled tensor. Use Qwen3ForEmbedding.encode() "
+                "for the finished embedding."
+            )
         return self.encode_token_hidden_states(input_ids, kwargs.pop("attention_mask", None), **kwargs)

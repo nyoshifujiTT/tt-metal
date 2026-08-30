@@ -73,6 +73,35 @@ def test_forward_accepts_positions_for_the_vllm_signature_check(monkeypatch):
     assert model.token_hidden_kwargs == {}
 
 
+def test_forward_accepts_the_runners_explicit_request_for_full_hidden(monkeypatch):
+    cls = _load_adapter_with_stub_base(monkeypatch)
+    model = cls()
+
+    # The pooling runner states the same requirement on its side. Agreeing is
+    # not a reason to route the call back through the base's flag.
+    out = model.forward(
+        input_ids=torch.zeros(1, 4, dtype=torch.long),
+        return_full_hidden_states=True,
+    )
+
+    assert out.shape[0] == 4
+    assert model.token_hidden_kwargs == {}
+
+
+def test_forward_refuses_to_return_an_already_pooled_tensor(monkeypatch):
+    cls = _load_adapter_with_stub_base(monkeypatch)
+    model = cls()
+
+    # This class exists to serve a runner that pools the hidden states itself.
+    # Handing it a pooled tensor would be read as token-major, so say so rather
+    # than silently obliging.
+    with pytest.raises(ValueError, match="encode"):
+        model.forward(
+            input_ids=torch.zeros(1, 4, dtype=torch.long),
+            return_full_hidden_states=False,
+        )
+
+
 def test_is_pooling_model_is_advertised(monkeypatch):
     cls = _load_adapter_with_stub_base(monkeypatch)
 
