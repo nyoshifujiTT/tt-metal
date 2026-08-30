@@ -21,7 +21,7 @@ hardcoded repo id):
 
 ```python
 import ttnn
-from models.demos.wormhole.qwen3_embedding_8b.demo.model import Qwen3ForEmbedding
+from models.demos.qwen3_embedding.tt.model import Qwen3ForEmbedding
 
 device = ttnn.open_device(device_id=0)
 
@@ -133,13 +133,13 @@ mount of `/dev/hugepages-1G` in addition to `--device /dev/tenstorrent`.
 
 ```bash
 # pooled last-token accuracy check, 0.6B (default)
-pytest models/demos/wormhole/qwen3_embedding_8b/demo/demo.py::test_qwen3_embedding_demo -k 0.6B --timeout=0
+pytest models/demos/qwen3_embedding/demo/demo.py::test_qwen3_embedding_demo -k 0.6B --timeout=0
 
 # the same check on the 8B checkpoint
-pytest models/demos/wormhole/qwen3_embedding_8b/demo/demo.py::test_qwen3_embedding_demo -k 8B --timeout=0
+pytest models/demos/qwen3_embedding/demo/demo.py::test_qwen3_embedding_demo -k 8B --timeout=0
 
 # everything (all paths, 0.6B unless noted)
-pytest models/demos/wormhole/qwen3_embedding_8b/demo/demo.py --timeout=0
+pytest models/demos/qwen3_embedding/demo/demo.py --timeout=0
 ```
 
 `HF_MODEL` selects the checkpoint the model is built from, so run the 0.6B and
@@ -189,8 +189,8 @@ compilation and prefill-trace warmup.
 
 ## Reference
 
-- `models/demos/wormhole/qwen3_embedding_8b/demo/demo.py` — this demo.
-- `models/demos/wormhole/qwen3_embedding_8b/demo/model.py` — the
+- `models/demos/qwen3_embedding/demo/demo.py` — this demo.
+- `models/demos/qwen3_embedding/tt/model.py` — the
   `Qwen3ForEmbedding` metal model.
 - `models/demos/qwen3_embedding/tt/generator_vllm.py` — the vLLM pooling adapter
   that wraps the same forward path for serving.

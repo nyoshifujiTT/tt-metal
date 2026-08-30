@@ -28,7 +28,7 @@ import torch
 
 def _load_adapter_with_stub_base(monkeypatch):
     """Import the adapter with a stubbed base wrapper (no ttnn / no device)."""
-    base_mod = types.ModuleType("models.demos.wormhole.qwen3_embedding_8b.demo.model")
+    base_mod = types.ModuleType("models.demos.qwen3_embedding.tt.model")
 
     class _StubBase:
         def __init__(self, *args, **kwargs):

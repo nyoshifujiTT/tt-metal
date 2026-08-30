@@ -26,7 +26,7 @@ import torch
 
 import pytest
 
-from models.demos.wormhole.qwen3_embedding_8b.demo.model import Qwen3ForEmbedding
+from models.demos.qwen3_embedding.tt.model import Qwen3ForEmbedding
 
 
 class _Recorder(Qwen3ForEmbedding):

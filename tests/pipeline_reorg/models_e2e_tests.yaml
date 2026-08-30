@@ -1759,7 +1759,7 @@
   cmd: |
     export HF_HUB_OFFLINE=0
     export HF_MODEL=Qwen/Qwen3-Embedding-0.6B
-    pytest --timeout 1200 models/demos/wormhole/qwen3_embedding_8b/demo/demo.py
+    pytest --timeout 1200 models/demos/qwen3_embedding/demo/demo.py
   model: qwen3_embedding
   skus:
     wh_n150:

@@ -45,7 +45,7 @@ from loguru import logger
 from sklearn.metrics.pairwise import cosine_similarity
 from transformers import AutoModel, AutoTokenizer
 
-from models.demos.wormhole.qwen3_embedding_8b.demo.model import Qwen3ForEmbedding
+from models.demos.qwen3_embedding.tt.model import Qwen3ForEmbedding
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_SEQUENCE_LENGTH = 8192

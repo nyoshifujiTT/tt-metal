@@ -21,7 +21,7 @@ import types
 import pytest
 import transformers
 
-from models.demos.wormhole.qwen3_embedding_8b.demo.model import Qwen3ForEmbedding
+from models.demos.qwen3_embedding.tt.model import Qwen3ForEmbedding
 
 
 def _fake_device():

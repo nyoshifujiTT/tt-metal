@@ -6,7 +6,7 @@
 Shared vLLM pooling adapter for the Qwen3-Embedding family.
 
 The upstream embedding wrapper (PR #35941) lives at
-``models/demos/wormhole/qwen3_embedding_8b/demo/model.py``. It targets
+``models/demos/qwen3_embedding/tt/model.py``. It targets
 plain vLLM. This adapter subclasses it and adds only what the TT vLLM plugin's
 pooling path needs, for both 0.6B and 8B.
 
@@ -39,7 +39,7 @@ from typing import Optional
 
 import torch
 
-from models.demos.wormhole.qwen3_embedding_8b.demo.model import (
+from models.demos.qwen3_embedding.tt.model import (
     Qwen3ForEmbedding,
 )
 
