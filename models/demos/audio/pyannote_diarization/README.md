@@ -1,0 +1,123 @@
+# pyannote speaker-diarization-community-1
+
+## Platforms:
+    Blackhole (p150)
+
+## Introduction
+
+[`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1) is a speaker-diarization pipeline: it segments an audio recording into "who spoke when". The pipeline runs two neural nets — a **WeSpeaker ResNet34** speaker-embedding model and a **PyanNet** (SincNet + BiLSTM) local-segmentation model — around host-side clustering. This demo ports both neural nets to ttnn so they execute on a Tenstorrent Blackhole p150, matching the torch reference within tolerance. The tests assert the bounds: WeSpeaker embedding cosine > 0.99, PyanNet segmentation logit cosine > 0.99 with powerset argmax agreement > 0.95, and an end-to-end diarization error rate < 0.05 against the same pipeline run entirely on host. On the 30 s sample the measured frame agreement is 0.998.
+
+## Prerequisites
+
+- Cloned [tt-metal repository](https://github.com/tenstorrent/tt-metal) for source code
+- Installed: [TT-Metalium™ / TT-NN™](https://github.com/tenstorrent/tt-metal/blob/main/INSTALLING.md)
+- `pip install "pyannote.audio==4.*" soundfile` (community-1 requires pyannote 4.x)
+
+## Weights
+
+Weights are fetched on demand, so there is nothing to place by hand. Model identity and model location are separate, as elsewhere in tt-metal: the repo id comes from `HF_MODEL` (default `pyannote/speaker-diarization-community-1`) and the location is resolved by the `model_location_generator` fixture, falling back to a Hugging Face download.
+
+`pyannote/speaker-diarization-community-1` is gated, so accept the terms on the model page and export a token:
+
+```sh
+export HF_TOKEN=hf_...
+```
+
+Without a token, point `HF_MODEL` at the ungated mirror. It carries the same checkpoints: the Hub tree API reports identical git object ids and sizes for `config.yaml`, `embedding/pytorch_model.bin`, `segmentation/pytorch_model.bin` and both `plda/*.npz` files.
+
+```sh
+export HF_MODEL=pyannote-community/speaker-diarization-community-1
+```
+
+## How to Run
+
+### Demo
+
+Diarize pyannote's bundled 30 s sample with the WeSpeaker embedding on device:
+
+```sh
+pytest --disable-warnings models/demos/audio/pyannote_diarization/demo/demo.py::test_demo
+```
+
+Diarize your own recording with both neural nets on device:
+
+```sh
+pytest --disable-warnings --input-path=/path/to/audio.wav models/demos/audio/pyannote_diarization/demo/demo.py::test_demo_both_nets
+```
+
+### Device-independent reference parity (no p150 needed)
+
+Validates the numpy op-graph against the real torch models, plus the weight-resolution helper:
+
+```sh
+pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_common_weight_resolution.py
+pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_wespeaker_numpy_ref_parity.py
+pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_pyannet_numpy_ref_parity.py
+pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_accuracy_helpers.py
+pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_synthetic_audio.py
+```
+
+No test needs a dataset: audio is either pyannote's bundled 30 s sample or generated from a fixed seed, so results are reproducible.
+
+### On-device parity (p150)
+
+```sh
+pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_ttnn_wespeaker_ondevice.py
+pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_ttnn_pyannet_ondevice.py
+pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_resident_narrow_ondevice.py
+pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_diarization_e2e_ondevice.py
+```
+
+Pass `--device-id` to pick a device; every test takes it from the shared `device` fixture.
+
+This model uses one chip, but the shared `device` fixture opens every chip the host has unless told otherwise, which takes the whole machine away from anyone else on it. Running pytest directly there is no launcher to scope it, so set `TT_VISIBLE_DEVICES` yourself — the same variable tt-inference-server's `--device-id` flag ends up expressing for its own workers:
+
+```sh
+TT_VISIBLE_DEVICES=0 pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_diarization_e2e_ondevice.py
+```
+
+Measured on a 4-chip host: `{0}` opened, 102.75 s, against 103.88 s when all four were opened — scoping costs nothing and leaves the other three free. Do not reach for `TT_MESH_GRAPH_DESC_PATH` to do this: that variable describes the host's topology, not the model's needs, so pointing it at the single-chip descriptor on a 4-chip host fails outright with `Physical chip id 0 not found in control plane chip mapping`.
+
+If a device run is inexplicably slow, reset the board (`tt-smi -r`) before looking anywhere else. A board that is not serving properly does not fail — it opens, it computes, it is just slow — and the giveaway is `Timed out while waiting for active ethernet core ... to become active again` from `llrt.cpp`. One run of this suite went past 10 minutes in that state and took 254 s after a reset.
+
+`test_diarization_e2e_ondevice.py` covers both the bundled sample and synthetic overlapping speech, so the multi-active-speaker path through the segmentation net is exercised without downloading a corpus.
+
+### Corpus DER (benchmark, not a test)
+
+Scoring a whole diarization corpus takes hours, so it is a CLI script rather than a pytest case:
+
+```sh
+python models/demos/audio/pyannote_diarization/benchmarks/corpus_der.py \
+    --corpus /path/to/voxconverse-test --split voxconverse-test
+```
+
+This is what produces the number comparable to pyannote's published DER (measured: 0.1113 against a published 0.112 on the VoxConverse test split). See `benchmarks/README.md`.
+
+## Details
+
+### Structure
+
+- `common.py` — weight resolution shared by the tests and the demo (`HF_MODEL` for identity, `model_location_generator` for location).
+- `tt/` — ttnn implementations:
+  - `ttnn_wespeaker.py` — `TTNNWeSpeaker`, the ResNet34 speaker embedding.
+  - `ttnn_wespeaker_resident.py` — device-resident fast path: the activation stays on device across the whole ResNet34 (input uploaded once, every conv/relu/residual runs on device, only the final feature map is downloaded); TSTP pooling and the `seg_1` linear stay on host so pyannote's exact (optionally weighted) pooling is preserved bit-for-bit.
+  - `ttnn_pyannet.py` — the PyanNet SincNet + BiLSTM local-segmentation net.
+- `reference/` — numpy reference op-graphs (`wespeaker_numpy_ref.py`, `pyannet_numpy_ref.py`), each parity-checked against the real torch model.
+- `pipeline.py` — builds the community-1 pipeline and swaps its two nets for the ttnn ports; shared by the tests, the demo and the benchmark.
+- `accuracy.py` — diarization error rate scoring and the published-DER table, shared with tt-inference-server's eval workflow so both report the same figure.
+- `tests/` — the parity tests listed above, plus `synthetic_audio.py` and its guard.
+- `benchmarks/corpus_der.py` — corpus-scale DER, run by hand.
+- `demo/demo.py` — the runnable demo.
+
+### What runs on device
+
+Both neural nets are executed with ttnn: WeSpeaker convolutions, residual-adds, relu and reductions; PyanNet SincNet convolutions and the BiLSTM (implemented as a device-resident batched recurrence, since ttnn has no fused LSTM). Host keeps only the pyannote clustering/pooling glue, matching the CPU pipeline numerically.
+
+### Test inputs
+
+No fixture data is checked in. The parity tests build their inputs from a fixed seed and compute the torch reference in process; the end-to-end test diarizes pyannote's bundled sample twice — host-only and on-device — and compares the two with diarization error rate. That keeps the assertion recording-independent: bf16 arithmetic can split a turn at a boundary without changing who spoke when.
+
+## Notes
+
+- The last time-chunk of a recording can be very narrow (time-width `W` down to 1). `ttnn_wespeaker_resident` zero-pads such conv inputs up to a safe width and crops the output back, so every conv runs on device with no host fallback. `tests/test_resident_narrow_ondevice.py` checks that path for `W = 1, 2, 4, 8, 12`: the cropped output keeps the exact unpadded shape and stays within bf16 tolerance of the numpy backbone (cosine > 0.99). This sidesteps a ttnn conv2d auto-shard reader-index assert (tenstorrent/tt-metal#35207, #43193).
+- ttnn prints harmless `leaked function/type` noise on exit; filter it with `grep -viE 'leaked|nanobind'`.
