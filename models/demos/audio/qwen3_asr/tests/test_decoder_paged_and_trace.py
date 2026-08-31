@@ -66,6 +66,37 @@ def test_decode_trace_is_on_by_default_and_overridable():
     assert "enable_trace=DECODE_TRACE" in src
 
 
+def _decode_trace(env_value):
+    """Mirror of the shipped parse, so the accepted spellings stay pinned.
+
+    The literal default is asserted above; this pins the *behaviour* of the
+    surrounding ``.strip().lower() in (...)`` that turns the raw environment
+    string into the flag, so an operator writing ``QWEN3ASR_DECODE_TRACE=off``
+    keeps getting an untraced decode.
+    """
+    raw = "1" if env_value is None else env_value
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def test_decode_trace_parse_matches_the_shipped_expression():
+    """The mirror is only meaningful if it is the same expression."""
+    assert '.strip().lower() in ("1", "true", "yes", "on")' in _read(DECODER)
+
+
+def test_decode_trace_defaults_on_when_unset():
+    assert _decode_trace(None) is True
+
+
+def test_decode_trace_accepts_the_documented_spellings():
+    for value in ("1", "true", "TRUE", "Yes", " on "):
+        assert _decode_trace(value) is True, value
+
+
+def test_decode_trace_treats_anything_else_as_off():
+    for value in ("0", "false", "no", "off", "", "  ", "nope"):
+        assert _decode_trace(value) is False, value
+
+
 def test_weight_dtype_defaults_to_bfloat8_b():
     src = _read(DECODER)
     assert 'os.environ.get("QWEN3ASR_DECODER_DTYPE", "bfloat8_b")' in src
