@@ -53,6 +53,18 @@ def test_paged_prefill_trims_the_page_table():
     assert "from models.tt_transformers.tt.common import get_block_size, num_blocks_in_seq" in src
 
 
+def test_paged_prefill_passes_only_the_single_user_row():
+    # paged_fill_cache indexes the row it is given, so the prefill must hand
+    # over exactly one row rather than the whole batch's table.
+    assert "page_table[0:1]" in _read(DECODER)
+
+
+def test_paged_prefill_pads_short_rows_with_minus_one():
+    # A row shorter than the padded length must be extended with the upstream
+    # "unmapped" sentinel, not with block 0, which is a live page.
+    assert "dtype=torch.int32) * -1" in _read(DECODER)
+
+
 def test_non_paged_stays_the_default():
     args_prefill = _sig("prefill_logits")
     src = _read(DECODER)
