@@ -70,6 +70,8 @@ pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_dia
 
 Pass `--device-id` to pick a device; every test takes it from the shared `device` fixture.
 
+Reset the board first (`tt-smi -r`). A board left in a bad state still opens and still computes, so it does not fail — it just gets slow: `ttnn.open_device` spends 20 s inside `llrt.cpp` waiting on an ethernet core that never comes back (`Timed out while waiting for active ethernet core ... to become active again`), and the tensor transfers behind it crawl. Measured on one host, same commit: in that state this suite ran past 10 minutes without finishing, and a `ttnn.to_torch` microbenchmark did not complete at all; after `tt-smi -r` the suite took **254 s** and the same `to_torch` took **0.312 ms** per call. If a device run is inexplicably slow, reset before looking anywhere else.
+
 `test_diarization_e2e_ondevice.py` covers both the bundled sample and synthetic overlapping speech, so the multi-active-speaker path through the segmentation net is exercised without downloading a corpus.
 
 ### Corpus DER (benchmark, not a test)
