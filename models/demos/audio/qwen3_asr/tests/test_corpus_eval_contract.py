@@ -98,3 +98,35 @@ def test_corpus_eval_norm_matches_reference_cases():
     assert norm("周りを見ると。") == norm("周りを見ると")
     assert norm("ＡＢＣ") == "ABC"
     assert norm("え、あの・そう") == "えあのそう"
+
+
+def test_corpus_eval_resamples_before_the_extractor():
+    """sampling_rate=16000 is a declaration, not a conversion request.
+
+    WhisperFeatureExtractor runs a 400-sample FFT with a 160-sample hop over
+    whatever array it is handed; it does not resample. Handing it a 44.1 kHz
+    clip while declaring 16 kHz stretches the clip 2.76x (a 10.44 s clip yields
+    2878 mel frames instead of 1044) and shifts every formant, so both the
+    transcript and the RTF come out wrong.
+    """
+    src = _read(EVAL)
+    assert "def resample_to_16k(" in src, "the eval must convert, not assume"
+    assert "wav, sr = resample_to_16k(wav, sr)" in src, (
+        "the conversion must happen on the read path, before the extractor"
+    )
+    read_at = src.index("wav, sr = sf.read(")
+    resample_at = src.index("wav, sr = resample_to_16k(wav, sr)")
+    extract_at = src.index("fe([wav], sampling_rate=16000")
+    assert read_at < resample_at < extract_at, (
+        "resampling must sit between the read and the feature extraction"
+    )
+
+
+def test_corpus_eval_measures_duration_after_resampling():
+    """clip_seconds must not be derived from a rate the wav no longer has."""
+    src = _read(EVAL)
+    resample_at = src.index("wav, sr = resample_to_16k(wav, sr)")
+    dur_at = src.index("clip_seconds = len(wav) / float(sr)")
+    assert resample_at < dur_at, (
+        "duration must be computed from the resampled wav and its new rate"
+    )
