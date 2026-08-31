@@ -70,7 +70,15 @@ pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_dia
 
 Pass `--device-id` to pick a device; every test takes it from the shared `device` fixture.
 
-Reset the board first (`tt-smi -r`). A board left in a bad state still opens and still computes, so it does not fail — it just gets slow: `ttnn.open_device` spends 20 s inside `llrt.cpp` waiting on an ethernet core that never comes back (`Timed out while waiting for active ethernet core ... to become active again`), and the tensor transfers behind it crawl. Measured on one host, same commit: in that state this suite ran past 10 minutes without finishing, and a `ttnn.to_torch` microbenchmark did not complete at all; after `tt-smi -r` the suite took **254 s** and the same `to_torch` took **0.312 ms** per call. If a device run is inexplicably slow, reset before looking anywhere else.
+This model uses one chip, but the shared `device` fixture opens every chip the host has unless told otherwise, which takes the whole machine away from anyone else on it. Scope the run to one device, the way the media server does for its own workers (`TT_VISIBLE_DEVICES` in `tt-media-server/utils/runner_utils.py`):
+
+```sh
+TT_VISIBLE_DEVICES=0 pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_diarization_e2e_ondevice.py
+```
+
+Measured on a 4-chip host: `{0}` opened, 102.75 s, against 103.88 s when all four were opened — scoping costs nothing and leaves the other three free. Do not reach for `TT_MESH_GRAPH_DESC_PATH` to do this: that variable describes the host's topology, not the model's needs, so pointing it at the single-chip descriptor on a 4-chip host fails outright with `Physical chip id 0 not found in control plane chip mapping`.
+
+If a device run is inexplicably slow, reset the board (`tt-smi -r`) before looking anywhere else. A board that is not serving properly does not fail — it opens, it computes, it is just slow — and the giveaway is `Timed out while waiting for active ethernet core ... to become active again` from `llrt.cpp`. One run of this suite went past 10 minutes in that state and took 254 s after a reset.
 
 `test_diarization_e2e_ondevice.py` covers both the bundled sample and synthetic overlapping speech, so the multi-active-speaker path through the segmentation net is exercised without downloading a corpus.
 
