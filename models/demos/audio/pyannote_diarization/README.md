@@ -70,7 +70,7 @@ pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_dia
 
 Pass `--device-id` to pick a device; every test takes it from the shared `device` fixture.
 
-This model uses one chip, but the shared `device` fixture opens every chip the host has unless told otherwise, which takes the whole machine away from anyone else on it. Scope the run to one device, the way the media server does for its own workers (`TT_VISIBLE_DEVICES` in `tt-media-server/utils/runner_utils.py`):
+This model uses one chip, but the shared `device` fixture opens every chip the host has unless told otherwise, which takes the whole machine away from anyone else on it. Running pytest directly there is no launcher to scope it, so set `TT_VISIBLE_DEVICES` yourself — the same variable tt-inference-server's `--device-id` flag ends up expressing for its own workers:
 
 ```sh
 TT_VISIBLE_DEVICES=0 pytest --disable-warnings models/demos/audio/pyannote_diarization/tests/test_diarization_e2e_ondevice.py
