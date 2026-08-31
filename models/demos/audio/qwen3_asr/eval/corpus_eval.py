@@ -22,6 +22,23 @@ MDIR = os.environ["TT_METAL_HOME"] + "/models/demos/audio/qwen3_asr"
 sys.path.insert(0, MDIR + "/reference")
 sys.path.insert(0, MDIR + "/tt")
 
+TARGET_SR = 16000
+
+
+def resample_to_16k(wav, sr):
+    """Return (wav, 16000), resampling if needed.
+
+    WhisperFeatureExtractor takes sampling_rate as a declaration, not as an
+    instruction to convert, so anything that is not already 16 kHz has to be
+    converted before it is handed over.
+    """
+    if sr == TARGET_SR:
+        return wav, TARGET_SR
+    import librosa
+
+    return librosa.resample(wav, orig_sr=sr, target_sr=TARGET_SR), TARGET_SR
+
+
 import ttnn  # noqa: E402
 from models.tt_transformers.tt.model_config import ModelArgs  # noqa: E402
 from models.tt_transformers.tt.common import PagedAttentionConfig  # noqa: E402
@@ -201,6 +218,14 @@ def main():
                 wav, sr = sf.read(path, dtype="float32")
                 if wav.ndim > 1:
                     wav = wav.mean(1)
+                # The extractor is told sampling_rate=16000 below and does NOT
+                # resample; it just runs a 400-sample FFT with a 160-sample hop
+                # over whatever it is handed. Feeding a 44.1 kHz clip as if it
+                # were 16 kHz stretches it 2.76x (a 10.44 s clip becomes 28.78 s
+                # of mel) and shifts every formant, so both the transcript and
+                # the RTF are wrong. Resample here instead of trusting the
+                # manifest to hold 16 kHz files.
+                wav, sr = resample_to_16k(wav, sr)
                 # Standard ASR speed metrics divide by the ORIGINAL waveform
                 # duration, not by a padded/feature length: RTF = processing /
                 # audio, RTFx = audio / processing (vLLM's own ASR benchmark and
