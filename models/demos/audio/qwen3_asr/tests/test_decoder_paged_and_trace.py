@@ -31,6 +31,19 @@ def _sig(name):
     raise AssertionError(f"{name} not found")
 
 
+def _defaults(name):
+    """Map every argument of ``name`` that has a default to that default."""
+    tree = ast.parse(_read(DECODER))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            args = node.args.args + node.args.kwonlyargs
+            defaults = list(node.args.defaults)
+            padded = [None] * (len(node.args.args) - len(node.args.defaults)) + defaults
+            padded += list(node.args.kw_defaults)
+            return {a.arg: d for a, d in zip(args, padded) if d is not None}
+    raise AssertionError(f"{name} not found")
+
+
 def test_prefill_logits_accepts_paged_kv():
     args = _sig("prefill_logits")
     assert "page_table" in args and "kv_cache" in args
@@ -63,6 +76,19 @@ def test_paged_prefill_pads_short_rows_with_minus_one():
     # A row shorter than the padded length must be extended with the upstream
     # "unmapped" sentinel, not with block 0, which is a live page.
     assert "dtype=torch.int32) * -1" in _read(DECODER)
+
+
+def test_paged_kv_arguments_default_to_none():
+    # Non-paged must stay the default on EVERY entry point: a positional-only
+    # caller (the ttnn demo) must not have to know about paging at all.
+    for name in ("prefill_logits", "generate"):
+        defaults = _defaults(name)
+        for arg in ("page_table", "kv_cache"):
+            assert arg in defaults, f"{name}: {arg} must be optional"
+            node = defaults[arg]
+            assert isinstance(node, ast.Constant) and node.value is None, (
+                f"{name}: {arg} must default to None, got {ast.dump(node)}"
+            )
 
 
 def test_non_paged_stays_the_default():
