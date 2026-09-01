@@ -23,11 +23,81 @@ trace opt-in per call, so we keep the shared decode path without the instability
 
 prefill (embeds) -> greedy decode loop (token ids) -> text.
 """
+import os
+
 import torch
 
 import ttnn
 from models.tt_transformers.tt.generator import Generator
+from models.tt_transformers.tt.common import get_block_size, num_blocks_in_seq
 from models.tt_transformers.tt.model import Transformer
+
+
+# Weight dtype for the text decoder. A serving stack that builds the decoder with
+# bfloat8_b and a demo that builds it with bfloat16 decode the same clip
+# differently ("コース" instead of "構成"), which looks like a model bug but is
+# just a different quantisation. Default to bfloat8_b and make it explicit.
+_DTYPES = {"bfloat8_b": ttnn.bfloat8_b, "bfloat16": ttnn.bfloat16}
+
+
+def decoder_weight_dtype():
+    """ttnn dtype for the decoder weights, overridable via QWEN3ASR_DECODER_DTYPE."""
+    name = os.environ.get("QWEN3ASR_DECODER_DTYPE", "bfloat8_b")
+    if name not in _DTYPES:
+        raise ValueError(f"QWEN3ASR_DECODER_DTYPE must be one of {sorted(_DTYPES)}, got {name!r}")
+    return _DTYPES[name]
+
+
+# Every prefill is padded to ONE bucket so a long-lived process only ever
+# compiles/executes a single prefill program shape. tt-metal has a length-keyed
+# program-cache collision (the prefill matmul hash does not cover the reshaped
+# dim -3), tracked as tenstorrent/tt-metal#49451: mixing a 512-padded and a
+# 1024-padded prefill in one process TT_FATALs, and even where it survives the
+# same audio transcribes differently ("構成" vs "コース") depending on which
+# bucket it landed in.
+#
+# The bucket therefore has to be IDENTICAL across every front-end that shares a
+# process or is compared against another. 512 covers the prompts this model sees
+# (~30s clip -> ~390 audio tokens + prompt); raise QWEN3ASR_PREFILL_PIN if a
+# deployment needs longer single-shot clips, but raise it for ALL front-ends.
+PREFILL_PIN_LEN = int(os.environ.get("QWEN3ASR_PREFILL_PIN", "512"))
+
+
+# Capture a decode trace. Without it every decode step pays full per-op host
+# dispatch: measured 489 ms/token untraced on p150 versus 113 ms traced, which is
+# what makes an untraced front-end look ~4x slower than a traced serving path for
+# the same model. Override with QWEN3ASR_DECODE_TRACE=0 if a deployment hits the
+# long-run trace instability noted in the README.
+DECODE_TRACE = os.environ.get("QWEN3ASR_DECODE_TRACE", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+# Stop ids from the checkpoint's generation_config ("eos_token_id": [151643,
+# 151645]). Callers that stop on only one of them keep decoding past a valid stop
+# and emit tokens the reference implementation never produces.
+EOS_TOKEN_IDS = (151643, 151645)
+
+
+def apply_repetition_penalty(logits, seen_ids, penalty):
+    """vLLM repetition penalty, applied in place on a 1-D logit row.
+
+    Positive logits are divided by ``penalty`` and negative ones multiplied, for
+    every token id in ``seen_ids``.
+
+    ``seen_ids`` must be the union of the PROMPT token ids and the ids generated
+    so far. vLLM's ``apply_penalties`` builds ``prompt_mask | output_mask`` and
+    penalises both (see ``_custom_ops.apply_repetition_penalties_torch``);
+    penalising only the generated ids is HF transformers' behaviour and decodes
+    differently.
+    """
+    if penalty is None or penalty == 1.0 or seen_ids is None or len(seen_ids) == 0:
+        return logits
+    ids = torch.tensor(sorted({int(i) for i in seen_ids}), dtype=torch.long)
+    ids = ids[ids < logits.shape[-1]]
+    if ids.numel() == 0:
+        return logits
+    selected = logits[ids]
+    logits[ids] = torch.where(selected > 0, selected / penalty, selected * penalty)
+    return logits
 
 
 class Qwen3ASRDecoder(Transformer):
@@ -65,12 +135,21 @@ class Qwen3ASRDecoder(Transformer):
         return tuple(out)
 
     @torch.no_grad()
-    def prefill_logits(self, inputs_embeds):
+    def prefill_logits(self, inputs_embeds, page_table=None, kv_cache=None):
         """Run prefill on merged embeddings via the shared Generator single-user text
-        path; return last-token logits (torch, vocab) and populate the internal KV cache
-        for decoding. Pads the sequence to a multiple of 512, min 512 (the Blackhole
+        path; return last-token logits (torch, vocab) and populate the KV cache for
+        decoding. Pads the sequence to a multiple of 512, min 512 (the Blackhole
         prefill_len_cutoff / MLP reshape rule — see the comment on S_pad below); causal
-        masking makes the trailing pad positions invisible to the last real token."""
+        masking makes the trailing pad positions invisible to the last real token.
+
+        ``page_table``/``kv_cache`` opt into paged KV. They default to None, which
+        keeps the self-allocating single-shot behaviour. A serving stack that runs
+        paged KV must pass them, because paged and non-paged decode dispatch to
+        DIFFERENT SDPA kernels (paged_scaled_dot_product_attention_decode vs
+        scaled_dot_product_attention_decode) and do not produce the same output.
+
+        ``kv_cache`` is the per-submesh structure allocate_vllm_kv_cache returns
+        (``list[submesh][layer][k, v]``); this single-replica path uses submesh 0."""
         S = inputs_embeds.shape[-2]
         last = S - 1
         # Always pad prefill to a multiple of 512 (the Blackhole prefill_len_cutoff), min 512.
@@ -82,19 +161,36 @@ class Qwen3ASRDecoder(Transformer):
         # always <=512 tokens, so min-512 pins every request to the single [1,1,512,d] shape and
         # sidesteps the collision. Caps single-shot at max_seq_len (2048 -> ~150s); trailing pad is
         # causal-masked. See README "Known limitations" and docs/prefill_program_cache_collision_issue.md.
-        S_pad = ((S + 511) // 512) * 512
+        S_pad = max(((S + 511) // 512) * 512, PREFILL_PIN_LEN)
         if S_pad != S:
             inputs_embeds = torch.nn.functional.pad(inputs_embeds, (0, 0, 0, S_pad - S))
         # Generator's single-user text prefill calls our embeds-aware prepare_inputs_prefill
         # + the shared ttnn_prefill_forward. Non-paged single-shot (page_table/kv_cache=None):
         # S_pad <= max_seq_len (2048) <= max_prefill_chunk_size, so it stays on the single-chunk
         # path (no paging required). It applies get_last_token=(last // 32) * 32 internally.
+        # A paged prefill must see the user's page-table row trimmed to the blocks
+        # the PADDED length covers, which is what Generator._get_prefill_user_page_table
+        # does; handing it every block of the user's range makes the kernel attend
+        # over KV pages beyond the prompt.
+        # prefill_forward_single_user_text hands kv_cache straight to the model, so
+        # it wants THIS replica's layer list, while decode_forward indexes
+        # kv_cache[model_id]. Unwrap submesh 0 here (single replica) rather than at
+        # the caller, so both paths can be given the same structure.
+        model_kv_cache = kv_cache[0] if kv_cache is not None else None
+        prefill_page_table = page_table
+        if page_table is not None and model_kv_cache is not None:
+            num_blocks = num_blocks_in_seq(S_pad, get_block_size(model_kv_cache))
+            prefill_page_table = page_table[0:1]
+            if prefill_page_table.shape[1] < num_blocks:
+                padding = torch.ones(1, num_blocks - prefill_page_table.shape[1], dtype=torch.int32) * -1
+                prefill_page_table = torch.cat([prefill_page_table, padding], dim=1)
+            prefill_page_table = prefill_page_table[:, :num_blocks]
         tt_logits = self.generator.prefill_forward_single_user_text(
             inputs_embeds,
-            page_table=None,
+            page_table=prefill_page_table,
             user_id=0,
             last_token_idx=last,
-            kv_cache=None,
+            kv_cache=model_kv_cache,
             batch_size=1,
         )
         tt_logits = ttnn.from_device(tt_logits)
@@ -103,9 +199,34 @@ class Qwen3ASRDecoder(Transformer):
         return full.float(), S
 
     @torch.no_grad()
-    def generate(self, inputs_embeds, max_new_tokens=64, eos_id=151645):
-        logits, S = self.prefill_logits(inputs_embeds)
-        nxt = int(logits.argmax())
+    def generate(
+        self,
+        inputs_embeds,
+        max_new_tokens=64,
+        eos_id=None,
+        repetition_penalty=1.0,
+        prompt_ids=None,
+        page_table=None,
+        kv_cache=None,
+    ):
+        """Greedy decode.
+
+        ``eos_id`` accepts a single id or a collection; it defaults to every stop
+        id the checkpoint declares (see EOS_TOKEN_IDS).
+
+        ``repetition_penalty`` mirrors the OpenAI/vLLM request parameter and must
+        match whatever the serving path is asked for, or the two decode different
+        token sequences from identical logits. ``prompt_ids`` are the prompt token
+        ids: vLLM penalises prompt tokens as well as generated ones."""
+        if eos_id is None:
+            eos_ids = EOS_TOKEN_IDS
+        elif isinstance(eos_id, int):
+            eos_ids = (eos_id,)
+        else:
+            eos_ids = tuple(eos_id)
+        seen = [] if prompt_ids is None else [int(i) for i in prompt_ids]
+        logits, S = self.prefill_logits(inputs_embeds, page_table=page_table, kv_cache=kv_cache)
+        nxt = int(apply_repetition_penalty(logits.reshape(-1), seen, repetition_penalty).argmax())
         out = [nxt]
         pos = S
         gen = self.generator
@@ -114,19 +235,28 @@ class Qwen3ASRDecoder(Transformer):
         # (the wide reduction costs more than the logits host transfer), and a non-traced decode
         # stays stable across the mixed request shapes of a long-lived server (a persistent
         # decode trace did not — see README "Known limitations").
-        while len(out) < max_new_tokens and nxt != eos_id:
+        # The decode graph is built for args.max_batch_size, and
+        # prepare_decode_inputs_host asserts the token batch matches it, so feed a
+        # B-wide step with this single user in slot 0 and read slot 0 back. Idle
+        # slots are parked at position 0 so they cannot touch a live KV page.
+        batch = int(getattr(self.args, "max_batch_size", 1) or 1)
+        while len(out) < max_new_tokens and nxt not in eos_ids:
+            tokens = torch.zeros(batch, 1, dtype=torch.long)
+            tokens[0, 0] = nxt
+            positions = torch.zeros(batch, dtype=torch.int64)
+            positions[0] = pos
             dl = gen.decode_forward(
-                torch.tensor([[nxt]], dtype=torch.long),
-                torch.tensor([pos]),
-                page_table=None,
-                kv_cache=None,
-                enable_trace=False,
+                tokens,
+                positions,
+                page_table=page_table,
+                kv_cache=kv_cache,
+                enable_trace=DECODE_TRACE,
                 read_from_device=True,
             )
-            dl = (dl[0] if isinstance(dl, tuple) else dl).squeeze().float()
-            nxt = int(dl.argmax())
+            dl = (dl[0] if isinstance(dl, tuple) else dl).float().reshape(batch, -1)[0]
+            nxt = int(apply_repetition_penalty(dl, seen + out, repetition_penalty).argmax())
             out.append(nxt)
             pos += 1
-        if out and out[-1] == eos_id:
+        if out and out[-1] in eos_ids:
             out = out[:-1]
         return out
