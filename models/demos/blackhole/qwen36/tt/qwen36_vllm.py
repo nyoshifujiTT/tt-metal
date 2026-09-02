@@ -153,33 +153,36 @@ class Qwen36ForCausalLM(Generator, SupportsMultiModal):
         return self.model[0].allocate_kv_caches(kv_cache_shape, ttnn.bfloat16, batch_size=batch_size)
 
     @staticmethod
-    def _has_visual(kwargs, pixel_key):
+    def _has_visual(kwargs, pixel_key, user_id=0):
         """True only when the request carries REAL visual data for this modality. vLLM attaches an
         empty pixel_values placeholder to text requests for a multimodal-registered model, so a
         plain ``is not None`` check misclassifies text as multimodal. Mirrors the emptiness test in
         _gather_user_visual (key absent / empty list / first item None => text-only)."""
         v = kwargs.get(pixel_key)
-        return v is not None and len(v) > 0 and v[0] is not None
+        return v is not None and len(v) > user_id and v[user_id] is not None
 
     @staticmethod
-    def _gather_user_visual(kwargs, pixel_key, grid_key):
-        """Pull this (B=1) user's patches + (t,h,w) grids for one modality out of the vLLM kwargs.
+    def _gather_user_visual(kwargs, pixel_key, grid_key, user_id=0):
+        """Pull one user's patches + (t,h,w) grids for one modality out of the vLLM kwargs.
 
         Returns (pixel_values, grid_thw) or None when the request carries nothing for this modality.
         Multiple items for the user arrive as lists; concat the patches and stack the grids (same
         shape get_image_features / get_video_features expect: [num_patches, patch_dim] + [N, 3]).
+
+        ``user_id`` indexes the request within the prefill batch; the kwargs are per-request lists,
+        so a text-only request inside a mixed batch yields None for its own row.
         """
-        if pixel_key not in kwargs or len(kwargs[pixel_key]) == 0 or kwargs[pixel_key][0] is None:
+        if pixel_key not in kwargs or len(kwargs[pixel_key]) <= user_id or kwargs[pixel_key][user_id] is None:
             return None
-        pixel_values = kwargs[pixel_key][0]
-        grid_thw = kwargs[grid_key][0]
+        pixel_values = kwargs[pixel_key][user_id]
+        grid_thw = kwargs[grid_key][user_id]
         if isinstance(pixel_values, list) and len(pixel_values) > 0:
             pixel_values = torch.concat(pixel_values, dim=0)
             grid_thw = torch.stack([g.to(dtype=torch.int32) for g in grid_thw], dim=0)
         return pixel_values, grid_thw
 
-    def _compute_vision_tokens(self, model, kwargs):
-        """Run the vision tower for this (single-user, B=1) request, if it carries images or video.
+    def _compute_vision_tokens(self, model, kwargs, user_id=0):
+        """Run the vision tower for one request, if it carries images or video.
 
         Mirrors the Qwen3-VL generator's multimodal check: pull this user's pixels + grid out of
         the vLLM kwargs and return the packed embeddings (ttnn [num_vision_tokens, H]) for prefill
@@ -190,11 +193,11 @@ class Qwen36ForCausalLM(Generator, SupportsMultiModal):
         build the video M-RoPE. A request carries at most one visual modality (see
         get_supported_mm_limits); video takes precedence if both are somehow present.
         """
-        video = self._gather_user_visual(kwargs, "pixel_values_videos", "video_grid_thw")
+        video = self._gather_user_visual(kwargs, "pixel_values_videos", "video_grid_thw", user_id)
         if video is not None:
             return model.get_video_features(*video)
 
-        image = self._gather_user_visual(kwargs, "pixel_values", "image_grid_thw")
+        image = self._gather_user_visual(kwargs, "pixel_values", "image_grid_thw", user_id)
         if image is not None:
             return model.get_image_features(*image)
 
@@ -204,15 +207,9 @@ class Qwen36ForCausalLM(Generator, SupportsMultiModal):
         """All prefill is model-owned (Generator drives decode only)."""
         model = self.model[0]
         if model.num_devices > 1 and model.args.max_batch_size > 1:
-            # Batched text prefill into decode slots (MM is B=1). Require real visual data, not a
-            # non-None empty pixel_values placeholder from vLLM on text requests.
-            assert not self._has_visual(kwargs, "pixel_values") and not self._has_visual(
-                kwargs, "pixel_values_videos"
-            ), (
-                "batched (max_num_seqs>1) serving is text-only; multimodal is single-sequence "
-                "(max_concurrency=1). Run the model at max_num_seqs=1 for image/video requests."
+            return self._prefill_forward_tp_batched(
+                model, tokens, page_table, prompt_lens, kwargs.get("empty_slots"), kwargs
             )
-            return self._prefill_forward_tp_batched(model, tokens, page_table, prompt_lens, kwargs.get("empty_slots"))
         vision_tokens = self._compute_vision_tokens(model, kwargs)
         if model.num_devices > 1:
             return self._prefill_forward_tp(model, tokens, page_table, prompt_lens, vision_tokens=vision_tokens)
@@ -232,10 +229,10 @@ class Qwen36ForCausalLM(Generator, SupportsMultiModal):
         )
         logits = ttnn.to_torch(logits)
         # The vLLM runner unpacks (logits, rope_deltas) because the HF config has mrope_section.
-        # Zero deltas are returned for all modalities: the multimodal M-RoPE delta is applied
-        # entirely model-side (build_request_rope stashes self.rope.rope_delta during prefill, and
-        # every decode path offsets the rope position by it), so the value handed back to vLLM is
-        # unused for device-side rope and stays zero.
+        # Single-sequence serving applies the delta model-side: build_request_rope stashes it during
+        # prefill and decode reads it back through the scalar fallback, so the value handed to vLLM
+        # is unused here and stays zero. Batched prefill reports real deltas (see the batched path),
+        # because there one scalar cannot describe every slot.
         rope_deltas = torch.zeros(logits.shape[0], dtype=torch.long)
         logger.info(f"Finished prefill up to {seq_len} tokens, starting decode...")
         return logits, rope_deltas
@@ -268,7 +265,7 @@ class Qwen36ForCausalLM(Generator, SupportsMultiModal):
         logger.info(f"Finished prefill up to {T} tokens, starting decode...")
         return logits, torch.zeros(1, dtype=torch.long)
 
-    def _prefill_forward_tp_batched(self, model, tokens, page_table, prompt_lens, empty_slots):
+    def _prefill_forward_tp_batched(self, model, tokens, page_table, prompt_lens, empty_slots, kwargs=None):
         """TP batched (max_num_seqs>1) prefill: prefill each request in this step into its decode slot.
 
         vLLM prefills new requests while other slots decode, so each user's B=1 state is written into
@@ -279,7 +276,9 @@ class Qwen36ForCausalLM(Generator, SupportsMultiModal):
         page_table:  torch [N, max_blocks] — row u = request u's blocks.
         prompt_lens: per-request real lengths (row u trimmed to prompt_lens[u]).
         empty_slots: per-request decode slot; defaults to range(N) (mirrors Generator.prefill_forward_text).
-        Returns ([N, 1, vocab] host logits, [N] zero rope_deltas — text M-RoPE delta is 0, applied model-side).
+        kwargs:      the vLLM prefill kwargs, carrying the per-request pixel values. Each request's
+                     vision tower runs on its own row, so image and text requests may share a batch.
+        Returns ([N, 1, vocab] host logits, [N] per-request M-RoPE deltas — 0 for a text request).
         """
         N = tokens.shape[0]
         plens = [int(prompt_lens[u]) for u in range(N)] if prompt_lens is not None else [tokens.shape[1]] * N
@@ -288,11 +287,15 @@ class Qwen36ForCausalLM(Generator, SupportsMultiModal):
         empty_slots = [int(s) for s in empty_slots]
         token_ids_list = [tokens[u : u + 1, : plens[u]].to(torch.int32) for u in range(N)]
         pt = page_table if isinstance(page_table, torch.Tensor) else ttnn.to_torch(page_table)
+        kwargs = kwargs or {}
+        vision_tokens_list = [self._compute_vision_tokens(model, kwargs, u) for u in range(N)]
         logger.info(f"Prefilling {N} user(s) into slots {empty_slots} (TP batched masked-bucket)")
-        host_logits = model.prefill_paged_slots(token_ids_list, pt, empty_slots, valid_lens=plens)
+        host_logits, rope_deltas = model.prefill_paged_slots(
+            token_ids_list, pt, empty_slots, valid_lens=plens, vision_tokens_list=vision_tokens_list
+        )
         logits = torch.cat([hl.reshape(1, 1, -1) for hl in host_logits], dim=0)  # [N, 1, vocab]
         logger.info(f"Finished batched prefill of {N} user(s), starting decode...")
-        return logits, torch.zeros(N, dtype=torch.long)
+        return logits, torch.tensor(rope_deltas, dtype=torch.long)
 
     def decode_forward(self, *args, **kwargs):
         # Traced decode (single-device and TP): trace captured at pos 0 in warmup, replayed here.
