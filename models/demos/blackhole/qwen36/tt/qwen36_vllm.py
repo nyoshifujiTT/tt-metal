@@ -35,10 +35,10 @@ _BLOCK_SIZE = 64
 
 class TT_Qwen3_5ProcessingInfo(Qwen3_5ProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        # Serve a single visual item per request (B=1, max_concurrency=1). Image and video are both
-        # supported, but only ONE modality per request: the model's vision splice keys off a single
-        # placeholder token id (image_token_id XOR video_token_id), so a mixed image+video prompt
-        # cannot be spliced correctly.
+        # One visual item per request. Image and video are both supported, but only ONE modality
+        # per request: the model's vision splice keys off a single placeholder token id
+        # (image_token_id XOR video_token_id), so a mixed image+video prompt cannot be spliced
+        # correctly. This is a per-request limit; requests themselves batch freely.
         return {"image": 1, "video": 1}
 
 
