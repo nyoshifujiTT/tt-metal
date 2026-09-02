@@ -910,7 +910,7 @@ class Qwen36Model:
 
         # RoPE position is offset by rope_delta for a multimodal request (image tokens compress the
         # position space); the KV/cache position (cur_pos_tensor below) stays the true sequence pos.
-        position_ids = torch.full((B, 1), current_pos + self.rope.rope_delta, dtype=torch.long)
+        position_ids = (current_pos + self.rope.decode_delta_vec(B).to(torch.long)).reshape(B, 1)
         cos, sin = self.rope.get_rot_mats(position_ids)
 
         # cur_pos for SDPA decode + paged_update_cache ([B*n_kv] after cache reshape).
@@ -3165,7 +3165,7 @@ class Qwen36Model:
         ttnn.deallocate(token_ids_ttnn)
 
         # RoPE position offset by rope_delta for multimodal (KV position stays the true seq pos).
-        position_ids = torch.full((B, 1), current_pos + self.rope.rope_delta, dtype=torch.long)
+        position_ids = (current_pos + self.rope.decode_delta_vec(B).to(torch.long)).reshape(B, 1)
         cos, sin = self.rope.get_rot_mats(position_ids)
 
         # cur_pos [B] for paged ops (not [B*n_kv] like non-paged decode).
@@ -3213,7 +3213,8 @@ class Qwen36Model:
         # RoPE position is the KV position offset by rope_delta (multimodal compresses the position
         # space; post-image text has t==h==w so 1D RoPE at rope_pos is correct). cur_pos_tt below
         # stays the true KV position. rope_delta is 0 for text, so this is a no-op there.
-        rope_pos_vec = pos_vec + self.rope.rope_delta
+        # The offset is per-slot: each decode slot carries the delta of the request occupying it.
+        rope_pos_vec = pos_vec + self.rope.decode_delta_vec(B)
         if self.num_devices > 1:
             # TP: rope_tp cos/sin [1,B,1,rope_dim] packed on host.
             rd = self.args.rope_head_dim
