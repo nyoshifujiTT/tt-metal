@@ -374,7 +374,7 @@ def test_model_tp_prefill_paged_slots(mesh_device, B, reset_seeds, ensure_gc):
     comp0 = ttnn.ConcatMeshToTensor(mesh_device, dim=0)
     token_list = [torch.tensor([prompts[u]], dtype=torch.long) for u in range(B)]
     # Per-slot prefill into slots 0..B-1 (the default empty_slots order the plugin uses for a fresh batch).
-    pf_host = model.prefill_paged_slots(token_list, page_table, list(range(B)), valid_lens=prompt_lens)
+    pf_host, _ = model.prefill_paged_slots(token_list, page_table, list(range(B)), valid_lens=prompt_lens)
     pf_torch = [pf_host[u].reshape(-1, vocab)[0].float() for u in range(B)]
 
     dec_torch = [[] for _ in range(B)]
@@ -504,8 +504,8 @@ def test_model_tp_prefill_paged_slots_long(mesh_device, T, traced, reset_seeds, 
         assert bmodel._chunked_trace_id is None, "eager warmup must NOT park the chunk trace"
 
     token_list = [torch.tensor([prompts[u]], dtype=torch.long) for u in range(B)]
-    # prefill_paged_slots returns host torch logits [1,1,vocab] per user (in call order).
-    bpf = bmodel.prefill_paged_slots(token_list, bpt, list(range(B)), valid_lens=prompt_lens)
+    # prefill_paged_slots returns host torch logits [1,1,vocab] plus the mrope delta, per user.
+    bpf, _ = bmodel.prefill_paged_slots(token_list, bpt, list(range(B)), valid_lens=prompt_lens)
     batched_pf = [bpf[u].reshape(-1, vocab)[0].float() for u in range(B)]
     # Assembled batched rec_state per GDN layer: [N*B, Nv, Dk, Dv] (device-major); device-0 user u = row u.
     batched_rec = [

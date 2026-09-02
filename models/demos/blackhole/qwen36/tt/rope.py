@@ -171,6 +171,19 @@ class Qwen36RoPESetup:
             vec[slot] = int(delta or 0)
         self._slot_deltas = vec
 
+    def set_slot_delta(self, slot, delta, batch_size):
+        """Park one request's mrope_position_delta in the decode slot it was prefilled into.
+
+        Batched prefill fills slots one request at a time while others keep decoding, so this
+        updates a single entry and leaves the live slots untouched."""
+        if self._slot_deltas is None:
+            self._slot_deltas = torch.zeros(batch_size, dtype=torch.int32)
+        elif self._slot_deltas.shape[0] < batch_size:
+            pad = torch.zeros(batch_size - self._slot_deltas.shape[0], dtype=torch.int32)
+            self._slot_deltas = torch.cat([self._slot_deltas, pad])
+        if 0 <= slot < self._slot_deltas.shape[0]:
+            self._slot_deltas[slot] = int(delta or 0)
+
     def decode_delta_vec(self, batch_size):
         """Per-slot rope offsets as an int32 ``[batch_size]`` tensor for ``rope_pos = kv_pos + delta``.
 

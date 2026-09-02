@@ -1730,7 +1730,7 @@ class Qwen36Model:
             for hl in host_logits
         ]
 
-    def prefill_paged_slots(self, token_ids_list, page_table, empty_slots, valid_lens=None):
+    def prefill_paged_slots(self, token_ids_list, page_table, empty_slots, valid_lens=None, vision_tokens_list=None):
         """vLLM continuous-batching TP prefill: prefill each new request into ITS decode slot.
 
         The per-slot analogue of prefill_paged_peruser for online serving. Under vLLM a new
@@ -1746,7 +1746,11 @@ class Qwen36Model:
         page_table:     torch.Tensor [N, max_blocks] int32 — row u = request u's blocks.
         empty_slots:    list of N ints — request u's persistent decode slot.
         valid_lens:     optional list of N real token counts (defaults to each T_u).
-        Returns:        list of N host torch logits [1, 1, vocab_size] (one per request, in call order).
+        vision_tokens_list: optional list of N packed vision embeddings (ttnn [num_vision_tokens, H])
+                        or None per request; a text-only request passes None. Each user's rows are
+                        spliced during ITS prefill, so a batch may mix multimodal and text requests.
+        Returns:        (list of N host torch logits [1, 1, vocab_size], list of N int mrope deltas),
+                        both in call order. The delta is 0 for a text request.
 
         Call allocate_kv_caches(batch_size=B) + the batched warmup first. Any prompt length is served:
         prefill_traced_chunked chunks long prompts via pre-warmed programs (no post-park compile).
@@ -1765,6 +1769,7 @@ class Qwen36Model:
         # long-prompt path replays correctly; short prompts use the masked bucket on the same scratch.
         prev = self._bind_gdn_prefill_scratch()
         host_logits = []
+        rope_deltas = []
         per_user_rec = []
         per_user_conv = []
         try:
@@ -1773,9 +1778,17 @@ class Qwen36Model:
                 assert toks.shape[0] == 1, f"request {u}: token_ids must be [1, T_u]"
                 actual = int(valid_lens[u]) if valid_lens is not None else toks.shape[1]
                 assert actual >= 1, f"request {u}: empty prompt (actual_len={actual})"
+                # Each request carries its own vision rows and, through them, its own M-RoPE table
+                # and delta: prefill_traced_chunked stages both from this user's vision_tokens
+                # before running, so the per-user state cannot leak into the next iteration.
+                vision_tokens = vision_tokens_list[u] if vision_tokens_list is not None else None
                 # Trace-safe prefill into the B=1 scratch: prefill_traced_chunked runs short prompts in
                 # one masked-bucket forward and chunks longer ones; GDN state carries + is snapshotted below.
-                lg = self.prefill_traced_chunked(toks[:, :actual], pt[u : u + 1], actual_len=actual)
+                lg = self.prefill_traced_chunked(
+                    toks[:, :actual], pt[u : u + 1], actual_len=actual, vision_tokens=vision_tokens
+                )
+                # Read the delta this user's M-RoPE staged, before the next user overwrites it.
+                rope_deltas.append(int(self.rope.rope_delta))
                 host_logits.append(
                     ttnn.to_torch(lg, mesh_composer=comp).reshape(-1, self.args.vocab_size)[:1].float().view(1, 1, -1)
                 )
@@ -1794,7 +1807,10 @@ class Qwen36Model:
         # Write each user's snapshot into its decode slot, preserving the other live rows.
         for u in range(N):
             self._write_gdn_slot(int(empty_slots[u]), per_user_rec[u], per_user_conv[u])
-        return host_logits
+        # Park the per-slot offsets so decode rotates each slot by the delta of the request in it.
+        for u in range(N):
+            self.rope.set_slot_delta(int(empty_slots[u]), rope_deltas[u], self.args.max_batch_size)
+        return host_logits, rope_deltas
 
     def _write_gdn_slot(self, slot, rec_snap, conv_snap):
         """Upload one request's B=1 GDN state snapshot (host torch, per GDN layer) and write it
