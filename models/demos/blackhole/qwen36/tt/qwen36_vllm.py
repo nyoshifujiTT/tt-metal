@@ -301,6 +301,12 @@ class Qwen36ForCausalLM(Generator, SupportsMultiModal):
             self._decode_logged = True
             logger.info("Decode trace replay active (Qwen)")
         model = self.model[0]
+        # mRoPE: the plugin sends the batch's per-request mrope_position_delta whenever the batch
+        # composition changes, and None while it is unchanged (keep the installed vector). The
+        # list is in decode-slot order, so it maps straight onto the model's per-slot offsets.
+        rope_deltas_all_users = kwargs.pop("rope_deltas_all_users", None)
+        if rope_deltas_all_users is not None:
+            model.rope.set_slot_deltas(rope_deltas_all_users, model.args.max_batch_size)
         # Batched serving: apply vLLM's condense slot_remap to the per-slot GDN recurrent/conv state
         # BEFORE the decode trace reads it. The plugin remaps its own buffers (and the seed RNG via
         # super().decode_forward), but GDN state is model-internal, so mirror the same reindex here.
@@ -309,6 +315,8 @@ class Qwen36ForCausalLM(Generator, SupportsMultiModal):
             slot_remap = kwargs.get("slot_remap")
             if slot_remap is not None:
                 model._remap_gdn_slots(slot_remap)
+                # The per-slot rope offsets are model-internal too, so they move with the state.
+                model.rope.remap_slot_deltas(slot_remap)
         # Decode bucketing (default on; TT_DECODE_BUCKETING=0 off): slice host inputs to the
         # smallest power-of-2 width >= active prefix [0:num_active) before the base forward.
         # No runner edit / output re-pad — plugin reads unpadded_batch_size in slot order.
