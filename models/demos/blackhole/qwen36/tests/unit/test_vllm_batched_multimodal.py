@@ -158,3 +158,12 @@ def test_prompt_lens_trim_each_row():
     page_table = torch.zeros(2, 4, dtype=torch.int32)
     _wrapper(model).prefill_forward(tokens, page_table, None, torch.tensor([5, 16], dtype=torch.int32))
     assert [t.shape[1] for t in model.prefill_call.token_ids_list] == [5, 16]
+
+
+def test_only_image_is_advertised():
+    # Admitting video would let vLLM accept a request the engine cannot serve: the vision tower
+    # runs and the engine then exits before prefill, taking the server down.
+    from models.demos.blackhole.qwen36.tt.qwen36_vllm import TT_Qwen3_5ProcessingInfo
+
+    limits = TT_Qwen3_5ProcessingInfo.get_supported_mm_limits(object())
+    assert limits == {"image": 1}

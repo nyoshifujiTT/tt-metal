@@ -35,11 +35,15 @@ _BLOCK_SIZE = 64
 
 class TT_Qwen3_5ProcessingInfo(Qwen3_5ProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        # One visual item per request. Image and video are both supported, but only ONE modality
-        # per request: the model's vision splice keys off a single placeholder token id
-        # (image_token_id XOR video_token_id), so a mixed image+video prompt cannot be spliced
-        # correctly. This is a per-request limit; requests themselves batch freely.
-        return {"image": 1, "video": 1}
+        # One image per request: the vision splice keys off a single placeholder token id, so a
+        # prompt carrying several visual items cannot be spliced correctly. This is a per-request
+        # limit; requests themselves batch freely.
+        #
+        # Video is not advertised. A video request runs the vision tower and then exits the engine
+        # before prefill, taking the server down with it, so admitting one cannot serve it. The
+        # code paths below still dispatch video, and re-adding "video": 1 here re-enables them once
+        # that is fixed.
+        return {"image": 1}
 
 
 @MULTIMODAL_REGISTRY.register_processor(
