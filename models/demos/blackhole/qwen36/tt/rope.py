@@ -69,6 +69,11 @@ class Qwen36RoPESetup:
         self._req_cos = None  # [S, head_dim] bf16, sequence-indexed M-RoPE cos (None => text)
         self._req_sin = None
         self.rope_delta = 0  # mrope_position_delta: decode rope_pos = kv_pos + rope_delta
+        # Batched serving keeps one mrope_position_delta per decode slot: a multimodal prompt
+        # compresses the position space by an amount that depends on ITS image grid, so slots
+        # holding different requests need different offsets. None => every slot uses rope_delta
+        # (the single-sequence path, and text-only batches where all deltas are 0).
+        self._slot_deltas = None
 
         # Pre-compute full RoPE table on device for fast decode lookups
         # Shape: [1, max_seq_len, head_dim] on device
@@ -150,6 +155,61 @@ class Qwen36RoPESetup:
     # -------------------------------------------------------------------------
     # M-RoPE (multimodal) — per-request 3D position handling
     # -------------------------------------------------------------------------
+    def set_slot_deltas(self, deltas, batch_size):
+        """Install the per-decode-slot mrope_position_delta vector.
+
+        ``deltas`` is an iterable of per-slot offsets in decode-slot order; it is padded with 0
+        (the text delta) up to ``batch_size``. Passing None clears the vector so decode falls back
+        to the scalar ``rope_delta``."""
+        if deltas is None:
+            self._slot_deltas = None
+            return
+        vec = torch.zeros(batch_size, dtype=torch.int32)
+        for slot, delta in enumerate(deltas):
+            if slot >= batch_size:
+                break
+            vec[slot] = int(delta or 0)
+        self._slot_deltas = vec
+
+    def set_slot_delta(self, slot, delta, batch_size):
+        """Park one request's mrope_position_delta in the decode slot it was prefilled into.
+
+        Batched prefill fills slots one request at a time while others keep decoding, so this
+        updates a single entry and leaves the live slots untouched."""
+        if self._slot_deltas is None:
+            self._slot_deltas = torch.zeros(batch_size, dtype=torch.int32)
+        elif self._slot_deltas.shape[0] < batch_size:
+            pad = torch.zeros(batch_size - self._slot_deltas.shape[0], dtype=torch.int32)
+            self._slot_deltas = torch.cat([self._slot_deltas, pad])
+        if 0 <= slot < self._slot_deltas.shape[0]:
+            self._slot_deltas[slot] = int(delta or 0)
+
+    def decode_delta_vec(self, batch_size):
+        """Per-slot rope offsets as an int32 ``[batch_size]`` tensor for ``rope_pos = kv_pos + delta``.
+
+        Falls back to the scalar ``rope_delta`` broadcast over the batch when no per-slot vector is
+        installed, keeping the single-sequence path unchanged."""
+        if self._slot_deltas is None:
+            return torch.full((batch_size,), int(self.rope_delta), dtype=torch.int32)
+        if self._slot_deltas.shape[0] < batch_size:
+            pad = torch.zeros(batch_size - self._slot_deltas.shape[0], dtype=torch.int32)
+            return torch.cat([self._slot_deltas, pad])
+        return self._slot_deltas[:batch_size]
+
+    def remap_slot_deltas(self, remap):
+        """Reindex the per-slot deltas after vLLM condenses the decode batch (slot i takes the
+        delta at ``remap[i]``), mirroring the GDN per-slot state remap."""
+        if self._slot_deltas is None:
+            return
+        idx = torch.as_tensor(list(remap), dtype=torch.long).reshape(-1)
+        n = min(idx.shape[0], self._slot_deltas.shape[0])
+        remapped = self._slot_deltas.clone()
+        for slot in range(n):
+            src = int(idx[slot])
+            if 0 <= src < self._slot_deltas.shape[0]:
+                remapped[slot] = self._slot_deltas[src]
+        self._slot_deltas = remapped
+
     def build_request_rope(self, input_ids, image_grid_thw=None, video_grid_thw=None):
         """Stage the per-request M-RoPE cos/sin table + rope_delta for the upcoming prefill.
 
