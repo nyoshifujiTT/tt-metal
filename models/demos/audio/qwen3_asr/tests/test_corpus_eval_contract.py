@@ -130,3 +130,44 @@ def test_corpus_eval_measures_duration_after_resampling():
     assert resample_at < dur_at, (
         "duration must be computed from the resampled wav and its new rate"
     )
+
+
+def test_corpus_eval_sets_hf_model_from_ckpt():
+    """ModelArgs reads HF_MODEL, so the eval has to supply it.
+
+    The README's command passes --ckpt and does not mention HF_MODEL. Run in a
+    clean shell it died in ModelArgs with "Please set HF_MODEL to a HuggingFace
+    name ..." before transcribing anything -- the documented invocation simply
+    did not work. --ckpt already names the extracted text decoder, which is what
+    ModelArgs wants, so the script derives it rather than asking the caller for
+    the same path twice.
+    """
+    src = _read(EVAL)
+    assert 'os.environ["HF_MODEL"] = a.ckpt' in src, (
+        "HF_MODEL must be set from --ckpt before ModelArgs is constructed"
+    )
+    # ...and only around construction: the audio tower resolves its own paths
+    # and must not observe the decoder directory.
+    assert 'prev_hf_model = os.environ.get("HF_MODEL")' in src
+    assert 'os.environ["HF_MODEL"] = prev_hf_model' in src
+    set_at = src.index('os.environ["HF_MODEL"] = a.ckpt')
+    model_args_at = src.index("ModelArgs(dev,")
+    restore_at = src.index('os.environ["HF_MODEL"] = prev_hf_model')
+    assert set_at < model_args_at < restore_at, (
+        "HF_MODEL must be set before ModelArgs and restored after it"
+    )
+
+
+def test_corpus_eval_matches_the_served_path_handling_of_hf_model():
+    """generator_vllm.py does the same save/set/restore; keep them in step.
+
+    If one of the two front-ends leaves HF_MODEL pointing at the decoder while
+    the other does not, they no longer resolve the audio tower the same way and
+    the corpus-CER comparison stops being like-for-like.
+    """
+    served = _read(os.path.join(TT, "generator_vllm.py"))
+    for fragment in (
+        'prev_hf_model = os.environ.get("HF_MODEL")',
+        'os.environ["HF_MODEL"] = prev_hf_model',
+    ):
+        assert fragment in served, f"served path lost its HF_MODEL handling: {fragment}"

@@ -194,8 +194,23 @@ def main():
     audio_total = 0.0
     try:
         enc_params = tt_enc.preprocess_weights(w, dev)
-        args = ModelArgs(dev, max_batch_size=EVAL_MAX_BATCH, max_seq_len=2048)
-        sd = args.load_state_dict()
+        # ModelArgs resolves the decoder config through HF_MODEL and raises
+        # "Please set HF_MODEL ..." when it is unset, so running the documented
+        # command in a clean shell failed before a single clip was transcribed.
+        # --ckpt already names the extracted text decoder, which is exactly what
+        # ModelArgs needs; point HF_MODEL at it for the duration of construction
+        # and restore afterwards, the same handling tt/generator_vllm.py uses on
+        # the served path.
+        prev_hf_model = os.environ.get("HF_MODEL")
+        os.environ["HF_MODEL"] = a.ckpt
+        try:
+            args = ModelArgs(dev, max_batch_size=EVAL_MAX_BATCH, max_seq_len=2048)
+            sd = args.load_state_dict()
+        finally:
+            if prev_hf_model is None:
+                os.environ.pop("HF_MODEL", None)
+            else:
+                os.environ["HF_MODEL"] = prev_hf_model
         dtype = decoder_weight_dtype()
         paged_config = (
             PagedAttentionConfig(block_size=PAGE_BLOCK_SIZE, max_num_blocks=PAGE_MAX_BLOCKS) if PAGED_KV else None
