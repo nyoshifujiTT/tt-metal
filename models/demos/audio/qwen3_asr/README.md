@@ -154,13 +154,25 @@ on the in-repo clip above.
 corpus CER, so a demo run can be compared against a served run on the same
 clips and with the same metric.
 
+`TT_METAL_HOME` must be exported: the script reads it to locate its own
+`reference/` and `tt/` packages, and raises `KeyError` without it. The snapshot
+is the full Qwen3-ASR checkout (audio tower plus processor config); the ckpt is
+the text decoder extracted from it by `reference/extract_text_decoder.py`.
+
 ```bash
+export TT_METAL_HOME=/path/to/tt-metal
+QWEN3ASR_SNAP_DIR=$HOME/.cache/huggingface/hub/models--neosophie--Qwen3-ASR-1.7B-JA/snapshots/<rev>
+
 python models/demos/audio/qwen3_asr/eval/corpus_eval.py \
   --manifest /path/to/manifest.jsonl \
   --snapshot $QWEN3ASR_SNAP_DIR \
   --ckpt /path/to/extracted_text_decoder \
   --output /tmp/report.json
 ```
+
+`HF_MODEL` does not have to be set: the script points it at `--ckpt` while it
+builds `ModelArgs` and restores it afterwards, the same handling
+`tt/generator_vllm.py` uses on the served path.
 
 Each manifest line is `{"wav": "...", "ref": "..."}`. Defaults are chosen to
 match a vLLM serving run rather than to look good in isolation:

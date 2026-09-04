@@ -171,3 +171,35 @@ def test_corpus_eval_matches_the_served_path_handling_of_hf_model():
         'os.environ["HF_MODEL"] = prev_hf_model',
     ):
         assert fragment in served, f"served path lost its HF_MODEL handling: {fragment}"
+
+
+def test_readme_states_the_environment_the_eval_needs():
+    """The documented command has to be runnable as written.
+
+    corpus_eval.py reads os.environ["TT_METAL_HOME"] at import time to find its
+    own reference/ and tt/ packages, and the command used $QWEN3ASR_SNAP_DIR
+    without ever saying what it is. Neither was mentioned, so a reader hit a
+    KeyError or an empty --snapshot.
+    """
+    src = _read(EVAL)
+    assert 'os.environ["TT_METAL_HOME"]' in src, "guard is about this hard read"
+
+    readme = _read(os.path.join(HERE, "..", "README.md"))
+    body = readme[readme.index("## Corpus eval") :]
+    assert "export TT_METAL_HOME=" in body
+    assert "QWEN3ASR_SNAP_DIR=" in body, "the snapshot variable must be defined"
+    # and the reader must be told which tree each path is
+    assert "extract_text_decoder.py" in body
+
+
+def test_readme_says_hf_model_is_handled_by_the_script():
+    """Otherwise the next reader re-adds HF_MODEL to the command by hand.
+
+    Setting it globally is not harmless: the audio tower resolves its own paths
+    from the snapshot, so a stray HF_MODEL pointing at the decoder changes what
+    is compared.
+    """
+    readme = _read(os.path.join(HERE, "..", "README.md"))
+    body = readme[readme.index("## Corpus eval") :]
+    assert "HF_MODEL" in body
+    assert "--ckpt" in body
