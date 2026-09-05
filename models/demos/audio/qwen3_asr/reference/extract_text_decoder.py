@@ -74,6 +74,18 @@ def snap_dir():
     username / cache layout."""
     env = os.environ.get("QWEN3ASR_SNAP_DIR")
     if env:
+        # Accept either the snapshot itself or the hub's snapshots/ parent. The
+        # README used to spell the parent, which holds only a <rev>/ directory,
+        # so every glob below matched nothing and the extractor wrote a
+        # checkpoint with 0 tensors and no tokenizer -- the decoder tests then
+        # failed far away with "No fallback tokenizer found for base model".
+        if glob.glob(os.path.join(env, "*.safetensors")):
+            return env
+        revs = sorted(
+            d for d in glob.glob(os.path.join(env, "*")) if glob.glob(os.path.join(d, "*.safetensors"))
+        )
+        if revs:
+            return revs[-1]
         return env
     from huggingface_hub import snapshot_download
 
@@ -95,6 +107,12 @@ def extract_checkpoint(out_dir):
                     sd["model." + k[len("thinker.model.") :]] = h.get_tensor(k)
                 elif k == "thinker.lm_head.weight":
                     sd["lm_head.weight"] = h.get_tensor(k)
+    if not sd:
+        raise SystemExit(
+            f"no thinker.* weights found under {snap}; point QWEN3ASR_SNAP_DIR at the "
+            "Qwen3-ASR-1.7B snapshot (or its snapshots/ parent). Writing an empty "
+            "checkpoint here only moves the failure into the decoder tests."
+        )
     save_file(sd, os.path.join(out_dir, "model.safetensors"), metadata={"format": "pt"})
     json.dump(TEXT_CFG, open(os.path.join(out_dir, "config.json"), "w"), indent=2)
     for fn in TOK_FILES:
