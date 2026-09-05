@@ -165,44 +165,6 @@ def main():
     if "audio_tower" in targets:
         handles.append(targets["audio_tower"][1].register_forward_pre_hook(enc_pre, with_kwargs=True))
 
-    # ---- capture the text decoder's merged input embeddings ----
-    # tests/test_decoder.py drives the ttnn decoder from inputs_embeds -- the audio
-    # embeds already spliced into the prompt embedding sequence. That is an INPUT to
-    # the language model, not any module's output, so the forward hooks above cannot
-    # see it and every decoder test errored with "golden tensor not found:
-    # inputs_embeds.npy". Take it off the language model's pre-hook.
-    DEC_KW = {}
-
-    def dec_pre(mod, a, kw):
-        if "inputs_embeds" not in DEC_KW:
-            ie = kw.get("inputs_embeds")
-            if ie is None and a:
-                # positional fallback: (input_ids, attention_mask, position_ids,
-                # past_key_values, inputs_embeds, ...)
-                ie = a[4] if len(a) > 4 else None
-            if isinstance(ie, torch.Tensor):
-                DEC_KW["inputs_embeds"] = ie
-
-    text_model = None
-    for name, mod in model.named_modules():
-        # the decoder stack that lm_head reads from, e.g. "thinker.model"
-        if mod.__class__.__name__ in ("Qwen3ASRTextModel", "Qwen3ASRThinkerTextModel"):
-            text_model = (name, mod)
-            break
-    if text_model is None:
-        lm_head_name = targets.get("lm_head", (None,))[0]
-        if lm_head_name:
-            parent = lm_head_name.rsplit(".", 1)[0]
-            for name, mod in model.named_modules():
-                if name == (parent + ".model" if parent else "model"):
-                    text_model = (name, mod)
-                    break
-    if text_model is not None:
-        print(f"   inputs_embeds <- {text_model[0]} (pre-hook)")
-        handles.append(text_model[1].register_forward_pre_hook(dec_pre, with_kwargs=True))
-    else:
-        print("[warn] could not locate the text model; inputs_embeds will be missing")
-
     # ---- run one short transcription ----
     wav = load_slice(args.wav, args.start, args.dur)
     print(f"[run] {args.wav} [{args.start},{args.start+args.dur}]s  {len(wav)/16000:.1f}s", flush=True)
@@ -256,21 +218,6 @@ def main():
         "tensors": {},
     }
     np.save(os.path.join(args.out, "input_wav.npy"), wav)
-    ie = DEC_KW.get("inputs_embeds")
-    if ie is not None:
-        ie = to_cpu(ie)
-        # tests unsqueeze(0) back to (1, S, H), so store it without the batch axis
-        ie2 = ie[0] if ie.dim() == 3 else ie
-        np.save(os.path.join(args.out, "inputs_embeds.npy"), ie2.numpy())
-        manifest["tensors"]["inputs_embeds"] = {
-            "shape": list(ie2.shape),
-            "dtype": str(ie2.dtype),
-            "n_calls": 1,
-            "file": "inputs_embeds.npy",
-        }
-        print(f"[save] inputs_embeds shape={tuple(ie2.shape)}")
-    else:
-        print("[warn] no capture for inputs_embeds -- tests/test_decoder.py will fail")
     for k in targets:
         calls = CAP.get(k, [])
         if not calls:
