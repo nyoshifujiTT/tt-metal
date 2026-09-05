@@ -247,9 +247,15 @@ def test_the_readme_says_to_run_both_generators():
     """
     readme = _read(os.path.join(HERE, "..", "README.md"))
     body = readme[readme.index("## Reference golden") :]
-    assert "extract_text_decoder.py" in body, (
-        "the second generator must be part of the documented golden recipe"
-    )
+    # A prose mention is not a recipe: the name appears elsewhere in the file
+    # too, so require it as a command inside the section's runnable block.
+    block = body[body.index("```bash") : body.index("```", body.index("```bash") + 7)]
+    for generator in ("dump_reference.py", "extract_text_decoder.py"):
+        assert (
+            f"models/demos/audio/qwen3_asr/reference/{generator}" in block
+        ), f"the golden recipe must actually invoke {generator}"
+    # ...and into the same directory, or the tests see half a golden set
+    assert "QWEN3ASR_GOLDEN_DIR=" in block
     assert "inputs_embeds.npy" in body, "say which golden it is that comes from it"
     assert "QWEN3ASR_TEXT_DECODER" in body
 
@@ -280,3 +286,35 @@ def test_readme_gives_a_runnable_e2e_invocation():
         "the README must name the in-repo clip the e2e test can run on"
     )
     assert 'QWEN3ASR_E2E_TEXT="driver of the vehicle"' in readme
+
+
+def test_extract_text_decoder_accepts_a_snapshots_parent():
+    """QWEN3ASR_SNAP_DIR is naturally spelled as the hub's snapshots/ dir.
+
+    That directory holds a <rev>/ subdirectory, not the weights, so the globs
+    matched nothing and the extractor produced an empty checkpoint while
+    printing success. The failure surfaced three steps later in the decoder
+    tests as "No fallback tokenizer found for base model", which points at the
+    wrong thing entirely.
+    """
+    src = _read(os.path.join(HERE, "..", "reference", "extract_text_decoder.py"))
+    body = src[src.index("def snap_dir("):]
+    body = body[: body.index("\ndef ", 1)]
+    assert 'glob.glob(os.path.join(env, "*.safetensors"))' in body, (
+        "the env value must be probed for weights before it is trusted"
+    )
+    assert 'os.path.join(d, "*.safetensors")' in body, (
+        "and the revision subdirectory used when it is the one holding them"
+    )
+
+
+def test_extract_text_decoder_refuses_to_write_an_empty_checkpoint():
+    """A 0-tensor checkpoint has no valid use; failing later hides the cause."""
+    src = _read(os.path.join(HERE, "..", "reference", "extract_text_decoder.py"))
+    assert "if not sd:" in src and "raise SystemExit" in src, (
+        "an empty extraction must fail where it happens"
+    )
+    # ...and before the file is written, or the bad artifact is left behind
+    guard_at = src.index("if not sd:")
+    save_at = src.index('save_file(sd, os.path.join(out_dir, "model.safetensors")')
+    assert guard_at < save_at, "the guard must precede save_file"
