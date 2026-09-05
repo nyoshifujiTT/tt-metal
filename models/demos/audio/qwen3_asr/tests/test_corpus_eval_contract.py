@@ -318,3 +318,25 @@ def test_extract_text_decoder_refuses_to_write_an_empty_checkpoint():
     guard_at = src.index("if not sd:")
     save_at = src.index('save_file(sd, os.path.join(out_dir, "model.safetensors")')
     assert guard_at < save_at, "the guard must precede save_file"
+
+
+def test_the_decode_trace_comment_cites_the_right_hang_issue():
+    """The adapter's own comment carried the same misattribution as the runbook.
+
+    #40592 is "[Mistral] Intermittent device hang during AllGatherAsync on
+    T3K" -- a CCL hang, and this deployment runs one device with CCL
+    short-circuited, so it cannot be the failure that gates decode tracing.
+    Citing it as "untraced eager decode still hangs per #40592" pointed the
+    next reader at an unrelated thread.
+
+    #37543 is the one that matches: ND, SDPA decode, traced, vLLM-only.
+    """
+    src = _read(os.path.join(HERE, "..", "tt", "generator_vllm.py"))
+    head = src[: src.index("class ") if "class " in src else 4000]
+
+    assert "37543" in head, "cite the issue whose signature matches"
+    assert "#40592" not in head or "cited\n# here in error" in head, (
+        "#40592 is an AllGatherAsync hang; do not present it as this failure"
+    )
+    # the deterministic near-match must stay marked as such
+    assert "45052" in head and "not\n# the non-determinism" in head

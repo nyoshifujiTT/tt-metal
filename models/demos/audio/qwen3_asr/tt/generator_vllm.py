@@ -60,9 +60,13 @@ AUDIO_TOKEN_ID = 151676
 
 # Decode tracing is ON by default (fast-dispatch/replay decode). It can be
 # disabled with ``QWEN3ASR_DECODE_TRACE=0`` for platforms/boards where the
-# tt-metal decode ND-hang (tt-inference-server #3105, PR #44118 regression;
-# untraced eager decode still hangs per #40592) is reproducible under a
-# reused decode trace.
+# tt-metal decode ND-hang is reproducible under a reused decode trace. The
+# closest upstream match by signature is tt-metal#37543 ("[GPT-OSS] ND hang in
+# SDPA decode": 20-120 min in, decode traced, only under vLLM); the
+# deterministic isl>=1024 variant tracked from tt-inference-server#3105 into
+# tt-metal#45052 (a PR #44118 regression) shares the watchdog message but not
+# the non-determinism. #40592 is a Mistral AllGatherAsync hang and was cited
+# here in error -- this deployment short-circuits CCL on a single device.
 #
 # History: this defaulted OFF to mirror the upstream standalone server on the
 # original board (10.160.20.103), where a persistent decode trace wedged the
