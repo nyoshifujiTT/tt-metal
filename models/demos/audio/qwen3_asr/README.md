@@ -134,6 +134,16 @@ QWEN3ASR_E2E_WAV=<16k-mono.wav> QWEN3ASR_E2E_TEXT="<expected words>" \
   pytest models/demos/audio/qwen3_asr/tests/test_e2e.py -s
 ```
 
+The e2e clip needs no external asset: `reference/dump_reference.py` already
+defaults to an in-repo 16 kHz mono wav, and the goldens record what the CPU
+model transcribes it as, so the same pair drives the e2e test.
+
+```bash
+QWEN3ASR_E2E_WAV=models/demos/audio/whisper/demo/dataset/conditional_generation/17646385371758249908.wav \
+QWEN3ASR_E2E_TEXT="driver of the vehicle" \
+  pytest models/demos/audio/qwen3_asr/tests/test_e2e.py -s
+```
+
 The golden tensors and the extracted text-decoder checkpoint are too large for the repo, so
 the fixtures skip when they are absent — convenient on a dev box, but on a runner that is
 supposed to have them staged a skip would hide exactly the breakage these tests exist to

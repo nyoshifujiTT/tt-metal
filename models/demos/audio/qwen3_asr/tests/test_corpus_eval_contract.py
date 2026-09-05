@@ -203,3 +203,59 @@ def test_readme_says_hf_model_is_handled_by_the_script():
     body = readme[readme.index("## Corpus eval") :]
     assert "HF_MODEL" in body
     assert "--ckpt" in body
+
+
+def test_dump_reference_emits_every_golden_the_tests_load():
+    """A golden the dumper does not write makes its test unrunnable.
+
+    Staging goldens exactly as the README says and running with
+    QWEN3ASR_REQUIRE_ARTIFACTS=1 errored all three decoder tests on
+    "golden tensor not found: inputs_embeds.npy". That tensor is an INPUT to the
+    language model, so the module forward hooks could not see it and it was
+    never dumped -- the PCC tests silently skipped instead.
+    """
+    import re
+
+    dumper = _read(os.path.join(HERE, "..", "reference", "dump_reference.py"))
+    # Literal filenames, plus the hook-driven loop that writes f"{k}.npy" for
+    # every key in `targets` -- collect those keys so the check does not report
+    # the hooked stages as missing.
+    written = set(re.findall(r'"([a-z0-9_]+)\.npy"', dumper))
+    written |= set(re.findall(r'targets\["([a-z0-9_]+)"\]\s*=', dumper))
+
+    loaded = set()
+    for name in ("test_decoder.py", "test_audio_encoder.py"):
+        src = _read(os.path.join(HERE, name))
+        loaded |= set(re.findall(r'golden\("([a-z0-9_]+)\.npy"\)', src))
+
+    missing = loaded - written
+    assert not missing, (
+        f"tests load goldens the dumper never writes: {sorted(missing)}; "
+        "they can only skip or error"
+    )
+
+
+def test_dump_reference_captures_inputs_embeds_before_the_text_model():
+    """It is a pre-hook by necessity, and it has to survive kwargs or positional."""
+    dumper = _read(os.path.join(HERE, "..", "reference", "dump_reference.py"))
+    assert "register_forward_pre_hook" in dumper
+    assert 'kw.get("inputs_embeds")' in dumper, "the kwarg form must be read"
+    # The filename alone is satisfied by the manifest entry and the warning
+    # text, so deleting the np.save left this green. Require the write itself.
+    assert 'np.save(os.path.join(args.out, "inputs_embeds.npy")' in dumper, (
+        "capturing the tensor is useless unless it is written to the golden dir"
+    )
+
+
+def test_readme_gives_a_runnable_e2e_invocation():
+    """QWEN3ASR_E2E_WAV=<16k-mono.wav> is a placeholder, not a command.
+
+    The e2e test hard-fails without it under QWEN3ASR_REQUIRE_ARTIFACTS=1, and
+    nothing said which clip to use -- while dump_reference.py already defaults
+    to an in-repo one whose transcription the goldens record.
+    """
+    readme = _read(os.path.join(HERE, "..", "README.md"))
+    assert "17646385371758249908.wav" in readme, (
+        "the README must name the in-repo clip the e2e test can run on"
+    )
+    assert 'QWEN3ASR_E2E_TEXT="driver of the vehicle"' in readme
