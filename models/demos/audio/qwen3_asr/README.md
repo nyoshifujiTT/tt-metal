@@ -121,6 +121,26 @@ the repo). Captured stages:
 Verified shapes on a 12 s clip: conv_out `(12,13,1024)`, audio embeds `(156,2048)`,
 prefill logits `(1,174,151936)`.
 
+**Two generators, both required.** `dump_reference.py` covers the encoder stages and
+`lm_head`; `reference/extract_text_decoder.py` produces the text-decoder checkpoint the
+decoder tests load *and* the remaining goldens they read — `inputs_embeds.npy` (the audio
+embeds already spliced into the prompt sequence, which is an input to the language model
+and so cannot come from a forward hook on it) and `position_ids.npy`. Run both into the
+same golden dir, or `test_decoder.py` fails with `golden tensor not found:
+inputs_embeds.npy`:
+
+```bash
+export QWEN3ASR_SNAP_DIR=$HOME/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots
+export QWEN3ASR_GOLDEN_DIR=/tmp/qwen3_asr_golden
+export QWEN3ASR_TEXT_DECODER=/tmp/qwen3_asr_text_decoder
+
+/tmp/qwen3-asr-ref/bin/python models/demos/audio/qwen3_asr/reference/dump_reference.py
+/tmp/qwen3-asr-ref/bin/python models/demos/audio/qwen3_asr/reference/extract_text_decoder.py
+```
+
+The second prints `[save] inputs_embeds (109, 2048)` and writes the checkpoint
+(`config.json`, `model.safetensors`, tokenizer) that `QWEN3ASR_TEXT_DECODER` points at.
+
 ## Tests and CI
 
 ```bash

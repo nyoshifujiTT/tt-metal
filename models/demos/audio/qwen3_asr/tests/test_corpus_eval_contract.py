@@ -205,45 +205,66 @@ def test_readme_says_hf_model_is_handled_by_the_script():
     assert "--ckpt" in body
 
 
-def test_dump_reference_emits_every_golden_the_tests_load():
-    """A golden the dumper does not write makes its test unrunnable.
+def test_every_golden_the_tests_load_has_a_producer():
+    """A golden no generator writes makes its test unrunnable.
 
-    Staging goldens exactly as the README says and running with
-    QWEN3ASR_REQUIRE_ARTIFACTS=1 errored all three decoder tests on
-    "golden tensor not found: inputs_embeds.npy". That tensor is an INPUT to the
-    language model, so the module forward hooks could not see it and it was
-    never dumped -- the PCC tests silently skipped instead.
+    test_decoder.py reads inputs_embeds.npy, which dump_reference.py cannot
+    produce -- it is an INPUT to the language model, so a forward hook on that
+    model never sees it. extract_text_decoder.py captures it from a pre-hook
+    instead. The check therefore has to span both generators; asking only
+    dump_reference.py for it led me to duplicate working code.
     """
     import re
 
-    dumper = _read(os.path.join(HERE, "..", "reference", "dump_reference.py"))
-    # Literal filenames, plus the hook-driven loop that writes f"{k}.npy" for
-    # every key in `targets` -- collect those keys so the check does not report
-    # the hooked stages as missing.
-    written = set(re.findall(r'"([a-z0-9_]+)\.npy"', dumper))
-    written |= set(re.findall(r'targets\["([a-z0-9_]+)"\]\s*=', dumper))
+    produced = set()
+    for name in ("dump_reference.py", "extract_text_decoder.py"):
+        src = _read(os.path.join(HERE, "..", "reference", name))
+        produced |= set(re.findall(r'"([a-z0-9_]+)\.npy"', src))
+        # dump_reference writes f"{k}.npy" for every hooked stage
+        produced |= set(re.findall(r'targets\["([a-z0-9_]+)"\]\s*=', src))
+        # extract_text_decoder writes via s("<name>", tensor)
+        produced |= set(re.findall(r'\bs\("([a-z0-9_]+)",', src))
 
     loaded = set()
     for name in ("test_decoder.py", "test_audio_encoder.py"):
         src = _read(os.path.join(HERE, name))
         loaded |= set(re.findall(r'golden\("([a-z0-9_]+)\.npy"\)', src))
 
-    missing = loaded - written
+    missing = loaded - produced
     assert not missing, (
-        f"tests load goldens the dumper never writes: {sorted(missing)}; "
+        f"tests load goldens no generator writes: {sorted(missing)}; "
         "they can only skip or error"
     )
 
 
-def test_dump_reference_captures_inputs_embeds_before_the_text_model():
-    """It is a pre-hook by necessity, and it has to survive kwargs or positional."""
+def test_the_readme_says_to_run_both_generators():
+    """Running only dump_reference.py yields a golden dir the decoder rejects.
+
+    The reference-golden section described one script. Following it and then
+    running the suite with QWEN3ASR_REQUIRE_ARTIFACTS=1 errors all three decoder
+    tests on "golden tensor not found: inputs_embeds.npy" -- the file lives in
+    the other generator's output.
+    """
+    readme = _read(os.path.join(HERE, "..", "README.md"))
+    body = readme[readme.index("## Reference golden") :]
+    assert "extract_text_decoder.py" in body, (
+        "the second generator must be part of the documented golden recipe"
+    )
+    assert "inputs_embeds.npy" in body, "say which golden it is that comes from it"
+    assert "QWEN3ASR_TEXT_DECODER" in body
+
+
+def test_dump_reference_does_not_duplicate_the_inputs_embeds_capture():
+    """One golden, one producer.
+
+    Both scripts hooking the text model would give two writers for
+    inputs_embeds.npy into the same dir, and whichever ran last would win --
+    silently, and with no guarantee the two agree.
+    """
     dumper = _read(os.path.join(HERE, "..", "reference", "dump_reference.py"))
-    assert "register_forward_pre_hook" in dumper
-    assert 'kw.get("inputs_embeds")' in dumper, "the kwarg form must be read"
-    # The filename alone is satisfied by the manifest entry and the warning
-    # text, so deleting the np.save left this green. Require the write itself.
-    assert 'np.save(os.path.join(args.out, "inputs_embeds.npy")' in dumper, (
-        "capturing the tensor is useless unless it is written to the golden dir"
+    assert "inputs_embeds" not in dumper, (
+        "inputs_embeds belongs to extract_text_decoder.py; dump_reference.py "
+        "must not write it too"
     )
 
 
