@@ -340,3 +340,38 @@ def test_the_decode_trace_comment_cites_the_right_hang_issue():
     )
     # the deterministic near-match must stay marked as such
     assert "45052" in head and "not\n# the non-determinism" in head
+
+
+def test_readme_paths_resolve():
+    """Every in-tree file the README names by path must exist.
+
+    The sibling runbook in tt-inference-server had exactly this defect: an
+    Install command referenced the systemd unit by bare filename, resolving
+    from no directory the document ever cds to. That check found it; this is
+    the same guard for the model-side README, which names 21 paths today
+    (tests, reference scripts, the demo, the server, tt/ modules).
+    """
+    import re
+
+    readme = _read(os.path.join(HERE, "..", "README.md"))
+    model_dir = os.path.abspath(os.path.join(HERE, ".."))
+    repo_root = os.path.abspath(os.path.join(model_dir, "..", "..", "..", ".."))
+
+    candidates = set(
+        re.findall(
+            r"(?:^|\s|`)((?:models|tests|reference|eval|tt|demo|server|docs)"
+            r"/[A-Za-z0-9_./-]+?\.(?:py|md|txt|json|wav))(?=[\s`)]|$)",
+            readme,
+            re.M,
+        )
+    )
+    assert candidates, "the README does name in-tree files; keep this meaningful"
+
+    missing = sorted(
+        p
+        for p in candidates
+        # repo-relative (models/...) or model-relative (tests/..., tt/...)
+        if not os.path.exists(os.path.join(repo_root, p))
+        and not os.path.exists(os.path.join(model_dir, p))
+    )
+    assert not missing, f"named in the README but absent from the tree: {missing}"
