@@ -142,8 +142,22 @@ the repo). Captured stages:
 `conv2d1`, `conv_out`, `enc_layer0`, `ln_post`, `audio_tower`/`proj2` (= audio embeds),
 `lm_head` (prefill + decode logits), plus end-to-end token text.
 
-Verified shapes on a 12 s clip: conv_out `(12,13,1024)`, audio embeds `(156,2048)`,
-prefill logits `(1,174,151936)`.
+Verified shapes at the defaults, i.e. the 7.0 s slice `DEFAULT_DUR` takes from the in-repo
+clip (read back off `$QWEN3ASR_GOLDEN_DIR`):
+
+| tensor | shape |
+|---|---|
+| `conv2d1` | `(7, 480, 64, 50)` |
+| `conv_out` | `(7, 13, 1024)` |
+| `enc_layer0`, `ln_post` | `(91, 1024)` |
+| `audio_tower` / `proj2` (audio embeds) | `(91, 2048)` |
+| `inputs_embeds` | `(109, 2048)` |
+| `lm_head` (prefill logits) | `(1, 109, 151936)` |
+
+The leading dims track the clip: 7 whole 1 s chunks × 13 encoder rows = 91 audio rows, and 109
+is those plus the 18-token prompt template. A different `--dur` moves every number here, so
+quote the duration alongside any shape (an earlier revision of this section listed 12 s shapes
+while `DEFAULT_DUR` was 7.0, which cannot be reproduced by running the documented command).
 
 **Two generators, both required.** `dump_reference.py` covers the encoder stages and
 `lm_head`; `reference/extract_text_decoder.py` produces the text-decoder checkpoint the

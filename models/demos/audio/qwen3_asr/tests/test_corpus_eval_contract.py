@@ -12,6 +12,8 @@ generator_vllm, since a drift in either silently invalidates the comparison.
 
 import os
 
+import pytest
+
 HERE = os.path.dirname(__file__)
 EVAL = os.path.join(HERE, "..", "eval", "corpus_eval.py")
 TT = os.path.join(HERE, "..", "tt")
@@ -408,3 +410,83 @@ def test_readme_paths_resolve():
         and not os.path.exists(os.path.join(model_dir, p))
     )
     assert not missing, f"named in the README but absent from the tree: {missing}"
+
+
+def _readme_shape_table():
+    readme = _read(os.path.join(HERE, "..", "README.md"))
+    start = readme.index("Verified shapes at the defaults")
+    return " ".join(readme[start : readme.index("\n## ", start)].split())
+
+
+def test_the_readme_quotes_the_shapes_the_default_run_produces():
+    """The section listed 12 s shapes while DEFAULT_DUR was 7.0.
+
+    conv_out (12,13,1024) / audio embeds (156,2048) / prefill logits
+    (1,174,151936) cannot be produced by the command the README documents --
+    dump_reference.py defaults to a 7.0 s slice, and the goldens on disk are
+    (7,13,1024) / (91,2048) / (1,109,151936). A reader checking their own dump
+    against those numbers would conclude their run was wrong.
+    """
+    body = _readme_shape_table()
+
+    # the default this section is claimed for, so shapes and duration travel together
+    assert "7.0 s" in body, "state the duration the shapes belong to"
+
+    for shape in ("(7, 13, 1024)", "(91, 2048)", "(109, 2048)", "(1, 109, 151936)"):
+        assert shape in body, f"{shape} is what the default run produces; quote it"
+
+    # the stale numbers must not come back
+    for stale in ("(12,13,1024)", "(156,2048)", "(1,174,151936)"):
+        assert stale not in body, f"{stale} belongs to a 12 s clip, not to the default"
+
+
+def test_the_readme_explains_how_the_shapes_follow_from_the_clip():
+    """Bare shapes cannot be checked against a different --dur.
+
+    7 whole 1 s chunks x 13 encoder rows = 91 audio rows, and inputs_embeds is
+    those plus the 18-token prompt template = 109. With the arithmetic a reader
+    can predict their own dump; without it they can only compare literals.
+    """
+    body = _readme_shape_table()
+    assert "7 whole 1 s chunks" in body and "13 encoder rows = 91" in body, (
+        "show how the audio row count comes from the clip length"
+    )
+    assert "18-token prompt template" in body, "account for the gap up to 109"
+    assert "--dur" in body, "warn that the numbers move with the duration"
+
+
+def test_the_default_duration_is_still_what_the_readme_says():
+    """If DEFAULT_DUR moves, every shape above is stale again."""
+    src = _read(os.path.join(HERE, "..", "reference", "dump_reference.py"))
+    assert "DEFAULT_DUR = 7.0" in src, (
+        "dump_reference's default changed; requote the shapes in the README"
+    )
+
+
+def test_the_golden_tensors_match_the_readme_shapes():
+    """Check the dump on disk, not just the prose. Skips when absent."""
+    import numpy as np
+
+    golden_dir = os.environ.get("QWEN3ASR_GOLDEN_DIR")
+    if not golden_dir or not os.path.isdir(golden_dir):
+        pytest.skip("QWEN3ASR_GOLDEN_DIR not set or absent")
+
+    expected = {
+        "conv_out.npy": (7, 13, 1024),
+        "audio_tower.npy": (91, 2048),
+        "proj2.npy": (91, 2048),
+        "inputs_embeds.npy": (109, 2048),
+        "lm_head.npy": (1, 109, 151936),
+    }
+    for name, shape in expected.items():
+        path = os.path.join(golden_dir, name)
+        if not os.path.isfile(path):
+            pytest.skip(f"{name} not in the golden dir")
+        got = tuple(np.load(path, mmap_mode="r").shape)
+        assert got == shape, f"{name}: dump is {got}, README says {shape}"
+
+    # and the arithmetic the README states, taken from the tensors themselves
+    audio_rows = np.load(os.path.join(golden_dir, "audio_tower.npy"), mmap_mode="r").shape[0]
+    embed_rows = np.load(os.path.join(golden_dir, "inputs_embeds.npy"), mmap_mode="r").shape[0]
+    assert audio_rows == 7 * 13
+    assert embed_rows - audio_rows == 18, "the prompt template is 18 tokens"
