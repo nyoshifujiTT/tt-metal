@@ -18,8 +18,8 @@ transcription accuracy (full-clip CER 0.045 → 0.065) and blocks long single-sh
 
 ## Root cause
 
-`models/tt_transformers/tt/mlp.py:135-137` reshapes the prefill activation when `seq_len >= prefill_len_cutoff`
-(`= 512` on Blackhole, `model_config.py:555`):
+`models/tt_transformers/tt/mlp.py:180-182` reshapes the prefill activation when `seq_len >= prefill_len_cutoff`
+(`= 512` on Blackhole, `model_config.py:560`):
 
 ```python
 if mode == Mode.PREFILL and seq_len >= self.args.prefill_len_cutoff:
@@ -35,13 +35,14 @@ So the prefill activation for different padded lengths differs **only in the bat
 | 1536 | `[1, 3, 512, d]` |
 
 The ff1/ff3/ff2 matmul program configs on this path are length-invariant (fixed grids, `m` pinned to
-`min(seq_len, prefill_len_cutoff) = 512`; `mlp2_grid`/`mlp1_3_grid` are `find_prefill_grid(...)`, independent
-of seq_len — `model_config.py:756-765`). The attention output (`wo`) matmul config is likewise built from
-`m = min(seq_len, 1024)` with a seq-len-independent grid (`get_attn_wo_program_config`, `model_config.py:1988`).
+`min(seq_len, prefill_len_cutoff) = 512`; `mlp1_3_grid`/`mlp2_grid` are defined at
+`model_config.py:786-795` and applied at `model_config.py:881`). The attention output (`wo`) matmul
+config is likewise built with a seq-len-independent grid
+(`get_attn_wo_program_config`, `model_config.py:1993`).
 
 Because the program configs are identical and the input tensors differ only in dim `-3`, the **program-cache
 key does not separate the two shapes** for the prefill matmuls (`ttnn.experimental.minimal_matmul` in ff2,
-`mlp.py:275-281`, and/or the attention `wo` `ttnn.linear`, `attention.py:1156`). The program compiled for the
+`mlp.py:321`, and/or the attention `wo` `ttnn.linear`, `attention.py:1286`). The program compiled for the
 first prefill length is reused for the second and asserts on shape.
 
 ## Reproduction (observed)
@@ -57,7 +58,7 @@ a_shape[-1] == b_shape[-2]
 The width of the first tensor must be equal to the height of the second tensor.
 Mismatch: width=3072 height=2048
 ```
-(backtrace: attention `forward_prefill` → `wo` `ttnn.linear`, `models/tt_transformers/tt/attention.py:1156`.)
+(backtrace: attention `forward_prefill` → `wo` `ttnn.linear`, `models/tt_transformers/tt/attention.py:1286`.)
 
 3. A **1024** prefill run first, in isolation (no prior 512), **works** — as do 512-only and repeated
    same-length prefills. The crash requires a *prior different-bucket* prefill in the same process.
@@ -112,6 +113,6 @@ long-lived process (servers, batched eval) is exposed to the same collision.
 - `models/tt_transformers/tt/mlp.py:135-137` (prefill reshape), `:275-281` (ff2 `minimal_matmul`)
 - `models/tt_transformers/tt/model_config.py:555` (`prefill_len_cutoff`), `:756-765` (fixed grids),
   `:1988` (`get_attn_wo_program_config`)
-- `models/tt_transformers/tt/attention.py:1156` (`wo` linear, crash site)
+- `models/tt_transformers/tt/attention.py:1286` (`wo` linear, crash site)
 - `models/demos/audio/qwen3_asr/tt/qwen3_asr_decoder.py:prefill_logits` (the 512-pad workaround)
 - `models/demos/audio/qwen3_asr/README.md` → "Known limitations"

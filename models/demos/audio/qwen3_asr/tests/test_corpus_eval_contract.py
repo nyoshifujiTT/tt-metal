@@ -559,3 +559,50 @@ def test_tt_metal_home_is_required_at_import_time():
     )
     readme = _read(os.path.join(HERE, "..", "README.md"))
     assert "raises `KeyError` without it" in readme
+
+
+COLLISION_DOC = os.path.join(HERE, "..", "docs", "prefill_program_cache_collision_issue.md")
+
+
+def test_the_collision_doc_line_references_still_resolve():
+    """Every `file.py:NNN` in the issue draft must point at what it claims.
+
+    The doc walks a reader through tt_transformers to show why two padded
+    prefill lengths share a program-cache entry. Its line numbers were written
+    against an older tree and every one of them had drifted: mlp.py:135-137 had
+    become 180-182, model_config.py:555 -> 560, :1988 -> :1993, mlp.py:275 ->
+    321, and attention.py:1156 -> 1286. A reader following them lands on
+    unrelated code and cannot check the argument at all -- which is the whole
+    point of an issue draft meant for upstream.
+
+    Pinning them here means an upstream rebase fails this test instead of
+    silently invalidating the filing.
+    """
+    doc = _read(COLLISION_DOC)
+
+    # (cited path, cited line, a substring that line must contain)
+    expected = [
+        ("models/tt_transformers/tt/mlp.py", 180, "prefill_len_cutoff"),
+        ("models/tt_transformers/tt/model_config.py", 560, "prefill_len_cutoff = 512"),
+        ("models/tt_transformers/tt/model_config.py", 1993, "get_attn_wo_program_config"),
+        ("models/tt_transformers/tt/mlp.py", 321, "minimal_matmul"),
+        ("models/tt_transformers/tt/attention.py", 1286, "get_attn_wo_program_config"),
+    ]
+
+    repo_root = os.path.join(HERE, "..", "..", "..", "..", "..")
+    for rel, line_no, needle in expected:
+        # the doc must actually cite it, in one of the two forms it uses
+        base = os.path.basename(rel)
+        assert f"{base}:{line_no}" in doc or f"{rel}:{line_no}" in doc, (
+            f"the doc no longer cites {base}:{line_no}; update this list with it"
+        )
+
+        path = os.path.join(repo_root, rel)
+        if not os.path.isfile(path):
+            pytest.skip(f"{rel} absent from this checkout")
+        lines = open(path).read().splitlines()
+        assert len(lines) >= line_no, f"{rel} is shorter than the cited line {line_no}"
+        assert needle in lines[line_no - 1], (
+            f"{rel}:{line_no} no longer contains {needle!r} -- it moved; "
+            f"the doc's line references are stale again"
+        )
