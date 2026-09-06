@@ -8,8 +8,17 @@ The served path pads every clip to a fixed mel length so the encoder keeps one
 program shape. The encoder runs FULL bidirectional attention, so without a mask
 those padded positions become ordinary key/value entries that every real token
 attends to. Measured against the CPU reference, padding a 190-frame clip to 3000
-frames moves the encoder output by 0.097 absolute / 0.70 relative, i.e. the
-padding is not transparent to the transcript.
+frames moves the encoder output by **0.70 relative** (‖a-b‖ / ‖a‖ over the real
+rows), i.e. the padding is not transparent to the transcript.
+
+Quote the relative figure, not an absolute one. Reproduced here: 0.6215 on the
+golden clip's mel and 0.7648 on a randn mel -- same conclusion either way. The
+mean-|diff| behind it is input-scaled (0.0068 and 0.0126 respectively), so an
+absolute number cannot be checked without also fixing the input. An earlier
+version of this docstring paired the relative figure with a borrowed absolute
+one, which is not an encoder-output difference at all: 0.0971 is the
+mel-padding comparison in test_mel_pin.py (extractor tail 0.0904 < zero pad
+0.0971 < constant column 0.0988).
 """
 
 import os
@@ -105,3 +114,47 @@ def test_mask_is_freed_even_if_a_layer_raises():
     src = _read(os.path.join(TT, "audio_encoder.py"))
     tail = src[src.index("def encode(x_host") :]
     assert "finally:" in tail, "the mask must be freed on the error path too"
+
+
+def test_this_docstring_does_not_borrow_the_mel_pin_number():
+    """0.0971 belongs to test_mel_pin.py, not to the encoder-output delta.
+
+    This file once claimed "0.097 absolute / 0.70 relative" for the effect of
+    unmasked padding. The relative half reproduces (0.6215 on the golden clip's
+    mel, 0.7648 on a randn mel); the absolute half does not -- the measured
+    mean-|diff| is 0.0068 and 0.0126 for those two inputs, an order out.
+
+    0.0971 is the zero-padding entry in test_mel_pin.py's mel comparison
+    (extractor tail 0.0904 < zero pad 0.0971 < constant column 0.0988). Two
+    different measurements had collided, and the borrowed one made the claim
+    look checkable when it was not.
+    """
+    src = _read(os.path.join(HERE, "test_encoder_pad_mask.py"))
+    head = src[: src.index('"""', src.index('"""') + 3)]
+    flat = " ".join(head.split())
+
+    assert "0.097 absolute" not in flat, (
+        "0.0971 is the mel-padding number from test_mel_pin.py, not an "
+        "encoder-output difference"
+    )
+    # the figure that does reproduce, with the definition that makes it checkable
+    assert "0.70 relative" in flat
+    assert "‖a-b‖ / ‖a‖" in flat, "define the ratio, or 'relative' is ambiguous"
+    # both reproductions, so the range is visible rather than a single point
+    assert "0.6215" in flat and "0.7648" in flat
+    # and why an absolute figure is the wrong thing to quote here
+    assert "input-scaled" in flat
+
+
+def test_the_mel_pin_numbers_stay_where_they_belong():
+    """Guard the other side: those three values must remain in test_mel_pin.py.
+
+    If they move or change, this file's explanation of the old mix-up goes
+    stale and the next reader cannot tell which measurement was which.
+    """
+    src = _read(os.path.join(HERE, "test_mel_pin.py"))
+    for value in ("0.0904", "0.0971", "0.0988"):
+        assert value in src, (
+            f"{value} left test_mel_pin.py; update the note in "
+            f"test_encoder_pad_mask.py that points at it"
+        )
