@@ -490,3 +490,72 @@ def test_the_golden_tensors_match_the_readme_shapes():
     embed_rows = np.load(os.path.join(golden_dir, "inputs_embeds.npy"), mmap_mode="r").shape[0]
     assert audio_rows == 7 * 13
     assert embed_rows - audio_rows == 18, "the prompt template is 18 tokens"
+
+
+def test_the_readme_lists_every_manifest_key_the_reader_accepts():
+    """"Each manifest line is {"wav", "ref"}" is narrower than the code.
+
+    corpus_eval resolves the audio path as
+        wav -> audio -> audio_filepath -> path
+    and the reference as
+        ref -> text -> reference -> ""
+    so an existing corpus usually needs no rewriting. Documenting only the
+    canonical pair sends the reader off to convert manifests that would have
+    worked, and hides the two sharp edges: a line with none of the path keys
+    raises KeyError (not a skip), and a missing reference scores as "" rather
+    than being dropped.
+    """
+    src = _read(EVAL)
+    # the resolution order, as the code actually spells it
+    assert 'it.get("wav") or it.get("audio") or it.get("audio_filepath") or it["path"]' in src
+    assert 'it.get("ref") or it.get("text") or it.get("reference") or ""' in src
+
+    readme = _read(os.path.join(HERE, "..", "README.md"))
+    body = readme[readme.index("Each manifest line is") :]
+    body = body[: body.index("| knob |")]
+    for key in ("wav", "audio", "audio_filepath", "path"):
+        assert f"`{key}`" in body, f"the reader accepts {key}; document it"
+    for key in ("ref", "text", "reference"):
+        assert f"`{key}`" in body, f"the reader accepts {key}; document it"
+    assert "KeyError" in body, (
+        "a line with no path key raises rather than being skipped; say so"
+    )
+
+
+def test_the_readme_knob_defaults_match_the_code():
+    """A default that drifts silently changes what the eval measures."""
+    src = _read(EVAL)
+    readme = _read(os.path.join(HERE, "..", "README.md"))
+    table = readme[readme.index("| knob | default | why |") :]
+    table = table[: table.index("\n\n")]
+
+    for env, default in (
+        ("QWEN3ASR_EVAL_PAGED_KV", "1"),
+        ("QWEN3ASR_EVAL_PAGE_BLOCK", "64"),
+        ("QWEN3ASR_EVAL_MAX_BATCH", "4"),
+        ("QWEN3ASR_EVAL_REPETITION_PENALTY", "1.1"),
+    ):
+        assert f'"{env}", "{default}"' in src, (
+            f"{env}'s default is no longer {default}; the README table is stale"
+        )
+        assert f"`{env}`" in table and f"`{default}`" in table, (
+            f"{env} = {default} must appear in the README table"
+        )
+
+
+def test_tt_metal_home_is_required_at_import_time():
+    """The README says it raises KeyError without it -- verified by running it.
+
+        $ env -u TT_METAL_HOME python eval/corpus_eval.py --help
+        KeyError: 'TT_METAL_HOME'
+
+    It is a module-level subscript, so it fires before argparse: even --help
+    fails. That is worth keeping documented, because the failure looks like a
+    broken checkout rather than a missing export.
+    """
+    src = _read(EVAL)
+    assert 'os.environ["TT_METAL_HOME"]' in src, (
+        "the hard requirement must stay a subscript, or the documented KeyError changes"
+    )
+    readme = _read(os.path.join(HERE, "..", "README.md"))
+    assert "raises `KeyError` without it" in readme

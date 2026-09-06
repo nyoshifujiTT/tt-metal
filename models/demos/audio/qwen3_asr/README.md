@@ -242,8 +242,17 @@ python models/demos/audio/qwen3_asr/eval/corpus_eval.py \
 builds `ModelArgs` and restores it afterwards, the same handling
 `tt/generator_vllm.py` uses on the served path.
 
-Each manifest line is `{"wav": "...", "ref": "..."}`. Defaults are chosen to
-match a vLLM serving run rather than to look good in isolation:
+Each manifest line is JSON. `{"wav": "...", "ref": "..."}` is the canonical
+form, but the reader accepts the field names other corpora ship with, so an
+existing manifest usually needs no rewriting:
+
+| field | keys tried, in order |
+|---|---|
+| audio path | `wav`, `audio`, `audio_filepath`, then `path` (**required** -- a line with none of these raises `KeyError`) |
+| reference text | `ref`, `text`, `reference`, else `""` (an empty reference still scores, and drags CER to 1.0 for that clip) |
+
+Defaults are chosen to match a vLLM serving run rather than to look good in
+isolation:
 
 | knob | default | why |
 |---|---|---|
