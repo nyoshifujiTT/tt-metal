@@ -41,6 +41,7 @@ from models.tt_transformers.tt.model_config import ModelArgs
 from .qwen3_asr_decoder import DECODE_TRACE as _DECODER_DECODE_TRACE
 from .qwen3_asr_decoder import PREFILL_PIN_LEN as _DECODER_PREFILL_PIN_LEN
 from .qwen3_asr_decoder import Qwen3ASRDecoder
+from .qwen3_asr_decoder import decoder_weight_dtype
 
 from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
@@ -348,12 +349,17 @@ class TTQwen3ASRForConditionalGeneration(WarmupForwardMixin, SupportsMultiModal,
         try:
             model_args = ModelArgs(mesh_device, max_batch_size=max_batch_size, max_seq_len=max_seq_len)
             state_dict = model_args.load_state_dict()
+            # Same helper the demos use, so QWEN3ASR_DECODER_DTYPE moves both
+            # paths together. Hardcoding it here made the env var change the
+            # demo but not the server, which silently turns a demo-vs-served
+            # comparison into a bfloat16-vs-bfloat8_b one.
+            decoder_dtype = decoder_weight_dtype()
             decoder = Qwen3ASRDecoder(
                 args=model_args,
-                dtype=ttnn.bfloat8_b,
+                dtype=decoder_dtype,
                 mesh_device=mesh_device,
                 state_dict=state_dict,
-                weight_cache_path=model_args.weight_cache_path(ttnn.bfloat8_b),
+                weight_cache_path=model_args.weight_cache_path(decoder_dtype),
                 use_paged_kv_cache=True,
             )
         finally:
