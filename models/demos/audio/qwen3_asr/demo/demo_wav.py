@@ -31,8 +31,13 @@ import audio_encoder as tt_enc  # noqa: E402
 import audio_encoder_ref as ref  # noqa: E402
 from qwen3_asr_decoder import Qwen3ASRDecoder, decoder_weight_dtype  # noqa: E402
 
-WAV_DIR = os.environ.get("WAV_DIR", "/ttwork/qwen3_asr_wav")
-CKPT = os.environ.get("HF_MODEL", "/ttwork/qwen3_asr_text_decoder")
+# Same resolution order the tests use (tests/conftest.py): the QWEN3ASR_-prefixed
+# name first, the older unprefixed one as a fallback. prep_wav.py writes to
+# $QWEN3ASR_WAV_DIR, so without that first name the producer and this consumer
+# do not meet -- and the old default pointed at /ttwork, a path that only
+# exists inside the bring-up container.
+WAV_DIR = os.environ.get("QWEN3ASR_WAV_DIR", os.environ.get("WAV_DIR", "/tmp/qwen3_asr_wav"))
+CKPT = os.environ.get("QWEN3ASR_TEXT_DECODER", os.environ.get("HF_MODEL", "/tmp/qwen3_asr_text_decoder"))
 AUDIO_TOKEN_ID = 151676
 
 
