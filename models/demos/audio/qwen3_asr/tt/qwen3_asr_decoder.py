@@ -157,9 +157,12 @@ class Qwen3ASRDecoder(Transformer):
         # different padded lengths differ only in the batch dim -3 (512 -> [1,1,512,d], 1024 ->
         # [1,2,512,d]). A tt-metal program-cache collision (the prefill matmul hash doesn't cover
         # dim -3) then reuses the first bucket's program for the next: confirmed on device, a 512
-        # prefill followed by a 1024 prefill TT_FATALs (1024 alone is fine). Real ASR prompts are
-        # always <=512 tokens, so min-512 pins every request to the single [1,1,512,d] shape and
-        # sidesteps the collision. Caps single-shot at max_seq_len (2048 -> ~150s); trailing pad is
+        # prefill followed by a 1024 prefill TT_FATALs (1024 alone is fine). Prompts measured on the
+        # vLLM server are 13.0*seconds + 13 tokens, so min-512 pins every request to the single
+        # [1,1,512,d] shape for clips up to ~38 s; past that they enter the 1024 bucket (38 s -> 520
+        # tokens, measured). That is still served correctly here because the encoder is separately
+        # pinned to PIN_MEL_FRAMES, but a process mixing sub-38 s and over-38 s clips is the case the
+        # tt-metal fix is needed for. Caps single-shot at max_seq_len (2048 -> ~150s); trailing pad is
         # causal-masked. See README "Known limitations" and docs/prefill_program_cache_collision_issue.md.
         S_pad = max(((S + 511) // 512) * 512, PREFILL_PIN_LEN)
         if S_pad != S:

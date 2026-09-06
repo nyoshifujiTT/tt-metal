@@ -36,8 +36,9 @@ token's logits. Two reasons for 512 specifically:
 - **Different 512-buckets cannot be mixed in one long-lived process** — see *Known limitations* below.
   The decoder MLP reshapes prefill `x` to `[1, S_pad//512, 512, -1]` for `S_pad >= 512`, so different
   padded lengths differ only in the batch dim `-3`, which the prefill matmul program-cache hash does not
-  distinguish (512→1024 TT_FATALs). Since real prompts are always ≤512 tokens, forcing min-512 pins every
-  request to the single `[1,1,512,d]` program shape and sidesteps the collision.
+  distinguish (512→1024 TT_FATALs). Prompts run `13.0 * seconds + 13` tokens (measured), so forcing
+  min-512 pins every request to the single `[1,1,512,d]` program shape **for clips up to ≈38 s** and
+  sidesteps the collision there; see *Known limitations* for what happens past that length.
 
 ## Known limitations
 
@@ -59,9 +60,32 @@ Reproduced (see the repro under the PR discussion):
 - On the current tree a 256-pad vs 512-pad mix no longer reproduces corruption (partially improved
   upstream), but the 512↔1024 collision above is deterministic.
 
-Why the shipped model works despite this: real ASR prompts are always ≤512 tokens (a 14 s clip ≈ 200
-tokens), so every request pads to **exactly** 512 → one program shape → no collision. The workaround is
-therefore effectively "pin to the single 512 bucket", enforced at two layers:
+Why the shipped model works despite this: for the clip lengths this model is served with, prompts stay
+inside one bucket. Measured against the running vLLM server by reading
+`vllm:request_prompt_tokens_sum` per request:
+
+| clip | prompt tokens | bucket |
+|---|---|---|
+| 5 s | 78 | 512 |
+| 11 s | 156 | 512 |
+| 15 s | 208 | 512 |
+| 30 s | 403 | 512 |
+| 38 s | **520** | 1024 |
+| 45 s | **611** | 1024 |
+
+That is `13.0 * seconds + 13` tokens (the mel front-end yields 100 frames/s and the conv stack
+downsamples 8×), so **512 is crossed at ≈38 s**, not never. Treating that bound as an invariant
+was true of the 14 s-pinned standalone server, not of the vLLM path, which accepts whatever it is
+given up to `max_model_len`.
+
+Crossing it is nonetheless safe here, and for a reason worth stating: the encoder input is pinned
+to `PIN_MEL_FRAMES` (3000 = 30 s) in `tt/generator_vllm.py`, so the *encoder* is single-shape
+regardless, and the 38 s and 45 s requests above returned HTTP 200 with `/health` still 200
+afterwards. What the 512-multiple rule buys is that each bucket is entered by padded length alone;
+a process that only ever sees ≤38 s clips never leaves `[1,1,512,d]`.
+
+The workaround is therefore "pin to one bucket for the lengths actually served", enforced at two
+layers:
 - **Op level** (`tt/qwen3_asr_decoder.py`): pad every prefill to a 512-multiple, min 512.
 - **Server level** (`server/qwen3_asr_server.py`, `FIXED_INFER_SEC = 14.0`): pin every `_infer` to a
   fixed 14 s audio length (pad short clips with silence, silence-chunk long audio into ≤14 s windows), so
