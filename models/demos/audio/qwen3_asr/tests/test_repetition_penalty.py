@@ -97,3 +97,70 @@ def test_eval_defaults_to_the_deployment_preset():
     assert 'os.environ.get("QWEN3ASR_EVAL_REPETITION_PENALTY", "1.1")' in src
     assert "repetition_penalty=a.repetition_penalty" in src
     assert "prompt_ids=input_ids" in src, "the eval must pass the prompt ids"
+
+
+def test_it_matches_vllms_own_implementation():
+    """The docstring claims vLLM semantics; check against vLLM, not a restatement.
+
+    Every other test here encodes the rule as I understand it -- divide positive
+    logits, multiply negative, penalise prompt ids too. That verifies internal
+    consistency, not agreement with the thing being copied. vLLM ships the
+    reference form as apply_repetition_penalties_torch(logits, prompt_mask,
+    output_mask, penalties), so compare against it directly.
+
+    Measured equal for penalties 1.1 / 1.5 / 2.0 with prompt ids {3, 7, 11} and
+    output ids {7, 20} (max abs difference 5.96e-08, i.e. float rounding).
+
+    Skips when vLLM is absent: this file is otherwise importable without it, and
+    the demo path does not depend on vLLM being installed.
+    """
+    pytest = __import__("pytest")
+    try:
+        from vllm._custom_ops import apply_repetition_penalties_torch
+    except Exception:  # pragma: no cover - depends on the environment
+        pytest.skip("vLLM not installed in this environment")
+
+    ours = _fn()
+    torch.manual_seed(0)
+    vocab = 64
+    prompt_ids = [3, 7, 11]
+    output_ids = [7, 20]
+
+    for penalty in (1.1, 1.5, 2.0):
+        logits = torch.randn(vocab)
+
+        mine = ours(logits.clone(), set(prompt_ids) | set(output_ids), penalty)
+
+        reference = logits.clone().unsqueeze(0)
+        prompt_mask = torch.zeros(1, vocab, dtype=torch.bool)
+        prompt_mask[0, prompt_ids] = True
+        output_mask = torch.zeros(1, vocab, dtype=torch.bool)
+        output_mask[0, output_ids] = True
+        apply_repetition_penalties_torch(
+            reference, prompt_mask, output_mask, torch.tensor([penalty])
+        )
+
+        assert torch.allclose(mine, reference[0], atol=1e-6), (
+            f"penalty={penalty}: diverges from vLLM by "
+            f"{(mine - reference[0]).abs().max():.2e}"
+        )
+
+
+def test_the_docstring_points_at_the_reference_it_copies():
+    """Name the function, so the next reader can re-run the comparison.
+
+    "vLLM's apply_penalties" is a description; the checkable artifact is
+    _custom_ops.apply_repetition_penalties_torch, which the test above uses.
+    """
+    path = os.path.join(os.path.dirname(__file__), "..", "tt", "qwen3_asr_decoder.py")
+    src = open(path).read()
+    start = src.index("def apply_repetition_penalty")
+    doc = src[start : src.index('"""', src.index('"""', start) + 3)]
+
+    assert "apply_repetition_penalties_torch" in doc, (
+        "name the reference implementation, not just 'vLLM'"
+    )
+    assert "prompt_mask | output_mask" in doc, (
+        "state the union that makes prompt ids count, which is the divergence "
+        "from HF transformers this note exists to flag"
+    )
