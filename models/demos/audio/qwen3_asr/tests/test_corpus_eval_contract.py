@@ -335,11 +335,44 @@ def test_the_decode_trace_comment_cites_the_right_hang_issue():
     head = src[: src.index("class ") if "class " in src else 4000]
 
     assert "37543" in head, "cite the issue whose signature matches"
-    assert "#40592" not in head or "cited\n# here in error" in head, (
+    # Whitespace-normalised: the disclaimer's line wrapping is not the point,
+    # and pinning it to one break made this fail on a reflow.
+    assert "#40592" not in head or "cited here in error" in " ".join(head.split()), (
         "#40592 is an AllGatherAsync hang; do not present it as this failure"
     )
     # the deterministic near-match must stay marked as such
-    assert "45052" in head and "not\n# the non-determinism" in head
+    assert "45052" in head and "not the non-determinism" in " ".join(head.split())
+
+
+def test_the_comment_does_not_blame_pr_44118_for_the_deterministic_hang():
+    """"a PR #44118 regression" claims more than #45052 establishes.
+
+    Checked against the tracker: #44118's merge (7eff69a85a0) is the *first bad
+    tested version*, with 747215b last known good, and triage explicitly says
+    causality is unproven and names #43682 as the better bisection target.
+    Writing it as the regression's cause sends the next reader to revert or
+    study the wrong PR.
+
+    The same paragraph also asserted the issue is "P300x2-specific". The
+    *report* is P300x2-only, but the underlying sparse-matmul deadlock is
+    described as architecture-agnostic in #45943. What actually rules it out
+    here is narrower and more durable: that issue's stuck op is GPT-OSS MoE
+    SparseMatmulDeviceOperation on a (1,4) mesh, and this deployment is one
+    device with no MoE.
+    """
+    src = _read(os.path.join(HERE, "..", "tt", "generator_vllm.py"))
+    head = src[: src.index("class ") if "class " in src else 4000]
+    flat = " ".join(head.split())
+
+    assert "a PR #44118 regression" not in flat, (
+        "#44118 is a bisection boundary for #45052, not a proven cause"
+    )
+    assert "first bad tested version" in flat, "say what #44118 actually is"
+    assert "43682" in flat, "name the target triage actually points at"
+    # and the reason #45052 does not apply here, stated by mechanism
+    assert "MoE" in flat and "SparseMatmul" in flat, (
+        "rule the issue out by its op and topology, not by board name alone"
+    )
 
 
 def test_readme_paths_resolve():

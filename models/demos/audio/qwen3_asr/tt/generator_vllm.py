@@ -64,9 +64,13 @@ AUDIO_TOKEN_ID = 151676
 # closest upstream match by signature is tt-metal#37543 ("[GPT-OSS] ND hang in
 # SDPA decode": 20-120 min in, decode traced, only under vLLM); the
 # deterministic isl>=1024 variant tracked from tt-inference-server#3105 into
-# tt-metal#45052 (a PR #44118 regression) shares the watchdog message but not
-# the non-determinism. #40592 is a Mistral AllGatherAsync hang and was cited
-# here in error -- this deployment short-circuits CCL on a single device.
+# tt-metal#45052 shares the watchdog message but not the non-determinism: it is
+# 100% deterministic, reported on a Blackhole P300x2 (1,4) mesh, and the stuck
+# op is GPT-OSS MoE SparseMatmulDeviceOperation -- neither MoE nor multi-device
+# applies here. PR #44118 is that issue's first bad tested version
+# (7eff69a85a0 vs 747215b good), not a proven cause; triage points at #43682.
+# #40592 is a Mistral AllGatherAsync hang and was cited here in error -- this
+# deployment short-circuits CCL on a single device.
 #
 # History: this defaulted OFF to mirror the upstream standalone server on the
 # original board (10.160.20.103), where a persistent decode trace wedged the
