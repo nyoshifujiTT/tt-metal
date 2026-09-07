@@ -279,3 +279,22 @@ one clip at a time, and times only encode + decode. A served benchmark measures 
 different thing (HTTP and multipart included, requests possibly concurrent), so
 the two `rtfx` values describe different workloads and must not be compared as if
 they were the same measurement.
+
+## Served-path knobs (`tt/`)
+
+The ttnn modules under `tt/` are what a vLLM server actually runs, and they
+read five environment variables of their own. None of them has to be set --
+the defaults are the served configuration -- but an operator who does set one
+is changing what the deployment computes, so they are listed rather than left
+to be discovered by reading the source.
+
+| knob | default | why |
+|---|---|---|
+| `QWEN3ASR_PREFILL_PIN` | `512` | every prefill is padded to this one bucket. tt-metal's prefill matmul has a length-keyed program-cache collision (tenstorrent/tt-metal#49451): mixing a 512-padded and a 1024-padded prefill in one process `TT_FATAL`s, and where it survives the same audio transcribes differently depending on the bucket. 512 covers this model's prompts (~30 s clip -> ~390 audio tokens + prompt). Raise it for longer single-shot clips -- but raise it for **every** front-end, or they stop being comparable |
+| `QWEN3ASR_DECODE_TRACE` | `1` | capture a decode trace. Untraced, every decode step pays full per-op host dispatch: 489 ms/token vs 113 ms traced on p150. Set `0` only where the long-run trace instability in "Known limitations" bites |
+| `QWEN3ASR_DECODER_DTYPE` | `bfloat8_b` | ttnn dtype for the decoder weights (`bfloat16` is the only other accepted value; anything else raises). The demos and the served path take it from the same helper, so it moves both |
+| `QWEN3ASR_DEVICE_EMBED` | `0` | keep the text-embedding gather on the host. The device gather is ~10x faster in isolation (1.1 ms vs 10.5 ms for a 149-token prompt) but real traffic varies the prompt length, so it compiles a program per length and churns the cache (TED 6.08 -> 3.48 audio-s/s); pinning it to the prefill bucket instead pads a ~149-token gather to ~1024 rows and still loses (5.79 vs 6.08). Set `1` once a length-agnostic embedding avoids both |
+| `QWEN3ASR_AUDIO_SNAPSHOT` | *(unset)* | directory holding the full Qwen3-ASR snapshot (audio tower + processor config). Unset, the adapter uses `HF_MODEL` when that is a full snapshot, else the vLLM model path -- which is why a normal deployment never sets it |
+
+`QWEN3ASR_MEL_PIN` (3000) is read here too; it is documented with the corpus
+eval above because both front-ends have to agree on it.

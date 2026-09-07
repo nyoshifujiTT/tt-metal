@@ -674,3 +674,98 @@ def test_the_collision_doc_line_references_still_resolve():
             f"{rel}:{line_no} no longer contains {needle!r} -- it moved; "
             f"the doc's line references are stale again"
         )
+
+
+def _served_knob_table():
+    """The `tt/` knob table, which documents what a deployment can change."""
+    readme = _read(os.path.join(HERE, "..", "README.md"))
+    start = readme.index("## Served-path knobs")
+    table = readme[readme.index("| knob | default | why |", start) :]
+    return table[: table.index("\n\n")]
+
+
+def _tt_env_reads():
+    """Every QWEN3ASR_* variable the ttnn modules under tt/ actually read."""
+    import re
+
+    found = {}
+    for name in sorted(os.listdir(TT)):
+        if not name.endswith(".py"):
+            continue
+        src = _read(os.path.join(TT, name))
+        # with a default: os.environ.get("X", "d");  without: os.environ.get("X")
+        for env, default in re.findall(
+            r'os\.environ\.get\(\s*"(QWEN3ASR_[A-Z0-9_]+)"\s*,\s*"([^"]*)"\s*\)', src
+        ):
+            found[env] = default
+        for env in re.findall(
+            r'os\.environ\.get\(\s*"(QWEN3ASR_[A-Z0-9_]+)"\s*\)', src
+        ):
+            found.setdefault(env, None)
+    return found
+
+
+def test_the_readme_documents_every_knob_the_served_path_reads():
+    """A knob that changes the deployment must not live only in the source.
+
+    tt/ is what a vLLM server runs. Five variables there change what it
+    computes -- the prefill bucket, the decode trace, the decoder dtype, where
+    the embedding gather runs, and which snapshot the audio tower comes from --
+    and none of them was mentioned in this README, so the only way to find out
+    a deployment could be reconfigured was to read generator_vllm.py and
+    qwen3_asr_decoder.py.
+    """
+    reads = _tt_env_reads()
+    assert reads, "the scan found no knobs under tt/; the pattern has gone stale"
+
+    documented = _served_knob_table() + _readme_knob_table()
+    missing = [env for env in sorted(reads) if f"`{env}`" not in documented]
+    assert not missing, f"the README documents none of {missing}, but tt/ reads them"
+
+
+def test_the_served_knob_defaults_match_the_code():
+    """The table states defaults; a drift makes it lie about the deployment."""
+    table = _served_knob_table()
+
+    for env, default in sorted(_tt_env_reads().items()):
+        row = [line for line in table.splitlines() if f"`{env}`" in line]
+        if not row:
+            # documented with the corpus eval instead (the shared mel pin)
+            continue
+        assert len(row) == 1, f"{env} must have exactly one row, found {len(row)}"
+        cell = _table_default_cell(row[0])
+        if default is None:
+            assert cell == "*(unset)*", (
+                f"{env} has no default in the code; the row must say so: {row[0]}"
+            )
+        else:
+            assert cell == f"`{default}`", (
+                f"{env}'s default is {default!r} in the code; the row says "
+                f"otherwise: {row[0]}"
+            )
+
+
+def test_the_decoder_dtype_row_names_the_only_other_accepted_value():
+    """"Overridable" is useless without the accepted set.
+
+    decoder_weight_dtype() raises on anything outside {bfloat8_b, bfloat16},
+    so the row has to name the alternative -- otherwise the documented knob
+    invites a value that aborts start-up.
+    """
+    import re
+
+    src = _read(os.path.join(TT, "qwen3_asr_decoder.py"))
+    match = re.search(r"_DTYPES\s*=\s*\{([^}]*)\}", src)
+    assert match, "_DTYPES is no longer a literal dict; update this test"
+    accepted = set(re.findall(r'"([a-z0-9_]+)"', match.group(1)))
+    assert accepted == {"bfloat8_b", "bfloat16"}, accepted
+
+    row = [
+        line
+        for line in _served_knob_table().splitlines()
+        if "`QWEN3ASR_DECODER_DTYPE`" in line
+    ]
+    assert len(row) == 1, row
+    for value in accepted:
+        assert value in row[0], f"the row must name {value}: {row[0]}"
+    assert "raise" in row[0], "the row must say an unaccepted value raises"
