@@ -268,3 +268,155 @@ def test_the_two_parsers_use_the_same_pattern():
     assert len(set(found.values())) == 1, (
         f"the two parsers no longer share a pattern: {found}"
     )
+
+
+GENERATOR = os.path.join(HERE, "..", "tt", "generator_vllm.py")
+
+
+def _adapter_resolvers(tmp_env):
+    """The adapter's two snapshot helpers, compiled with a shared namespace.
+
+    _resolve_audio_snapshot calls _is_full_asr_snapshot, so they have to be
+    compiled into one namespace rather than extracted separately.
+    """
+    import ast
+    import os as _os
+
+    wanted = {"_is_full_asr_snapshot", "_resolve_audio_snapshot"}
+    ns = {"os": _os}
+    found = {}
+    for node in ast.parse(_read(GENERATOR)).body:
+        if isinstance(node, ast.FunctionDef) and node.name in wanted:
+            module = ast.Module(body=[node], type_ignores=[])
+            exec(compile(module, GENERATOR, "exec"), ns)  # noqa: S102 - our own source
+            found[node.name] = ns[node.name]
+    assert wanted <= set(found), f"missing {wanted - set(found)} in generator_vllm.py"
+    return found["_is_full_asr_snapshot"], found["_resolve_audio_snapshot"]
+
+
+def _write_config(tmp_path, model_type):
+    import json
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    with open(os.path.join(str(tmp_path), "config.json"), "w") as fh:
+        json.dump({"model_type": model_type}, fh)
+    return str(tmp_path)
+
+
+def test_a_full_snapshot_is_told_apart_from_an_extracted_decoder(tmp_path):
+    """This one boolean picks the branch that decides whether to extract.
+
+    _ensure_text_decoder returns the directory untouched when this is False
+    and extracts the thinker decoder when it is True, so getting it wrong
+    either feeds the audio tower's checkpoint to a plain-Qwen3 loader or
+    re-extracts something that is already a decoder.
+    """
+    is_full, _ = _adapter_resolvers(tmp_path)
+
+    assert is_full(_write_config(tmp_path / "asr", "qwen3_asr")) is True
+    assert is_full(_write_config(tmp_path / "plain", "qwen3")) is False
+
+
+def test_an_unreadable_directory_is_not_a_full_snapshot(tmp_path):
+    """Absent or malformed config.json must answer False, not raise.
+
+    The caller uses this to decide whether HF_MODEL is usable at all; an
+    exception here would abort start-up instead of falling through to the
+    model path.
+    """
+    is_full, _ = _adapter_resolvers(tmp_path)
+
+    assert is_full(str(tmp_path / "does-not-exist")) is False
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert is_full(str(empty)) is False
+
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    with open(os.path.join(str(broken), "config.json"), "w") as fh:
+        fh.write("{not json")
+    assert is_full(str(broken)) is False
+
+
+def test_the_explicit_override_wins_over_everything(monkeypatch, tmp_path):
+    """QWEN3ASR_AUDIO_SNAPSHOT is the documented escape hatch."""
+    _, resolve = _adapter_resolvers(tmp_path)
+
+    monkeypatch.setenv("QWEN3ASR_AUDIO_SNAPSHOT", "/explicit")
+    monkeypatch.setenv("HF_MODEL", _write_config(tmp_path / "asr", "qwen3_asr"))
+
+    assert resolve(_config_stub("/from-vllm")) == "/explicit"
+
+
+def test_hf_model_is_used_when_it_holds_a_full_snapshot(monkeypatch, tmp_path):
+    """The spec states this: the served snapshot is reused for the audio tower.
+
+    workflows/model_specs/dev/audio_tts.yaml says QWEN3ASR_AUDIO_SNAPSHOT
+    "falls back to HF_MODEL", which is why a deployment sets neither.
+    """
+    _, resolve = _adapter_resolvers(tmp_path)
+    snapshot = _write_config(tmp_path / "asr", "qwen3_asr")
+
+    monkeypatch.delenv("QWEN3ASR_AUDIO_SNAPSHOT", raising=False)
+    monkeypatch.setenv("HF_MODEL", snapshot)
+
+    assert resolve(_config_stub("/from-vllm")) == snapshot
+
+
+def test_an_extracted_hf_model_is_skipped_for_the_model_path(monkeypatch, tmp_path):
+    """HF_MODEL pointing at a plain decoder has no audio tower in it.
+
+    Taking it anyway would send the audio encoder at a checkpoint with no
+    audio_tower.* weights -- a load failure at best, and the reason the
+    is-full check exists rather than "HF_MODEL if set".
+    """
+    _, resolve = _adapter_resolvers(tmp_path)
+
+    monkeypatch.delenv("QWEN3ASR_AUDIO_SNAPSHOT", raising=False)
+    monkeypatch.setenv("HF_MODEL", _write_config(tmp_path / "plain", "qwen3"))
+
+    assert resolve(_config_stub("/from-vllm")) == "/from-vllm"
+
+
+def test_the_model_path_is_read_under_either_attribute_name(monkeypatch, tmp_path):
+    """HF configs expose the path as _name_or_path or name_or_path."""
+    _, resolve = _adapter_resolvers(tmp_path)
+
+    monkeypatch.delenv("QWEN3ASR_AUDIO_SNAPSHOT", raising=False)
+    monkeypatch.delenv("HF_MODEL", raising=False)
+
+    assert resolve(_config_stub("/underscored")) == "/underscored"
+
+    from types import SimpleNamespace
+
+    assert resolve(SimpleNamespace(name_or_path="/plain")) == "/plain"
+    assert resolve(SimpleNamespace()) == ""
+
+
+def _config_stub(path):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(_name_or_path=path)
+
+
+def test_the_spec_still_claims_the_fallback_these_tests_pin():
+    """If the spec stops promising it, these rules should be revisited.
+
+    The deployment sets neither variable and relies on the HF_MODEL
+    fallback; that promise lives in the tt-inference-server spec, so read it
+    rather than restating it here.
+    """
+    spec = os.path.join(
+        HERE, "..", "..", "..", "..", "..", "..",
+        "tt-inference-server", "workflows", "model_specs", "dev", "audio_tts.yaml",
+    )
+    if not os.path.exists(spec):
+        import pytest
+
+        pytest.skip("tt-inference-server is not checked out beside this repo")
+
+    text = _read(spec)
+    assert "QWEN3ASR_AUDIO_SNAPSHOT falls back to HF_MODEL" in text, (
+        "the spec no longer documents the fallback these tests pin"
+    )
