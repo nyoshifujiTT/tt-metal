@@ -258,8 +258,10 @@ isolation:
 |---|---|---|
 | `QWEN3ASR_EVAL_PAGED_KV` | `1` | paged and non-paged decode use different SDPA kernels |
 | `QWEN3ASR_EVAL_PAGE_BLOCK` | `64` | same `--block_size` a vLLM server is launched with |
+| `QWEN3ASR_EVAL_PAGE_MAX_BLOCKS` | `2048` | size of the paged KV pool this eval allocates: `empty_kcache_paged_attention(2048, 8, 64, 128)`. A manifest whose longest clip needs more blocks than this fails at allocation, not at decode |
 | `QWEN3ASR_EVAL_MAX_BATCH` | `4` | `max_batch_size` selects the decode program shape |
 | `QWEN3ASR_EVAL_REPETITION_PENALTY` | `1.1` | the sampling rule the serving request asks for |
+| `QWEN3ASR_MEL_PIN` | `3000` | mel frames every clip is padded to, so the encoder sees one shape and the prefill program cache is not churned. **Read by the served path too** (`tt/generator_vllm.py`, as `PIN_MEL_FRAMES`), so changing it here without changing it there stops the two front-ends being comparable |
 
 CER is computed after NFKC normalisation and punctuation stripping. Scoring one
 side with a stricter normalisation than the other is not a model difference: it

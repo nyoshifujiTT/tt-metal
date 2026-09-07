@@ -522,25 +522,80 @@ def test_the_readme_lists_every_manifest_key_the_reader_accepts():
     )
 
 
-def test_the_readme_knob_defaults_match_the_code():
-    """A default that drifts silently changes what the eval measures."""
-    src = _read(EVAL)
+def _env_defaults(src):
+    """Every os.environ.get("QWEN3ASR_...", "<literal>") in a source file."""
+    import re
+
+    pattern = re.compile(
+        r'os\.environ\.get\(\s*"(QWEN3ASR_[A-Z0-9_]+)"\s*,\s*"([^"]*)"\s*\)'
+    )
+    return dict(pattern.findall(src))
+
+
+def _readme_knob_table():
     readme = _read(os.path.join(HERE, "..", "README.md"))
     table = readme[readme.index("| knob | default | why |") :]
-    table = table[: table.index("\n\n")]
+    return table[: table.index("\n\n")]
 
-    for env, default in (
-        ("QWEN3ASR_EVAL_PAGED_KV", "1"),
-        ("QWEN3ASR_EVAL_PAGE_BLOCK", "64"),
-        ("QWEN3ASR_EVAL_MAX_BATCH", "4"),
-        ("QWEN3ASR_EVAL_REPETITION_PENALTY", "1.1"),
-    ):
-        assert f'"{env}", "{default}"' in src, (
-            f"{env}'s default is no longer {default}; the README table is stale"
+
+def test_the_readme_knob_table_lists_every_knob_the_eval_reads():
+    """Discover the knobs; do not restate them here.
+
+    This test used to check four hand-listed names, so the table could -- and
+    did -- fall behind the script: QWEN3ASR_EVAL_PAGE_MAX_BLOCKS (the size of
+    the paged KV pool the eval allocates) and QWEN3ASR_MEL_PIN (the mel
+    padding every clip is pinned to, which the served path reads as well) were
+    both absent from the README while the code read them.
+
+    A knob nobody documents is a knob whose default nobody can check, and the
+    reason this file gives for pinning the defaults -- "a default that drifts
+    silently changes what the eval measures" -- applies to all of them.
+    """
+    defaults = _env_defaults(_read(EVAL))
+    assert defaults, "the scan found no knobs at all; the pattern has gone stale"
+
+    table = _readme_knob_table()
+    missing = [env for env in sorted(defaults) if f"`{env}`" not in table]
+    assert not missing, (
+        f"the README knob table does not mention {missing}; the eval reads them"
+    )
+
+
+def test_the_readme_knob_defaults_match_the_code():
+    """A default that drifts silently changes what the eval measures."""
+    defaults = _env_defaults(_read(EVAL))
+    table = _readme_knob_table()
+
+    for env, default in sorted(defaults.items()):
+        row = [line for line in table.splitlines() if f"`{env}`" in line]
+        assert len(row) == 1, f"{env} must have exactly one row, found {len(row)}"
+        assert f"`{default}`" in row[0], (
+            f"{env}'s default is {default!r} in the code; the README row says "
+            f"otherwise: {row[0]}"
         )
-        assert f"`{env}`" in table and f"`{default}`" in table, (
-            f"{env} = {default} must appear in the README table"
-        )
+
+
+def test_the_mel_pin_default_is_shared_with_the_served_path():
+    """Both front-ends must pin mel to the same number of frames.
+
+    corpus_eval.py exists to compare the demo against a served run on the same
+    clips. The mel padding fixes the encoder's input shape, so if the two read
+    the same variable but disagree on its default, an unset environment gives
+    two different encoders and the comparison stops meaning anything.
+    """
+    eval_default = _env_defaults(_read(EVAL))["QWEN3ASR_MEL_PIN"]
+    served_default = _env_defaults(
+        _read(os.path.join(TT, "generator_vllm.py"))
+    )["QWEN3ASR_MEL_PIN"]
+
+    assert eval_default == served_default, (
+        f"corpus_eval pins {eval_default} mel frames, generator_vllm pins "
+        f"{served_default}; an unset QWEN3ASR_MEL_PIN then runs two encoders"
+    )
+
+    assert "generator_vllm" in _readme_knob_table(), (
+        "the README row must say the served path reads this knob too"
+    )
 
 
 def test_tt_metal_home_is_required_at_import_time():
