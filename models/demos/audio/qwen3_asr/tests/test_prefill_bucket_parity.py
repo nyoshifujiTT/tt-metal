@@ -15,6 +15,7 @@ differently cannot be compared at all.
 import ast
 import math
 import os
+import re
 
 HERE = os.path.dirname(__file__)
 TT = os.path.join(HERE, "..", "tt")
@@ -153,8 +154,13 @@ def test_the_docs_do_not_claim_prompts_are_always_under_the_pin():
         assert "always <=512 tokens" not in flat and "always ≤512 tokens" not in flat, (
             f"{os.path.basename(path)}: prompts exceed 512 past ~38 s; state the bound"
         )
-        assert "38" in flat, (
-            f"{os.path.basename(path)}: name the length at which the bucket changes"
+        # Not a bare `"38" in flat`: the README's e2e command names the clip
+        # models/demos/audio/whisper/.../17646385371758249908.wav, whose file
+        # name contains "38", so every statement about the crossover could be
+        # deleted and this still passed. Require the crossover as a phrase.
+        assert re.search(r"(?:≈|~)38 s", flat), (
+            f"{os.path.basename(path)}: name the length at which the bucket "
+            f"changes, as a duration"
         )
 
 
