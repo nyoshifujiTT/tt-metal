@@ -190,3 +190,87 @@ def test_prefill_delegates_the_page_table_conversion():
     assert "prefill_forward_single_user_text" in code, "prefill must go through the Generator"
     assert "ttnn_prefill_forward(" not in code, "do not re-drive the low-level prefill"
     assert "tt_page_table" not in code, "the Generator owns the host->ttnn conversion"
+
+
+GENERATOR = os.path.join(HERE, "..", "tt", "generator_vllm.py")
+
+
+def test_the_prefill_deallocate_is_not_justified_by_a_trace_mode():
+    """Freeing the prefill input is safe for a structural reason, not a setting.
+
+    The comment beside ttnn.deallocate(prefill_input) read "Safe because
+    prefill is never traced (trace_mode=none ...)", naming a value the shipped
+    spec no longer uses -- it runs trace_mode=decode_only. The conclusion was
+    right and the reason was not: prefill is untraced because it *cannot* be
+    traced (the encoder allocates device buffers dynamically, so
+    warmup_model_prefill is a no-op), which holds under every trace_mode.
+
+    That matters because this comment supports a safety judgement -- whether a
+    device tensor may be freed while a trace could hold it. A reader who
+    changes trace_mode should not be left thinking the premise has moved.
+    """
+    src = _read(GENERATOR)
+    start = src.index("ttnn.deallocate(prefill_input)")
+    # the justification sits in the comment block immediately above the call
+    reason = src[max(0, start - 700) : start]
+
+    assert "trace_mode=none" not in reason, (
+        "the deallocate is justified by a trace_mode the spec does not use"
+    )
+    assert "warmup_model_prefill" in reason, (
+        "name the structural reason: prefill warmup is a no-op, so no prefill "
+        "trace exists"
+    )
+
+
+def test_prefill_warmup_really_is_the_no_op_the_comment_relies_on():
+    """Guard the premise rather than trusting the prose.
+
+    If warmup_model_prefill ever starts capturing a trace, the deallocate
+    above stops being safe and this test says so.
+    """
+    tree = ast.parse(_read(GENERATOR))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "warmup_model_prefill":
+            body = [n for n in node.body if not isinstance(n, ast.Expr) or
+                    not isinstance(getattr(n, "value", None), ast.Constant)]
+            calls = [
+                n for n in ast.walk(node)
+                if isinstance(n, ast.Call)
+                and "trace" in ast.unparse(n).lower()
+                and "logger" not in ast.unparse(n).lower()
+            ]
+            assert not calls, (
+                f"warmup_model_prefill now does trace work: {[ast.unparse(c) for c in calls]}"
+            )
+            assert len(body) <= 1, (
+                "prefill warmup must stay a no-op (a single logger call); the "
+                "deallocate below it depends on there being no prefill trace"
+            )
+            return
+    raise AssertionError("warmup_model_prefill not found")
+
+
+def test_a_trace_mode_value_here_is_a_quotation_not_a_claim():
+    """tt/ must not assert what the spec ships; the spec is the source.
+
+    trace_mode lives in workflows/model_specs in tt-inference-server, so a
+    bare mention here is a second source of truth -- and one did drift: the
+    deallocate above was justified by "trace_mode=none" long after the spec
+    moved to decode_only.
+
+    Reporting a past measurement is different, and the file legitimately does
+    it once ("trace_mode=none + warmup -> 50/50, 30/30 no wedge", quoted from
+    the worklog). Require every occurrence to be inside quotes, so a
+    measurement can be cited but a live claim cannot be made.
+    """
+    src = _read(GENERATOR)
+
+    for line in src.splitlines():
+        if "trace_mode=none" not in line and "trace_mode = none" not in line:
+            continue
+        quoted = line.split('"')[1::2]
+        assert any("trace_mode" in part for part in quoted), (
+            "a trace_mode value here must be a quoted measurement, not a "
+            f"statement about the shipped configuration: {line.strip()}"
+        )

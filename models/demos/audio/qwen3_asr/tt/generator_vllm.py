@@ -560,7 +560,10 @@ class TTQwen3ASRForConditionalGeneration(WarmupForwardMixin, SupportsMultiModal,
             # entirely by the prefill forward (decode reads only the paged KV
             # cache, not this tensor), so leaving it allocated leaks DRAM across
             # requests until the device fragments/wedges. Safe because prefill is
-            # never traced (trace_mode=none / prefill warmup is a no-op).
+            # never traced -- not because of any trace_mode setting (the shipped
+            # spec runs trace_mode=decode_only), but because it cannot be: the
+            # encoder allocates device buffers dynamically, so warmup_model_prefill
+            # is a no-op and no prefill trace exists to hold this tensor.
             try:
                 ttnn.deallocate(prefill_input)
             except Exception:
