@@ -538,6 +538,19 @@ def _readme_knob_table():
     return table[: table.index("\n\n")]
 
 
+def _table_default_cell(row):
+    """The `default` column of a knob row, not the whole row.
+
+    Matching the default anywhere in the row lets the `why` column stand in
+    for it: the decode-trace row ends "Set `0` only where ...", so a code
+    default flipped from 1 to 0 was satisfied by that `0` and the mutation
+    survived. Only the second cell states the default.
+    """
+    cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+    assert len(cells) >= 2, f"not a knob row: {row}"
+    return cells[1]
+
+
 def test_the_readme_knob_table_lists_every_knob_the_eval_reads():
     """Discover the knobs; do not restate them here.
 
@@ -569,7 +582,7 @@ def test_the_readme_knob_defaults_match_the_code():
     for env, default in sorted(defaults.items()):
         row = [line for line in table.splitlines() if f"`{env}`" in line]
         assert len(row) == 1, f"{env} must have exactly one row, found {len(row)}"
-        assert f"`{default}`" in row[0], (
+        assert _table_default_cell(row[0]) == f"`{default}`", (
             f"{env}'s default is {default!r} in the code; the README row says "
             f"otherwise: {row[0]}"
         )
