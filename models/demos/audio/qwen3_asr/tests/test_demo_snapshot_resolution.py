@@ -163,3 +163,108 @@ def test_the_demo_docstring_points_at_the_documented_artifacts():
     for var in ("QWEN3ASR_GOLDEN_DIR", "QWEN3ASR_TEXT_DECODER"):
         assert var in recipe, f"the recipe must export {var}, which the README also exports"
     assert "qwen3asr-dev" not in recipe, "that container image is not part of this tree"
+
+
+def _compile_fn(path, name, namespace=None):
+    """Compile one function out of a demo that cannot be imported here.
+
+    The demos import torch, transformers and the ttnn model modules at module
+    level, so extract the single definition through the AST -- the same
+    technique test_mel_pin.py uses for pin_mel.
+    """
+    import ast
+
+    for node in ast.parse(_read(path)).body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            module = ast.Module(body=[node], type_ignores=[])
+            ns = dict(namespace or {})
+            exec(compile(module, path, "exec"), ns)  # noqa: S102 - our own source
+            return ns[name]
+    raise AssertionError(f"{name} not found in {path}")
+
+
+def _demo_wav_parse_asr():
+    import re
+
+    return _compile_fn(
+        os.path.join(HERE, "..", "demo", "demo_wav.py"), "parse_asr", {"re": re}
+    )
+
+
+def test_the_wav_demo_splits_the_language_off_the_transcript():
+    """demo_wav.py is the one-clip entry point the README sends readers to.
+
+    Its parse_asr had no test, while the identical regex in
+    eval/corpus_eval.py was covered. If this stopped matching, the demo would
+    print the prompt echo as the transcript and look like a model failure.
+    """
+    parse = _demo_wav_parse_asr()
+
+    assert parse("<|im_start|>assistant\nlanguage ja<asr_text>こんにちは") == (
+        "ja",
+        "こんにちは",
+    )
+
+
+def test_the_wav_demo_keeps_a_multi_line_transcript(monkeypatch=None):
+    """DOTALL again: without it everything after the first newline is lost."""
+    parse = _demo_wav_parse_asr()
+
+    assert parse("language ja<asr_text>一行目\n二行目") == ("ja", "一行目\n二行目")
+
+
+def test_the_wav_demo_falls_back_without_losing_the_text():
+    """No tag means nothing to split; the text must survive with an empty language.
+
+    Returning ("", "") here would print an empty transcript for output the
+    model did produce.
+    """
+    parse = _demo_wav_parse_asr()
+
+    assert parse("  素の転写だけ  ") == ("", "素の転写だけ")
+    assert parse("") == ("", "")
+
+
+def test_both_parsers_agree_on_the_transcript():
+    """Two copies of one protocol; a fix to either must not split them.
+
+    corpus_eval.py returns the transcript alone and demo_wav.py returns it
+    beside the language, but the transcript itself has to be identical -- the
+    demo and the corpus eval are compared against each other on the same
+    clips.
+    """
+    import re
+
+    eval_parse = _compile_fn(
+        os.path.join(HERE, "..", "eval", "corpus_eval.py"), "parse_asr", {"re": re}
+    )
+    demo_parse = _demo_wav_parse_asr()
+
+    for decoded in (
+        "<|im_start|>assistant\nlanguage ja<asr_text>こんにちは",
+        "language ja<asr_text>一行目\n二行目",
+        "language ja<asr_text>まえ<asr_text>あと",
+        "  素の転写だけ  ",
+        "",
+    ):
+        assert demo_parse(decoded)[1] == eval_parse(decoded), (
+            f"the two parsers disagree on {decoded!r}: "
+            f"{demo_parse(decoded)[1]!r} vs {eval_parse(decoded)!r}"
+        )
+
+
+def test_the_two_parsers_use_the_same_pattern():
+    """Compare the source too: agreeing on five cases is not agreeing always."""
+    import re
+
+    pattern = re.compile(r'm = re\.search\(\s*r"([^"]+)"')
+    found = {}
+    for rel in (("demo", "demo_wav.py"), ("eval", "corpus_eval.py")):
+        src = _read(os.path.join(HERE, "..", *rel))
+        match = pattern.search(src)
+        assert match, f"{rel[-1]}: the parse pattern must stay greppable"
+        found[rel[-1]] = match.group(1)
+
+    assert len(set(found.values())) == 1, (
+        f"the two parsers no longer share a pattern: {found}"
+    )
