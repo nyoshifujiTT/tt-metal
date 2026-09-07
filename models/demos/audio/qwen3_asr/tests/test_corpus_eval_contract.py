@@ -769,3 +769,154 @@ def test_the_decoder_dtype_row_names_the_only_other_accepted_value():
     for value in accepted:
         assert value in row[0], f"the row must name {value}: {row[0]}"
     assert "raise" in row[0], "the row must say an unaccepted value raises"
+
+
+def _compile_fn(path, name, namespace=None):
+    """Compile one function out of a module that cannot be imported here.
+
+    corpus_eval.py subscripts TT_METAL_HOME at import time and pulls in torch,
+    soundfile and transformers, so it cannot simply be imported in a host-only
+    test. Extract the single definition through the AST, as test_mel_pin.py
+    already does for pin_mel.
+    """
+    import ast
+
+    src = _read(path)
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            module = ast.Module(body=[node], type_ignores=[])
+            ns = dict(namespace or {})
+            exec(compile(module, path, "exec"), ns)  # noqa: S102 - our own source
+            return ns[name]
+    raise AssertionError(f"{name} not found in {path}")
+
+
+def _parse_asr():
+    import re
+
+    return _compile_fn(EVAL, "parse_asr", {"re": re})
+
+
+def test_parse_asr_returns_only_what_follows_the_tag():
+    """This is the hypothesis CER is computed over, and nothing tested it.
+
+    parse_asr strips the prompt echo off the decoded output; whatever it
+    returns goes through norm_ja and becomes the hypothesis. If it stopped
+    matching, the prompt itself would be scored as the transcript.
+    """
+    parse = _parse_asr()
+
+    decoded = "<|im_start|>assistant\nlanguage ja<asr_text>こんにちは"
+    assert parse(decoded) == "こんにちは"
+
+    # the language token must not survive into the transcript
+    assert "ja" not in parse(decoded)
+
+
+def test_parse_asr_keeps_a_multi_line_transcript_whole():
+    """DOTALL is why `.*` reaches past a newline; without it the tail is cut."""
+    parse = _parse_asr()
+
+    decoded = "language ja<asr_text>一行目\n二行目"
+    assert parse(decoded) == "一行目\n二行目"
+
+
+def test_parse_asr_falls_back_to_the_whole_string_unchanged():
+    """No tag means no prompt to strip; return the text rather than nothing.
+
+    Returning "" here would score an empty hypothesis against a real
+    reference -- CER 1.0 for that clip, indistinguishable from a real failure.
+    """
+    parse = _parse_asr()
+
+    assert parse("  素の転写だけ  ") == "素の転写だけ"
+    assert parse("") == ""
+
+
+def test_parse_asr_takes_the_last_tag_not_the_first():
+    """A transcript that contains the tag text must not truncate the result.
+
+    `language\\s*(.*?)<asr_text>(.*)` is non-greedy up to the FIRST tag, so a
+    second occurrence stays in group 2 -- the transcript keeps it rather than
+    losing everything before it.
+    """
+    parse = _parse_asr()
+
+    assert parse("language ja<asr_text>まえ<asr_text>あと") == "まえ<asr_text>あと"
+
+
+def test_the_parse_pattern_and_the_prompt_use_the_same_tag():
+    """ASR_TAG builds the prompt; the parser hard-codes the same literal.
+
+    Two spellings of one protocol: changing ASR_TAG alone would make every
+    parse fall through to the whole-string branch, and the corpus CER would
+    jump with nothing pointing at the cause.
+    """
+    import re
+
+    src = _read(EVAL)
+    tag = re.search(r'ASR_TAG\s*=\s*"([^"]+)"', src)
+    assert tag, "ASR_TAG must stay a greppable literal"
+
+    pattern = re.search(r'm = re\.search\(r"([^"]+)"', src)
+    assert pattern, "the parse pattern must stay greppable"
+    assert tag.group(1) in pattern.group(1), (
+        f"the parser matches {pattern.group(1)!r} but the prompt is built with "
+        f"{tag.group(1)!r}"
+    )
+
+
+def test_norm_ja_is_exercised_not_just_grepped():
+    """The regex was checked; the function it feeds was not.
+
+    test_corpus_eval_norm_matches_reference_cases rebuilds the normalisation
+    from _NORM_STRIP and asserts on that reconstruction, so a change to
+    norm_ja's body -- dropping NFKC or the substitution -- would leave it
+    passing.
+
+    The trailing .strip() is deliberately not asserted here: \\s is already in
+    _NORM_STRIP, so removing it changes nothing. Asserting it would be
+    pinning a no-op, and a mutation that deletes it is not a defect. Both
+    front-ends carry it for symmetry with asr_ja_eval.py, which needs it
+    because it applies the same strip set.
+    """
+    import re
+    import unicodedata
+
+    src = _read(EVAL)
+    strip = re.search(r'_NORM_STRIP = re\.compile\((r"[^\n]*")\)', src)
+    assert strip, "the strip pattern must stay greppable"
+
+    norm = _compile_fn(
+        EVAL,
+        "norm_ja",
+        {
+            "unicodedata": unicodedata,
+            "_NORM_STRIP": re.compile(eval(strip.group(1))),  # noqa: S307 - our own source
+        },
+    )
+
+    assert norm("ＡＢＣ") == "ABC", "NFKC must run"
+    assert norm("周りを見ると。") == "周りを見ると", "the strip must run"
+    assert norm("  はい  ") == "はい", "surrounding whitespace must be gone"
+    assert norm("東京") == "東京", "content characters must survive"
+
+
+def test_the_trailing_strip_is_redundant_because_the_set_covers_whitespace():
+    """State why the .strip() above is not worth pinning.
+
+    If \\s ever leaves _NORM_STRIP, the .strip() stops being redundant and the
+    two front-ends can disagree on leading/trailing space -- so the claim in
+    the test above needs to fail rather than quietly become wrong.
+    """
+    import re
+
+    src = _read(EVAL)
+    strip = re.search(r'_NORM_STRIP = re\.compile\((r"[^\n]*")\)', src)
+    assert strip, "the strip pattern must stay greppable"
+    pattern = re.compile(eval(strip.group(1)))  # noqa: S307 - our own source
+
+    assert pattern.sub("", " \t\n") == "", (
+        "whitespace has left the strip set; the trailing .strip() is now "
+        "load-bearing and must be asserted directly"
+    )
