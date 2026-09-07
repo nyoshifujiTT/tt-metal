@@ -50,13 +50,37 @@ def test_corpus_eval_pins_the_mel_frames_like_the_served_path():
     assert "QWEN3ASR_MEL_PIN" in _read(os.path.join(TT, "generator_vllm.py"))
 
 
+def _calls(src, name):
+    """Every call to ``name`` in ``src``, found through the AST.
+
+    Matching the bare name in the source text also matches the import line, so
+    a call replaced by something else stays undetected -- which is exactly
+    what happened to PagedAttentionConfig.
+    """
+    import ast
+
+    return [
+        node
+        for node in ast.walk(ast.parse(src))
+        if isinstance(node, ast.Call)
+        and (
+            getattr(node.func, "id", None) == name
+            or getattr(node.func, "attr", None) == name
+        )
+    ]
+
+
 def test_corpus_eval_runs_paged_kv_by_default():
     # The served path always allocates a paged KV cache, so decode dispatches to
     # paged_scaled_dot_product_attention_decode. Running the demo non-paged uses a
     # different kernel and yields different transcripts, which would make the CER
     # comparison measure the kernel choice rather than the front-end.
     src = _read(EVAL)
-    assert "PagedAttentionConfig" in src, "the eval must build a paged attention config"
+    # Not `"PagedAttentionConfig" in src`: the import line matches that too, so
+    # replacing the call with anything else kept the test green. Require a call.
+    assert _calls(src, "PagedAttentionConfig"), (
+        "the eval must CALL PagedAttentionConfig, not merely import it"
+    )
     assert 'os.environ.get("QWEN3ASR_EVAL_PAGED_KV", "1")' in src, "paged KV must be the default"
     assert "use_paged_kv_cache=PAGED_KV" in src, "the decoder must be built with paged KV"
     assert "page_table=page_table" in src, "generate() must be driven with the page table"
