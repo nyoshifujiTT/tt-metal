@@ -49,12 +49,46 @@ def test_prefill_logits_accepts_paged_kv():
     assert "page_table" in args and "kv_cache" in args
 
 
+def _call_kwargs(src, name):
+    """Keyword names passed to every call of ``name``, via the AST.
+
+    Matching `"page_table=page_table," in src` cannot say *which* call
+    carries it: the prefill call on the line above also matches, so decode
+    could stop forwarding the page table with the assertion still satisfied.
+    """
+    import ast
+
+    out = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Call) and (
+            getattr(node.func, "attr", None) == name
+            or getattr(node.func, "id", None) == name
+        ):
+            out.append({kw.arg for kw in node.keywords if kw.arg})
+    return out
+
+
 def test_generate_threads_paged_kv():
     args = _sig("generate")
     assert "page_table" in args and "kv_cache" in args
     src = _read(DECODER)
     assert "self.prefill_logits(inputs_embeds, page_table=page_table, kv_cache=kv_cache)" in src
-    assert "page_table=page_table," in src and "kv_cache=kv_cache," in src
+
+    # Both halves of the loop must be threaded, checked per call site rather
+    # than by a text match one of them can satisfy for the other.
+    decode_calls = _call_kwargs(src, "decode_forward")
+    assert decode_calls, "generate() must drive decode_forward"
+    for kwargs in decode_calls:
+        assert "page_table" in kwargs, (
+            "decode_forward must be given the page table, or decode silently "
+            "runs the non-paged SDPA kernel while prefill ran the paged one"
+        )
+        assert "kv_cache" in kwargs, "decode_forward must be given the kv cache"
+
+    prefill_calls = _call_kwargs(src, "prefill_logits")
+    assert prefill_calls, "generate() must drive prefill_logits"
+    for kwargs in prefill_calls:
+        assert {"page_table", "kv_cache"} <= kwargs, kwargs
 
 
 def test_paged_prefill_trims_the_page_table():
@@ -92,10 +126,37 @@ def test_paged_kv_arguments_default_to_none():
 
 
 def test_non_paged_stays_the_default():
-    args_prefill = _sig("prefill_logits")
-    src = _read(DECODER)
-    assert "page_table=None" in src, "paged KV must be opt-in"
-    assert args_prefill[0] == "self"
+    """Both entry points default to non-paged, checked as defaults.
+
+    `"page_table=None" in src` matched two different lines -- the signature
+    of prefill_logits and the signature of generate -- so either one could
+    stop defaulting to None with the assertion still satisfied. Read the
+    default off each signature instead.
+    """
+    import ast
+
+    assert _sig("prefill_logits")[0] == "self"
+
+    tree = ast.parse(_read(DECODER))
+    seen = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name not in (
+            "prefill_logits",
+            "generate",
+        ):
+            continue
+        args = node.args.args + node.args.kwonlyargs
+        padded = [None] * (len(node.args.args) - len(node.args.defaults))
+        padded += list(node.args.defaults) + list(node.args.kw_defaults)
+        defaults = {a.arg: d for a, d in zip(args, padded)}
+        assert "page_table" in defaults, f"{node.name} must take a page_table"
+        default = defaults["page_table"]
+        assert isinstance(default, ast.Constant) and default.value is None, (
+            f"{node.name}'s page_table must default to None; paged KV is opt-in"
+        )
+        seen[node.name] = True
+
+    assert seen == {"prefill_logits": True, "generate": True}, seen
 
 
 def test_decode_trace_is_on_by_default_and_overridable():
