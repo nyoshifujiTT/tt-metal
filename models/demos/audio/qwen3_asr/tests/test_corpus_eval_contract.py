@@ -944,3 +944,167 @@ def test_the_trailing_strip_is_redundant_because_the_set_covers_whitespace():
         "whitespace has left the strip set; the trailing .strip() is now "
         "load-bearing and must be asserted directly"
     )
+
+
+EXTRACT = os.path.join(HERE, "..", "reference", "extract_text_decoder.py")
+
+
+def _extract_checkpoint(snapshot):
+    """Compile extract_checkpoint with snap_dir() pinned at ``snapshot``.
+
+    The module imports torch and numpy at import time and resolves the
+    snapshot through huggingface_hub, so compile the one function and hand it
+    the constants it closes over. Everything it does with them -- the key
+    renaming, the config, the tokenizer copy -- is plain file work.
+    """
+    import ast
+    import glob
+    import json
+    import os as _os
+    import shutil
+
+    src = _read(EXTRACT)
+    tree = ast.parse(src)
+
+    text_cfg = None
+    tok_files = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) == "TEXT_CFG":
+            text_cfg = eval(ast.unparse(node.value))  # noqa: S307 - our own source
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) == "TOK_FILES":
+            tok_files = ast.literal_eval(node.value)
+    assert text_cfg and tok_files, "TEXT_CFG / TOK_FILES must stay module constants"
+
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "extract_checkpoint":
+            module = ast.Module(body=[node], type_ignores=[])
+            ns = {
+                "os": _os,
+                "glob": glob,
+                "json": json,
+                "shutil": shutil,
+                "snap_dir": lambda: snapshot,
+                "TEXT_CFG": text_cfg,
+                "TOK_FILES": tok_files,
+            }
+            exec(compile(module, EXTRACT, "exec"), ns)  # noqa: S102 - our own source
+            return ns["extract_checkpoint"], text_cfg, tok_files
+    raise AssertionError("extract_checkpoint not found")
+
+
+def _fake_snapshot(tmp_path):
+    """A snapshot shaped like Qwen3-ASR: thinker.*, audio_tower.*, tokenizer."""
+    import torch
+    from safetensors.torch import save_file
+
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    save_file(
+        {
+            "thinker.model.layers.0.self_attn.q_proj.weight": torch.zeros(2, 2),
+            "thinker.model.embed_tokens.weight": torch.zeros(2, 2),
+            "thinker.lm_head.weight": torch.ones(2, 2),
+            "audio_tower.layers.0.weight": torch.zeros(2, 2),
+            "talker.model.layers.0.weight": torch.zeros(2, 2),
+        },
+        str(snap / "model.safetensors"),
+        metadata={"format": "pt"},
+    )
+    for name in ("merges.txt", "vocab.json"):
+        (snap / name).write_text("{}")
+    return str(snap)
+
+
+def test_the_extraction_renames_the_thinker_keys_the_decoder_expects(tmp_path):
+    """The rename is what makes the output loadable as a plain Qwen3.
+
+    extract_checkpoint had no test calling it, only a text match for its
+    empty-checkpoint guard. Get the prefix arithmetic wrong and every key
+    comes out mangled -- the checkpoint is non-empty, so the guard passes,
+    and the failure surfaces as a decoder that loads no weights.
+    """
+    from safetensors import safe_open
+
+    extract, _, _ = _extract_checkpoint(_fake_snapshot(tmp_path))
+    out = str(tmp_path / "out")
+    extract(out)
+
+    with safe_open(os.path.join(out, "model.safetensors"), "pt") as handle:
+        keys = set(handle.keys())
+
+    assert keys == {
+        "model.layers.0.self_attn.q_proj.weight",
+        "model.embed_tokens.weight",
+        "lm_head.weight",
+    }, keys
+
+
+def test_the_extraction_leaves_the_other_towers_behind(tmp_path):
+    """Only the thinker is the text decoder.
+
+    audio_tower.* belongs to the encoder and talker.* to a head this model
+    does not serve; copying either in makes the checkpoint bigger and the
+    load ambiguous.
+    """
+    from safetensors import safe_open
+
+    extract, _, _ = _extract_checkpoint(_fake_snapshot(tmp_path))
+    out = str(tmp_path / "out")
+    extract(out)
+
+    with safe_open(os.path.join(out, "model.safetensors"), "pt") as handle:
+        keys = list(handle.keys())
+
+    assert not [k for k in keys if "audio_tower" in k or "talker" in k], keys
+
+
+def test_the_extraction_writes_the_config_the_loader_reads(tmp_path):
+    """Without config.json the directory is not a checkpoint at all."""
+    import json
+
+    extract, text_cfg, _ = _extract_checkpoint(_fake_snapshot(tmp_path))
+    out = str(tmp_path / "out")
+    extract(out)
+
+    with open(os.path.join(out, "config.json")) as handle:
+        written = json.load(handle)
+
+    assert written == text_cfg
+    assert written["model_type"] == "qwen3", (
+        "the output must declare itself a plain Qwen3, not qwen3_asr -- the "
+        "adapter's is-full-snapshot check keys on exactly this"
+    )
+
+
+def test_the_extraction_carries_the_tokenizer_files_it_finds(tmp_path):
+    """A checkpoint with no tokenizer cannot decode; absent ones are skipped."""
+    extract, _, tok_files = _extract_checkpoint(_fake_snapshot(tmp_path))
+    out = str(tmp_path / "out")
+    extract(out)
+
+    copied = {name for name in tok_files if os.path.exists(os.path.join(out, name))}
+    assert copied == {"merges.txt", "vocab.json"}, copied
+
+
+def test_the_extraction_refuses_a_snapshot_with_no_thinker_weights(tmp_path):
+    """Running it proves the guard fires, where the text match only proved it exists."""
+    import pytest as _pytest
+    import torch
+    from safetensors.torch import save_file
+
+    snap = tmp_path / "empty"
+    snap.mkdir()
+    save_file(
+        {"audio_tower.layers.0.weight": torch.zeros(2, 2)},
+        str(snap / "model.safetensors"),
+        metadata={"format": "pt"},
+    )
+
+    extract, _, _ = _extract_checkpoint(str(snap))
+    out = str(tmp_path / "out")
+    with _pytest.raises(SystemExit):
+        extract(out)
+
+    assert not os.path.exists(os.path.join(out, "model.safetensors")), (
+        "nothing may be written when the extraction found no weights"
+    )
