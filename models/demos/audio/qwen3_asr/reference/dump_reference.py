@@ -69,7 +69,18 @@ def load_slice(path, start, dur, sr=16000):
         w = w.mean(axis=1)
     a = int(start * sr)
     b = len(w) if dur is None else min(len(w), a + int(dur * sr))
-    return w[a:b].copy()
+    got = w[a:b]
+    if dur is not None and len(got) < int(dur * sr):
+        # Clamping here would leave the manifest claiming a "dur" the golden
+        # tensors were not produced from, and every shape derived from it
+        # would be for a different clip length than the one recorded. The
+        # sibling generator (prep_wav.py) refuses for the same reason.
+        raise SystemExit(
+            f"{path}: asked for {dur:.2f}s from {start:.2f}s but only "
+            f"{len(got) / sr:.2f}s is available (file is {len(w) / sr:.2f}s); "
+            f"pass a --wav/--start/--dur the file holds"
+        )
+    return got.copy()
 
 
 # capture: module-name -> list of (args, output) for each forward call

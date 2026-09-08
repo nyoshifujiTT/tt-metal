@@ -144,3 +144,75 @@ def test_the_refusal_triggers_on_the_case_that_was_shipped(tmp_path):
         load_slice(str(clip), 0.0, 20.0)
     # and the corrected default still works on the same file
     assert len(load_slice(str(clip), 0.0, _const(PREP, "DEFAULT_DUR"))) == int(7.0 * 16000)
+
+
+def _load_slice_of(path):
+    """Exec just the shipped load_slice, so the import side of the file is free."""
+    sf = pytest.importorskip("soundfile")
+    namespace = {"sf": sf}
+    for node in ast.parse(_read(path)).body:
+        if isinstance(node, ast.FunctionDef) and node.name == "load_slice":
+            module = ast.Module(body=[node], type_ignores=[])
+            exec(compile(ast.fix_missing_locations(module), path, "exec"), namespace)  # noqa: S102
+    assert "load_slice" in namespace, f"no load_slice in {os.path.basename(path)}"
+    return namespace["load_slice"]
+
+
+def test_the_golden_dump_refuses_a_short_clip_too(tmp_path):
+    """The same clamp was fixed in prep_wav.py and left in dump_reference.py.
+
+    Measured on the shipped functions with a 3 s wav and ``dur=7.0``:
+    prep_wav raised, dump_reference returned 3 s of audio. dump_reference then
+    writes ``"dur": args.dur`` into the manifest, so the golden data would be
+    described by a duration it was not produced from -- the exact failure the
+    prep_wav refusal exists to prevent, and worse here because the PCC tests
+    derive their expected shapes from that manifest.
+
+    Both generators are asserted through one helper so a future fix to one of
+    them cannot drift from the other.
+    """
+    import numpy as np
+
+    sf = pytest.importorskip("soundfile")
+    clip = tmp_path / "three.wav"
+    sf.write(str(clip), np.zeros(3 * 16000, dtype="float32"), 16000)
+
+    for path in (PREP, DUMP):
+        load_slice = _load_slice_of(path)
+        with pytest.raises(SystemExit) as excinfo:
+            load_slice(str(clip), 0.0, 7.0)
+        message = str(excinfo.value)
+        assert "3.00s is available" in message, (
+            f"{os.path.basename(path)} must report what it found: {message}"
+        )
+
+
+def test_the_golden_dump_still_accepts_the_duration_it_ships_with(tmp_path):
+    """The refusal must not fire on the shipped default, or nothing can run.
+
+    dump_reference's default clip is 7.62 s and DEFAULT_DUR is 7.0, so the
+    request is satisfiable exactly; a refusal written with >= instead of > (or
+    against the file length rather than the requested slice) would break the
+    documented command.
+    """
+    import numpy as np
+
+    sf = pytest.importorskip("soundfile")
+    clip = tmp_path / "seven62.wav"
+    sf.write(str(clip), np.zeros(int(7.62 * 16000), dtype="float32"), 16000)
+
+    load_slice = _load_slice_of(DUMP)
+    dur = _const(DUMP, "DEFAULT_DUR")
+    assert len(load_slice(str(clip), 0.0, dur)) == int(dur * 16000)
+
+
+def test_the_golden_dump_still_allows_the_whole_file(tmp_path):
+    """``dur=None`` means "to the end" and must stay exempt from the refusal."""
+    import numpy as np
+
+    sf = pytest.importorskip("soundfile")
+    clip = tmp_path / "two.wav"
+    sf.write(str(clip), np.zeros(2 * 16000, dtype="float32"), 16000)
+
+    load_slice = _load_slice_of(DUMP)
+    assert len(load_slice(str(clip), 0.0, None)) == 2 * 16000
