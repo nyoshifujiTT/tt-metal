@@ -11,6 +11,7 @@ generator_vllm, since a drift in either silently invalidates the comparison.
 """
 
 import os
+import re
 
 import pytest
 
@@ -669,25 +670,52 @@ def test_the_collision_doc_line_references_still_resolve():
 
     Pinning them here means an upstream rebase fails this test instead of
     silently invalidating the filing.
+
+    That is exactly what happened next. Rebasing onto the squash-merge of
+    tt-metal #49104 moved them a second time: mlp.py:180 -> 193,
+    model_config.py:560 -> 657, :1993 -> 2125, mlp.py:321 -> 368, and
+    attention.py:1286 -> 1315. The test caught it (the cited mlp.py:180 had
+    become a `ttnn.concat` call), which is the behaviour this pin exists for.
+    Expect to update both this list and the doc on every upstream move.
     """
     doc = _read(COLLISION_DOC)
 
     # (cited path, cited line, a substring that line must contain)
     expected = [
-        ("models/tt_transformers/tt/mlp.py", 180, "prefill_len_cutoff"),
-        ("models/tt_transformers/tt/model_config.py", 560, "prefill_len_cutoff = 512"),
-        ("models/tt_transformers/tt/model_config.py", 1993, "get_attn_wo_program_config"),
-        ("models/tt_transformers/tt/mlp.py", 321, "minimal_matmul"),
-        ("models/tt_transformers/tt/attention.py", 1286, "get_attn_wo_program_config"),
+        ("models/tt_transformers/tt/mlp.py", 193, "prefill_len_cutoff"),
+        ("models/tt_transformers/tt/model_config.py", 657, "prefill_len_cutoff = 512"),
+        ("models/tt_transformers/tt/model_config.py", 2125, "get_attn_wo_program_config"),
+        ("models/tt_transformers/tt/mlp.py", 368, "minimal_matmul"),
+        ("models/tt_transformers/tt/attention.py", 1315, "get_attn_wo_program_config"),
+        # The grid citations: declared here, applied there.
+        ("models/tt_transformers/tt/model_config.py", 894, "mlp1_3_grid"),
+        ("models/tt_transformers/tt/model_config.py", 989, "mlp1_3_grid"),
     ]
 
     repo_root = os.path.join(HERE, "..", "..", "..", "..", "..")
+
+    # Cover *every* `file.py:NNN` the doc cites, not just the ones listed
+    # above. The doc cites mlp.py twice (the walkthrough and the reference
+    # list), so reverting only one of them to a stale number left this test
+    # green -- verified by mutation. Requiring the listed set to equal the
+    # cited set means a half-updated doc fails here.
+    cited = set()
+    for base_name in ("mlp.py", "model_config.py", "attention.py"):
+        for match in re.finditer(rf"{re.escape(base_name)}:(\d+)", doc):
+            cited.add((base_name, int(match.group(1))))
+    listed = {(os.path.basename(rel), line) for rel, line, _ in expected}
+    assert cited == listed, (
+        f"the doc's citations and this list disagree: only in doc "
+        f"{sorted(cited - listed)}, only in list {sorted(listed - cited)}"
+    )
+
     for rel, line_no, needle in expected:
         # the doc must actually cite it, in one of the two forms it uses
         base = os.path.basename(rel)
         assert f"{base}:{line_no}" in doc or f"{rel}:{line_no}" in doc, (
             f"the doc no longer cites {base}:{line_no}; update this list with it"
         )
+
 
         path = os.path.join(repo_root, rel)
         if not os.path.isfile(path):
