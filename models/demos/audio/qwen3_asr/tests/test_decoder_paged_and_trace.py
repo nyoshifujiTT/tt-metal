@@ -279,22 +279,29 @@ def test_the_prefill_deallocate_is_not_justified_by_a_trace_mode():
         "the deallocate is justified by a trace_mode the spec does not use"
     )
     assert "warmup_model_prefill" in reason, (
-        "name the structural reason: prefill warmup is a no-op, so no prefill "
-        "trace exists"
+        "name the structural reason: prefill warmup never captures a prefill "
+        "trace, so no prefill trace exists"
     )
 
 
-def test_prefill_warmup_really_is_the_no_op_the_comment_relies_on():
+def test_prefill_warmup_never_captures_the_trace_the_comment_relies_on():
     """Guard the premise rather than trusting the prose.
 
-    If warmup_model_prefill ever starts capturing a trace, the deallocate
-    above stops being safe and this test says so.
+    If warmup_model_prefill ever starts capturing a trace, the deallocate above
+    stops being safe and this test says so.
+
+    The premise is "no prefill trace is ever captured", not "this method does
+    nothing". It used to be stated as the latter -- a body of at most one
+    logger call -- which was true while the method was a bare no-op and turned
+    into an obstacle when it had to run the encoder once during warmup so those
+    allocations happen before the decode trace is captured. Running the encoder
+    eagerly is not capturing a trace and does not retain the tensor, so it
+    cannot invalidate the deallocate. Check the property that actually matters:
+    the trace pass returns without doing work.
     """
     tree = ast.parse(_read(GENERATOR))
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "warmup_model_prefill":
-            body = [n for n in node.body if not isinstance(n, ast.Expr) or
-                    not isinstance(getattr(n, "value", None), ast.Constant)]
             calls = [
                 n for n in ast.walk(node)
                 if isinstance(n, ast.Call)
@@ -304,9 +311,24 @@ def test_prefill_warmup_really_is_the_no_op_the_comment_relies_on():
             assert not calls, (
                 f"warmup_model_prefill now does trace work: {[ast.unparse(c) for c in calls]}"
             )
-            assert len(body) <= 1, (
-                "prefill warmup must stay a no-op (a single logger call); the "
-                "deallocate below it depends on there being no prefill trace"
+            # The trace pass must bail out before any work: that is what keeps
+            # "no prefill trace is ever captured" true regardless of what the
+            # eager pass does.
+            guards = [
+                s for s in node.body
+                if isinstance(s, ast.If) and "enable_trace" in ast.unparse(s.test)
+            ]
+            assert len(guards) == 1, (
+                "prefill warmup must branch on enable_trace exactly once, so the "
+                "trace pass has a single, obvious exit"
+            )
+            assert any(isinstance(s, ast.Return) for s in guards[0].body), (
+                "the enable_trace branch must return; falling through would let "
+                "the trace pass allocate behind its own capture"
+            )
+            assert node.body.index(guards[0]) == 0, (
+                "the guard must be the first statement, or work runs before the "
+                "trace pass can decline it"
             )
             return
     raise AssertionError("warmup_model_prefill not found")

@@ -594,8 +594,13 @@ class TTQwen3ASRForConditionalGeneration(WarmupForwardMixin, SupportsMultiModal,
             # requests until the device fragments/wedges. Safe because prefill is
             # never traced -- not because of any trace_mode setting (the shipped
             # spec runs trace_mode=decode_only), but because it cannot be: the
-            # encoder allocates device buffers dynamically, so warmup_model_prefill
-            # is a no-op and no prefill trace exists to hold this tensor.
+            # encoder allocates device buffers dynamically, so
+            # warmup_model_prefill never captures a prefill trace -- it returns
+            # on the enable_trace pass -- and no prefill trace exists to hold
+            # this tensor. (That warmup does run the encoder once on the eager
+            # pass, to get these allocations done before the decode trace is
+            # captured; running is not capturing, and nothing retains the
+            # tensor afterwards.)
             try:
                 ttnn.deallocate(prefill_input)
             except Exception:
