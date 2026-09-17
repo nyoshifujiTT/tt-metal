@@ -876,6 +876,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         start_pos: list[int] = None,  # Cached prefixes lengths
         return_hidden_states=False,
         return_full_hidden_states=False,
+        keep_hidden_states_on_device=False,
         embed_single_trace=False,
         warmup_prefill=True,
         **kwargs,
@@ -951,6 +952,20 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
             # list indexed by user slot instead.
             assert return_hidden_states, "return_full_hidden_states requires return_hidden_states"
             output_full_hidden = [None] * batch_size
+        if keep_hidden_states_on_device:
+            # Opt-in escape from the usual "results come back on host" contract, for
+            # a caller whose next stage runs on device: returning the per-token
+            # hidden on host costs seq_len x dim of transfer, where a device-side
+            # pooling layer only ever reads one row of it.
+            #
+            # Only the flat per-token path has a host composition worth skipping;
+            # the pooled paths already return a single [batch, dim] row, so there
+            # is nothing to save and the flag would just hand back an unexpected
+            # tensor type.
+            assert return_full_hidden_states, (
+                "keep_hidden_states_on_device applies to the full per-token hidden "
+                "path; the pooled paths already return one row per request"
+            )
         if return_hidden_states:
             # For hidden states, output shape is [batch_size, hidden_size]
             # Note: dim is the hidden dimension size
@@ -1335,6 +1350,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                                 empty_slots=empty_slots,
                                 prompt_lens=prompt_lens,
                                 output_full_hidden=output_full_hidden,
+                                keep_on_device=keep_hidden_states_on_device,
                             )
                             break
                         # Embedding models: trace returns hidden states; extract last-token hidden per slot
@@ -1409,7 +1425,11 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                             "idx": idx,
                             "model_id": model_id,
                             "last_token_idx": last_token_idx,
-                            "hidden_states": hidden_states.cpu(blocking=False),
+                            "hidden_states": (
+                                hidden_states
+                                if keep_hidden_states_on_device
+                                else hidden_states.cpu(blocking=False)
+                            ),
                             "full_hidden": return_full_hidden_states,
                             "seq_len": seq_len,
                         }
@@ -1475,9 +1495,17 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     if res.get("full_hidden"):
                         # Flat/per-token pooling contract: keep the whole [seq, dim]
                         # hidden for this user (the vLLM Pooler selects + normalizes).
-                        output_full_hidden[idx] = self.model[model_id].process_output_prefill_full_hidden_states(
-                            res["hidden_states"], seq_len=res["seq_len"]
-                        )
+                        if keep_hidden_states_on_device:
+                            # Caller owns the device tensor and the host composition,
+                            # so that a pooling layer running on device can consume it
+                            # without the whole sequence crossing to host first.
+                            output_full_hidden[idx] = res["hidden_states"]
+                        else:
+                            output_full_hidden[idx] = self.model[
+                                model_id
+                            ].process_output_prefill_full_hidden_states(
+                                res["hidden_states"], seq_len=res["seq_len"]
+                            )
                     else:
                         output_tensor[idx] = self.model[model_id].process_output_prefill_hidden_states(
                             res["hidden_states"], last_token_idx=(last_token_idx_relative % 32)
@@ -1514,7 +1542,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
             return output_tensor
 
     def _extract_batched_prefill_full_hidden(
-        self, logits, *, model_id, empty_slots, prompt_lens, output_full_hidden
+        self, logits, *, model_id, empty_slots, prompt_lens, output_full_hidden, keep_on_device=False
     ):
         """Fill ``output_full_hidden`` from a batched-prefill trace output.
 
@@ -1535,7 +1563,15 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         for local_idx, slot in enumerate(empty_slots):
             user_hidden = logits[slot : slot + 1, :, :, :]
             full_hidden = self.model[model_id].process_full_hidden_states_after_prefill_trace(user_hidden)
+            if keep_on_device:
+                # Caller owns the device tensor: leave it where it is so a pooling
+                # layer running on device can select its row without the whole
+                # sequence crossing to host.
+                output_full_hidden[local_idx] = full_hidden
+                continue
             slot_full_hidden.append((local_idx, full_hidden.cpu(blocking=False)))
+        if not slot_full_hidden:
+            return
         ttnn.synchronize_device(self.model[model_id].mesh_device)
         for local_idx, full_hidden_host in slot_full_hidden:
             output_full_hidden[local_idx] = self.model[model_id].process_output_prefill_full_hidden_states(
