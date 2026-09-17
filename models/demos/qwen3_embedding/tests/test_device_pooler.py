@@ -145,3 +145,75 @@ def test_pools_a_device_tensor_with_ttnn_ops(monkeypatch):
     # ...and only the finished vector came back as torch.
     assert isinstance(row, torch.Tensor)
     assert row.shape == (4,)
+
+
+def _fake_ops_recording(rows_seen):
+    """ttnn stand-in that records the slice each call asked for."""
+
+    def fake_slice(tensor, start, end):
+        tensor.sliced_at = (start, end)
+        rows_seen.append(start[2])
+        return tensor
+
+    return types.SimpleNamespace(
+        slice=fake_slice,
+        get_device_tensors=lambda tensor: [tensor],
+        to_torch=lambda tensor: torch.ones(1, 1, 1, 4),
+    )
+
+
+def test_a_per_request_device_list_pools_each_tensor_separately(monkeypatch):
+    """encode_token_hidden_states_on_device hands back one tensor per request.
+
+    They are not concatenated on the token axis -- that would mean composing on
+    host, the copy the device path exists to avoid -- so the flat cursor does not
+    apply and each request's last token comes from its own prompt length.
+    """
+    # Two requests of 3 and 2 real tokens. Both tensors are still padded to the
+    # prefill width (5 rows here), because the trim lives in the host
+    # composition this layout skips.
+    per_request = [_FakeTTNNHidden(rows=5, width=4), _FakeTTNNHidden(rows=5, width=4)]
+    rows_seen = []
+
+    pooler = Qwen3EmbeddingDevicePooler(_owner())
+    monkeypatch.setattr(pooler, "_device_ops", lambda: _fake_ops_recording(rows_seen))
+    out = pooler(per_request, _metadata([3, 2]))
+
+    # Each request's own last real token, not a running total over a concatenation.
+    assert rows_seen == [2, 1]
+    assert all(t.normalized for t in per_request)
+    assert len(out) == 2 and all(r.shape == (4,) for r in out)
+
+
+def test_the_per_request_list_ignores_the_flat_cursor(monkeypatch):
+    """A cursor into a concatenation would index past a single request's tensor."""
+    per_request = [_FakeTTNNHidden(rows=5, width=4), _FakeTTNNHidden(rows=5, width=4)]
+    rows_seen = []
+
+    pooler = Qwen3EmbeddingDevicePooler(_owner())
+    monkeypatch.setattr(pooler, "_device_ops", lambda: _fake_ops_recording(rows_seen))
+    # last_token_indices=[2, 4] is the flat-layout answer; row 4 is padding here.
+    pooler(per_request, _metadata([3, 2], last_token_indices=[2, 4]))
+
+    assert rows_seen == [2, 1]
+
+
+def test_a_per_request_list_that_does_not_match_the_metadata_is_rejected(monkeypatch):
+    """Without a 1:1 mapping there is no way to know which row to pick."""
+    per_request = [_FakeTTNNHidden(rows=5, width=4), _FakeTTNNHidden(rows=5, width=4)]
+
+    pooler = Qwen3EmbeddingDevicePooler(_owner())
+    monkeypatch.setattr(pooler, "_device_ops", lambda: _fake_ops_recording([]))
+
+    with pytest.raises(ValueError, match="prompt lengths"):
+        pooler(per_request, _metadata([3]))
+
+
+def test_normalize_false_skips_the_device_normalize_for_a_per_request_list(monkeypatch):
+    per_request = [_FakeTTNNHidden(rows=5, width=4)]
+
+    pooler = Qwen3EmbeddingDevicePooler(_owner(), pooler_config=types.SimpleNamespace(normalize=False))
+    monkeypatch.setattr(pooler, "_device_ops", lambda: _fake_ops_recording([]))
+    pooler(per_request, _metadata([3]))
+
+    assert per_request[0].normalized is False

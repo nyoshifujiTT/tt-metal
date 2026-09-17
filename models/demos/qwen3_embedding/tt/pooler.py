@@ -97,6 +97,26 @@ class Qwen3EmbeddingDevicePooler:
         return [int(end) - 1 for end in ends]
 
     def __call__(self, hidden_states, pooling_metadata):
+        if isinstance(hidden_states, (list, tuple)):
+            # One device tensor per request, not concatenated on the token axis,
+            # so the flat cursor does not apply: each request's last token sits
+            # at its own prompt length. The tensors still carry the prefill's
+            # right-padding -- that trim happens during the host composition this
+            # layout skips -- so the row has to come from prompt_lens, never from
+            # the tensor's own height. See
+            # Qwen3ForEmbedding.encode_token_hidden_states_on_device.
+            prompt_lens = list(pooling_metadata.prompt_lens)
+            if len(prompt_lens) != len(hidden_states):
+                raise ValueError(
+                    f"got {len(hidden_states)} per-request hidden tensors but "
+                    f"{len(prompt_lens)} prompt lengths; cannot tell which row is "
+                    "each request's last token"
+                )
+            return [
+                self._pool_one_on_device(per_request, int(prompt_len) - 1)
+                for per_request, prompt_len in zip(hidden_states, prompt_lens)
+            ]
+
         indices = self._last_token_indices(hidden_states, pooling_metadata)
 
         if isinstance(hidden_states, torch.Tensor):

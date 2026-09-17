@@ -312,6 +312,31 @@ class Qwen3ForEmbedding:
         """
         return self.forward(input_ids, attention_mask, return_full_hidden_states=True)
 
+    def encode_token_hidden_states_on_device(
+        self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
+    ):
+        """Public API: the same pre-pooling stage, left on device.
+
+        :meth:`encode_token_hidden_states` composes its result on host, which
+        means the whole ``[seq, dim]`` hidden of every request crosses the
+        boundary. A pooling layer that runs on device reads one row out of that,
+        so for such a caller the copy is pure cost -- ``seq_len`` times the
+        transfer the pooled :meth:`encode` does, charged per request.
+
+        Returns one device tensor per scheduled request, in request order,
+        instead of a single host tensor. They are not concatenated on the token
+        axis: doing so would mean composing on host, i.e. the copy this exists to
+        avoid. Pooling still belongs to the caller's pooling layer -- this stops
+        at exactly the same stage as :meth:`encode_token_hidden_states`, it only
+        declines to move the result.
+        """
+        return self.forward(
+            input_ids,
+            attention_mask,
+            return_full_hidden_states=True,
+            keep_hidden_states_on_device=True,
+        )
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -319,6 +344,7 @@ class Qwen3ForEmbedding:
         token_type_ids: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         return_full_hidden_states: bool = False,
+        keep_hidden_states_on_device: bool = False,
         embed_single_trace: bool = False,
     ) -> torch.Tensor:
         """
@@ -462,10 +488,19 @@ class Qwen3ForEmbedding:
             enable_trace=True,  # Explicitly enable trace for best performance
             return_hidden_states=True,  # Return hidden states before LM head, not logits
             return_full_hidden_states=return_full_hidden_states,
+            keep_hidden_states_on_device=keep_hidden_states_on_device,
             embed_single_trace=embed_single_trace,
         )
 
         if return_full_hidden_states:
+            if keep_hidden_states_on_device:
+                # Device tensors, one per scheduled request. They are handed back
+                # as a list rather than concatenated: concatenating on the token
+                # axis would mean composing on host, which is the transfer this
+                # path exists to avoid. A pooling layer that runs on device reads
+                # one row out of one request's tensor, so the per-request split is
+                # the shape it wants anyway.
+                return [h for h in hidden_states if h is not None]
             # prefill_forward_text returned a per-user list of [seq_i, hidden]
             # tensors (final norm applied, no last-token slice). For the flat
             # pooling contract every scheduled request's real tokens are
