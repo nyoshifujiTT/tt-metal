@@ -304,6 +304,23 @@ class TTQwen3ASRForConditionalGeneration(WarmupForwardMixin, SupportsMultiModal,
     def __init__(self, decoder, model_args, mesh_device, audio_params, text_embed, tokenizer=None):
         # composition over the tt_transformers Generator (as qwen3_vl does)
         self._ttt_generator = TTTGenerator([decoder], [model_args], mesh_device, tokenizer=tokenizer)
+        # Give the composed Generator the capabilities THIS class declares.
+        #
+        # Generator.decode_forward resolves them off its own `self`, and this
+        # adapter is not a Generator subclass, so without this the Generator
+        # sees its own class default -- which omits supports_async_decode.
+        # ModelCapabilitiesMixin is explicit that an absent key means "not
+        # supported", so it reads back False while the plugin, reading the
+        # adapter, enables async scheduling. The two then disagree: vLLM lets
+        # the host token/position lag one step behind device sampling, and the
+        # Generator declines the async-ahead keep that exists to recover the
+        # authoritative device token, so a reset step conditions on the stale
+        # host token (#54565 added that gate; before it the keep was
+        # unconditional and this mismatch could not arise).
+        #
+        # Assigning the class attribute rather than a copy keeps a single
+        # source of truth: there is one dict, and it is the one declared here.
+        self._ttt_generator.model_capabilities = type(self).model_capabilities
         self.audio_params = audio_params
         self.text_embed = text_embed  # host embed_tokens.weight (vocab, dim), float32
 
