@@ -107,6 +107,21 @@ PREFILL_PIN_LEN = _DECODER_PREFILL_PIN_LEN
 MEL_CHUNK = 100  # mel frames per encoder chunk (N_WINDOW*2)
 PIN_MEL_FRAMES = int(os.environ.get("QWEN3ASR_MEL_PIN", "3000"))
 
+# Mel bins the encoder's conv frontend is built for (conv2d1 in_channels; see
+# audio_encoder.conv_frontend_tt, "mel (num_mel=128, T)"). Only the warmup needs
+# to state it: every served request gets its mel from the feature extractor.
+N_MEL_BINS = 128
+
+# Filler for the warmup prompt. Any non-audio id works -- the warmup output is
+# discarded -- so use the checkpoint's bos/pad id rather than an arbitrary one.
+WARMUP_TEXT_TOKEN_ID = 151643
+
+# Where the audio span sits inside the warmup prompt. A real prompt has text on
+# both sides of the audio, so keep some here too: a full-width audio span would
+# exercise a splice shape no request produces.
+_WARMUP_AUDIO_START = 10
+_WARMUP_AUDIO_TAIL = 10
+
 def _pin_mel(mel, target_frames):
     """Return ``mel`` (n_mels, T) at exactly ``target_frames`` frames.
 
@@ -614,11 +629,45 @@ class TTQwen3ASRForConditionalGeneration(WarmupForwardMixin, SupportsMultiModal,
 
     # --- warmup ---
     # Prefill is NOT traced (the qwen3_vl pattern): every request runs the audio
-    # encoder, which allocates fresh device buffers (conv2d / from_torch / ...).
-    # Capturing a prefill trace around those dynamic allocations is unsupported,
-    # so prefill warmup is a no-op.
+    # encoder, which allocates fresh device buffers (conv2d config tensors, the
+    # 32 encoder layers' intermediates, SDPA, the projector). Capturing a prefill
+    # trace around dynamic allocations is unsupported.
+    #
+    # It does not follow that this can be a no-op. Those allocations still happen
+    # on every request, and once a decode trace is live they land next to its
+    # scratch: measured on the server, the same clip produced a DIFFERENT encoder
+    # output on every request after the first (merged embeds checksum and sum
+    # 190.63 -> -78.13 -> -47.84 for byte-identical input ids and mel), so the
+    # first generated token changed and the transcript collapsed to a short wrong
+    # answer, non-deterministically. Only the first request after warmup was
+    # right, because nothing had replayed the decode trace yet.
+    #
+    # Running the encoder once here -- before Phase 2 captures that trace -- makes
+    # every later request reuse the same allocation shape, and the output becomes
+    # bit-identical across requests (checksum and sum equal on 4/4, argmax stable).
+    # This is not "tracing prefill"; it is getting prefill's allocations done
+    # ahead of the capture, which is what tt-metal #55343 asks of every path that
+    # allocates outside a trace.
+    #
+    # The runner calls this twice. Only the eager pass (enable_trace=False) does
+    # the work; the trace pass has nothing to capture and returns.
     def warmup_model_prefill(self, kv_cache, enable_trace, can_sample_on_device, greedy_only: bool = False) -> None:
-        logger.warning("Warmup model prefill is a no-op for Qwen3-ASR TT adapter (prefill is not traced)")
+        if enable_trace:
+            logger.info("Qwen3-ASR prefill is not traced; nothing to capture in this pass")
+            return
+        # Same shapes the served path uses, so the allocations match the real
+        # ones: the mel is pinned to PIN_MEL_FRAMES and the prompt to
+        # PREFILL_PIN_LEN on every request, which is why one warmup covers them
+        # all. Zeroed mel is fine -- only the allocation shape matters here, and
+        # the result is discarded.
+        mel = torch.zeros(N_MEL_BINS, PIN_MEL_FRAMES)
+        input_ids = torch.full((PREFILL_PIN_LEN,), WARMUP_TEXT_TOKEN_ID, dtype=torch.int64)
+        # Leave room either side so the splice exercises the same masked path a
+        # real prompt does rather than a full-width special case.
+        input_ids[_WARMUP_AUDIO_START : PREFILL_PIN_LEN - _WARMUP_AUDIO_TAIL] = AUDIO_TOKEN_ID
+        logger.info("Warming up the Qwen3-ASR audio encoder to allocate its device buffers before trace capture")
+        self._merge_embeds(input_ids, mel, PIN_MEL_FRAMES)
+        logger.info("Qwen3-ASR audio encoder warmup complete")
 
     # Decode warmup runs so every decode op is COMPILED into the program cache up
     # front (this alone keeps steady-state stable, per the worklog:
