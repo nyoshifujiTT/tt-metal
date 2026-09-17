@@ -625,6 +625,23 @@ class TTQwen3ASRForConditionalGeneration(WarmupForwardMixin, SupportsMultiModal,
     def read_decode_output(self, tt_out, async_read=False):
         return self._ttt_generator.read_decode_output(tt_out, async_read=async_read)
 
+    # Staging hook for the eager warmup pass. warmup_model_decode gates on
+    # ``hasattr(self, "_prepare_decode_trace_variant")`` to decide whether to
+    # pass prepare_trace=True, and ``self`` there is this adapter, not the
+    # Generator: this class composes a Generator in ``self._ttt_generator``
+    # rather than inheriting from it, and defines no ``__getattr__``. Without
+    # this delegation the attribute is simply absent, the flag is never set, and
+    # the eager pass falls through to a plain untraced decode -- so the
+    # persistent decode trace inputs are first allocated during the Phase 2
+    # capture instead of before it (tt-metal #55343).
+    #
+    # Every other Generator entry point this adapter needs is delegated the same
+    # way (decode_forward, read_decode_output, process_decode_output_host); this
+    # one was missed because it is called by capability probe rather than by
+    # name from the runner.
+    def _prepare_decode_trace_variant(self, *args, **kwargs):
+        return self._ttt_generator._prepare_decode_trace_variant(*args, **kwargs)
+
     def process_decode_output_host(self, tt_out, is_tokens=False):
         return self._ttt_generator.process_decode_output_host(tt_out, is_tokens=is_tokens)
 
