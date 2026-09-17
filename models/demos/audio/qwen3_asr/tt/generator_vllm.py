@@ -575,12 +575,24 @@ class TTQwen3ASRForConditionalGeneration(WarmupForwardMixin, SupportsMultiModal,
     # --- decode ---
     def decode_forward(self, *args, **kwargs):
         kwargs.pop("rope_deltas_all_users", None)  # 1D RoPE: no mrope deltas needed
-        # Force the adapter's own trace policy regardless of the runner's
-        # trace_mode: ON by default (fast-dispatch/replay decode), OFF only when
-        # QWEN3ASR_DECODE_TRACE=0. Pinning it here (rather than following the
-        # plugin's global trace_mode) keeps the decode-trace decision a single,
-        # explicit adapter-level switch.
-        kwargs["enable_trace"] = DECODE_TRACE
+        # Only ever force the trace OFF, never ON. tt-metal #55343 made the
+        # eager (enable_trace=False) decode call the point where the persistent
+        # decode trace inputs are staged: warmup_model_decode passes
+        # prepare_trace=True alongside it, and Generator.decode_forward reaches
+        # that branch only when enable_trace is False. Forcing enable_trace=True
+        # here turned that staging call into a capture, so
+        # _prepare_decode_trace_variant never ran and the trace bound to buffers
+        # allocated behind it -- every later request's prefill then rewrote them
+        # and the replayed decode read a corrupted token (observed: only the
+        # first transcription after warmup is correct, the rest degrade to "はい。"
+        # or a repeated-character runaway, non-deterministically).
+        #
+        # The decode-trace decision stays an adapter-level switch in the
+        # direction that is ours to make: QWEN3ASR_DECODE_TRACE=0 disables it
+        # regardless of the runner's trace_mode. With it enabled we follow the
+        # caller, which is what warmup_model_decode already does.
+        if not DECODE_TRACE:
+            kwargs["enable_trace"] = False
         return self._ttt_generator.decode_forward(*args, **kwargs)
 
     # --- warmup ---
