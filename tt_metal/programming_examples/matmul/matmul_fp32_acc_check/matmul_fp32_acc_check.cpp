@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -57,6 +58,10 @@ std::vector<bfloat16> build_input_b(uint32_t k, uint32_t n) {
 }
 
 
+// Which compute kernel to run: the stock compute-API matmul, the B1 rewrite of it, or the C
+// zero-injecting variant.
+enum class KernelVariant { ComputeApi, Custom, CustomB2 };
+
 void run_single_core_matmul(
     const std::vector<bfloat16>& a_tiled,
     const std::vector<bfloat16>& b_tiled,
@@ -66,7 +71,7 @@ void run_single_core_matmul(
     uint32_t k,
     bool fp32_dest_acc_en,
     const std::shared_ptr<distributed::MeshDevice>& mesh_device,
-    bool use_custom_kernel = false) {
+    KernelVariant variant = KernelVariant::ComputeApi) {
     distributed::MeshCommandQueue& cq = mesh_device->mesh_command_queue();
     distributed::MeshWorkload workload;
     distributed::MeshCoordinateRange device_range(mesh_device->shape());
@@ -148,10 +153,20 @@ void run_single_core_matmul(
         });
 
     std::vector<uint32_t> compute_compile_time_args = {mt, kt, nt};
-    // B1: same matmul, LLK calls written out instead of matmul_init/matmul_tiles.
-    const char* compute_kernel = use_custom_kernel
-                                     ? OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/compute/mm_custom.cpp"
-                                     : OVERRIDE_KERNEL_PREFIX "matmul/matmul_single_core/kernels/compute/mm.cpp";
+    const char* compute_kernel = nullptr;
+    switch (variant) {
+        case KernelVariant::ComputeApi:
+            compute_kernel = OVERRIDE_KERNEL_PREFIX "matmul/matmul_single_core/kernels/compute/mm.cpp";
+            break;
+        case KernelVariant::Custom:
+            // B1: same matmul, written out as direct UNPACR and MVMUL sequences.
+            compute_kernel = OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/compute/mm_custom.cpp";
+            break;
+        case KernelVariant::CustomB2:
+            // B2: same matmul as B1 with the M dimension contiguous (no i split).
+            compute_kernel = OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/compute/mm_custom_b2.cpp";
+            break;
+    }
     tt_metal::CreateKernel(
         program,
         compute_kernel,
@@ -258,19 +273,20 @@ int main() {
         };
 
         // Raw device output for one layout, so the two compute kernels can be compared directly.
-        auto run_raw = [&](const std::vector<float>& terms, bool fp32_dest_acc_en, bool use_custom_kernel) {
+        auto run_raw = [&](const std::vector<float>& terms, bool fp32_dest_acc_en, KernelVariant variant) {
             const uint32_t k = static_cast<uint32_t>(terms.size());
             auto a = build_input_a(M, k, terms);
             auto b = build_input_b(k, N);
             auto a_tiled = tilize_nfaces(a, M, k);
             auto b_tiled = tilize_nfaces(b, k, N);
             std::vector<float> out_tiled(M * N, 0.0f);
-            run_single_core_matmul(
-                a_tiled, b_tiled, out_tiled, M, N, k, fp32_dest_acc_en, mesh_device, use_custom_kernel);
+            run_single_core_matmul(a_tiled, b_tiled, out_tiled, M, N, k, fp32_dest_acc_en, mesh_device, variant);
             return untilize_nfaces(out_tiled, M, N);
         };
 
-        auto run = [&](const std::vector<float>& terms, bool fp32_dest_acc_en) {
+        auto run = [&](const std::vector<float>& terms,
+                       bool fp32_dest_acc_en,
+                       KernelVariant variant = KernelVariant::ComputeApi) {
             const uint32_t k = static_cast<uint32_t>(terms.size());
             auto a = build_input_a(M, k, terms);
             auto b = build_input_b(k, N);
@@ -298,7 +314,7 @@ int main() {
             auto a_tiled = tilize_nfaces(a, M, k);
             auto b_tiled = tilize_nfaces(b, k, N);
             std::vector<float> out_tiled(M * N, 0.0f);
-            run_single_core_matmul(a_tiled, b_tiled, out_tiled, M, N, k, fp32_dest_acc_en, mesh_device);
+            run_single_core_matmul(a_tiled, b_tiled, out_tiled, M, N, k, fp32_dest_acc_en, mesh_device, variant);
             auto out = untilize_nfaces(out_tiled, M, N);
 
             // The bound scales with the number of accumulated products, which is K.
@@ -376,8 +392,8 @@ int main() {
         bool custom_matches = true;
         for (const auto& [name, terms] : std::vector<std::pair<const char*, const std::vector<float>*>>{
                  {"packed", &packed}, {"spread", &spread}, {"uniform", &uniform}}) {
-            const auto ref = run_raw(*terms, true, false);
-            const auto cus = run_raw(*terms, true, true);
+            const auto ref = run_raw(*terms, true, KernelVariant::ComputeApi);
+            const auto cus = run_raw(*terms, true, KernelVariant::Custom);
             uint32_t mismatches = 0;
             for (uint32_t i = 0; i < M * N; ++i) {
                 // Bit-exact, not approximate: the two kernels issue the same instructions.
@@ -391,7 +407,33 @@ int main() {
                 "check=custom_kernel_bitexact_{} expected=0 actual={} result={}\n", name, mismatches, okng(ok));
         }
 
-        pass = spread_within_bound && uniform_within_bound && packed_exceeds_bound && custom_matches;
+        // B2: same matmul as B1 with M contiguous (no i split). The issue order differs, so the
+        // accumulation order differs and the result is not bit-identical to B1. What must hold is
+        // that it still behaves like a correct FP32-accumulating matmul, so it is judged against
+        // the same Higham bound: spread and uniform within bound, packed over it.
+        bool b2_ok = true;
+        for (const auto& [name, terms, expect_within] :
+             std::vector<std::tuple<const char*, const std::vector<float>*, bool>>{
+                 {"spread", &spread, true}, {"uniform", &uniform, true}, {"packed", &packed, false}}) {
+            const RunResult r = run(*terms, true, KernelVariant::CustomB2);
+            const bool within = r.worst_ratio <= 1.0;
+            const bool ok = (within == expect_within);
+            b2_ok = b2_ok && ok;
+            fmt::print(
+                "check=b2_no_i_split_{} expected={} actual={} result={}\n",
+                name,
+                expect_within ? "within_bound" : "over_bound",
+                within ? "within_bound" : "over_bound",
+                okng(ok));
+            fmt::print(
+                "detail b2 {} err_over_bound={} elements_within={}/{}\n",
+                name,
+                r.worst_ratio,
+                r.within_bound,
+                M * N);
+        }
+
+        pass = spread_within_bound && uniform_within_bound && packed_exceeds_bound && custom_matches && b2_ok;
         if (!mesh_device->close()) {
             pass = false;
         }

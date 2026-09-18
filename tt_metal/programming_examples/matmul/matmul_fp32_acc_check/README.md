@@ -102,6 +102,53 @@ The example runs both kernels on all three layouts and requires bit-exact agreem
 validated with a negative control: changing the addr_mod of the final MVMUL in the custom kernel
 turns all three checks into `NG` (128/1024 elements differing).
 
+## B2: the same matmul with M contiguous
+
+`kernels/compute/mm_custom_b2.cpp` answers a question B1 raises. B1 issues the 16 MVMULs in the
+order the LLK uses, which splits M into a face index (outer) and an 8-row half (inner) with N in
+between:
+
+```
+B0A0 B0A0 B0A1 B0A1  B2A0 B2A0 B2A1 B2A1  B1A2 B1A2 B1A3 B1A3  B3A2 B3A2 B3A3 B3A3
+```
+
+That split is inherited, not required. It dates to Grayskull, where the MOP was a fixed two-level
+loop: with the ColMajor dest face layout 16 MVMULs fit one MOP run, while RowMajor only fit 8 and
+needed extra `SETRWC`s in the math thread. The Grayskull code shows this directly, as
+`ckernel_template tmp(2, 8, ...)` for ColMajor against `tmp(2, 4, ...)` for RowMajor. Blackhole has
+REPLAY and does not have that constraint, ColMajor was deleted for Wormhole B0 and the
+`DstTileFaceLayout` parameter was removed entirely, yet the instruction order carried over. See
+tt-metal#3546 and tt-metal#5420 for the contemporaneous discussion.
+
+Nothing else was found to depend on the order. The packer can start anywhere in Dst and can pack
+row-granular (`pack_rows`, 1 to 64 rows), and the math/pack handshake is per Dst section rather
+than per row, so neither constrains how math fills a tile.
+
+B2 therefore walks `for k in 0,1: for j in 0,1: for i in 0..3` with M contiguous and innermost.
+Same 16 products, same Dst, different issue order, so the accumulation order differs and the
+result is *not* bit-identical to B1. It is judged against the same Higham bound instead.
+
+Measured, identical on ttsim and on Blackhole p150b silicon, and identical to B1's ratios:
+
+```
+check=b2_no_i_split_spread  expected=within_bound actual=within_bound result=OK
+detail b2 spread  err_over_bound=0.0247595  elements_within=1024/1024
+check=b2_no_i_split_uniform expected=within_bound actual=within_bound result=OK
+detail b2 uniform err_over_bound=0          elements_within=1024/1024
+check=b2_no_i_split_packed  expected=over_bound   actual=over_bound   result=OK
+detail b2 packed  err_over_bound=620.646    elements_within=12/1024
+```
+
+So the split is safe to drop: M can be kept contiguous with the same four increments, the same
+instruction count, and the same accuracy.
+
+One detail cost real debugging time. Moving Dst backwards cannot be done by wrapping. The SrcA and
+SrcB counters are 6-bit and wrap at 64 rows, but the Dst counter is 10-bit (`uint10_t Dst, Dst_Cr`
+in the ISA's RWCs) and wraps at 1024, so a `dest` increment of 40 intended as -24 just keeps
+climbing: measured, Dst went 0,8,32,40 then 80,88,112,120,128 and never came back. The backward
+moves use the `cr` marker instead - advance the marker by 16 on the `j` step, clear it on the `k`
+step.
+
 ## How to read output
 
 - `check=*_layout_worst_element`: expected vs actual at the element with the largest bound-relative
@@ -133,3 +180,91 @@ The practical consequence is that full FP32-class accuracy currently requires ea
 span at most ~11 binades. Data that already satisfies this keeps FP32-class accuracy at full
 multiplier utilisation, as the `uniform` case shows. Data that does not must be spread to one
 useful value per SOP group, which costs a factor of 8 in multiplier utilisation.
+
+## C: zero injection
+
+The `packed` layout above loses 12 bits because eight values with different exponents share one
+SOP group. `kernels/compute/mm_zero_inject.cpp` runs that same layout with at most one useful
+value per group, and the result satisfies the FP32 bound.
+
+Measured on ttsim (Blackhole), same input, same `fp32_dest_acc_en=true`, same `MathFidelity::HiFi4`
+as the `packed` run:
+
+```
+check=zero_inject_err_over_fp32_bound expected=1 actual=0.265 result=OK
+detail zero_inject elements_within_fp32_bound=1024/1024
+detail zero_inject_vs_baseline packed_ratio=620.646 zero_inject_ratio=0.265
+```
+
+620.6 to 0.265, on all 1024 elements. Only the SrcA occupancy differs.
+
+### Only SrcA is zeroed
+
+`mvmul()` tests the operands with an OR:
+
+```c
+zero_a = (a & 0x3FFFF) < 0x400;  zero_b = ...;
+if (zero_a || zero_b) { signs[i] = 0; exps[i] = zero_term_exp; mans[i] = 0; }
+```
+
+A zero in SrcA alone kills the lane, and the lane's exponent is forced to a neutral value instead
+of anything derived from the data, so it cannot raise the group maximum that the other lanes are
+aligned to. SrcB in those lanes is never read, so it needs no zero padding and no reordering.
+
+### Placement
+
+SOP groups are cut at lanes 0-7 and 8-15, and lane `i` reads SrcA row `src_a_row + i` and SrcB
+column `i`. The two constraints together fix the layout: a K value must sit at the same index on
+both sides, so SrcA row `r` must hold K=`r`, and the two useful values must be 8 rows apart to
+fall in different groups. Each step therefore takes K=`r` and K=`r+8` of one 16-wide K window,
+and 16 steps cover the 32 K values of a tile.
+
+SrcB is not moved to select the K window, because `SETRWC` cannot place its row counter at 16
+(`rwc_b` accepts only 0 or 8). Instead the unpacker re-points SrcB's L1 base at the face pair for
+the current K half, which it can do freely since SrcB is re-fetched every step anyway.
+
+### Maintaining the zeros
+
+`ZEROSRC` clears whole banks, so it cannot maintain the invariant incrementally. Clearing
+individual rows by unpacking from L1's zero region also failed: the clearing `UNPACR`s advance the
+config context themselves, so a clear cannot be aimed reliably at the bank holding the rows it was
+meant to undo. Measured attempts left the window accumulating stale rows (0,8 then 0,2,8,10 then
+0,2,4,6,8,10,12,14 when clearing one pair, and an interleaved mess when clearing the whole
+history), and each stale row contributes a K value that does not belong to the step.
+
+What works is `UNPACR_NOP` with the stall-and-clear encoding at the top of each step: it zeroes the
+unpacker-side bank and waits until the matrix unit has released it. That makes the invariant local
+- on entry to the row writes, every row of the bank is zero - at one extra instruction per step.
+
+### Config contexts
+
+Every cfg register this kernel writes has to be written in both context slots, because the kernel
+alternates config contexts per step and the unpacker reads the slot for the current one. This
+applies to the SrcA L1 base, the SrcA Dest address, and the SrcB L1 base. Writing only the
+context-0 slot is not a small error: it left every context-1 step reading a stale address, which
+showed up as exactly half the output tile being wrong.
+
+### MVMUL sequence
+
+Both operands are four stacked 16x16 faces (TL, TR, BL, BR). SrcB is in0, M-by-K, so its faces
+are M0-15/K0-15, M0-15/K16-31, M16-31/K0-15, M16-31/K16-31. SrcA is in1, K-by-N, and this kernel
+writes the K rows of both N faces: SrcA rows 0-15 feed output columns 0-15, rows 16-31 feed
+columns 16-31.
+
+A step is 8 MVMULs per fidelity phase: {SrcB M0-15, M16-31} x {SrcA N0-15, N16-31}, each covering
+8 of the 64 Dst rows an fp32 32x32 tile occupies. Note that Dst increments are not modular, so
+returning the Dst counter to row 16 for the second SrcA face is done with its `cr` marker, not by
+adding 40.
+
+### Cost
+
+16 steps per tile instead of 2 MVMUL groups, i.e. the 8x MVMUL increase the analysis predicted.
+The unpacker writes one row at a time instead of a whole tile, which does not reduce the bytes
+moved, only splits them, and adds one bank-clear per step.
+
+### Verifying changes to this kernel
+
+Every failure above was diagnosed by instrumenting ttsim rather than by inspection: printing the
+non-zero SrcA rows per MVMUL, the SrcA write row and source address, and the SrcB base address per
+context. The failure modes look alike from the outside - a wrong result or a zero result - so if
+this kernel is modified, instrument rather than guess.
