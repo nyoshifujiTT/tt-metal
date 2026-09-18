@@ -60,7 +60,7 @@ std::vector<bfloat16> build_input_b(uint32_t k, uint32_t n) {
 
 // Which compute kernel to run: the stock compute-API matmul, the B1 rewrite of it, or the C
 // zero-injecting variant.
-enum class KernelVariant { ComputeApi, Custom, CustomB2, CustomB3 };
+enum class KernelVariant { ComputeApi, Custom, CustomB2, CustomB3, ZeroInject };
 
 void run_single_core_matmul(
     const std::vector<bfloat16>& a_tiled,
@@ -169,6 +169,10 @@ void run_single_core_matmul(
         case KernelVariant::CustomB3:
             // B3: same matmul walked as k -> i -> j, with N innermost.
             compute_kernel = OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/compute/mm_custom_b3.cpp";
+            break;
+        case KernelVariant::ZeroInject:
+            // C: one useful value per SOP group, walked as l -> k -> i -> j -> f.
+            compute_kernel = OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/compute/mm_zero_inject.cpp";
             break;
     }
     tt_metal::CreateKernel(
@@ -443,7 +447,27 @@ int main() {
             }
         }
 
-        pass = spread_within_bound && uniform_within_bound && packed_exceeds_bound && custom_matches && reorder_ok;
+        // C: the zero-injecting kernel runs the same packed layout, at K=32, and must satisfy the
+        // FP32 bound that the baseline violates by a factor of 620. Same input, same
+        // fp32_dest_acc_en, same fidelity: the only difference is that each SOP group now holds
+        // one useful value instead of eight, so there is no intra-group alignment to lose bits to.
+        const RunResult zi_r = run(packed, true, KernelVariant::ZeroInject);
+        const bool zi_within_bound = zi_r.worst_ratio <= 1.0;
+        print_check("zero_inject_worst_element", zi_r.worst_expected, zi_r.worst_actual, zi_within_bound);
+        print_check("zero_inject_err_over_fp32_bound", 1.0, zi_r.worst_ratio, zi_within_bound);
+        fmt::print(
+            "detail zero_inject elements_within_fp32_bound={}/{} worst_index={} bound={}\n",
+            zi_r.within_bound,
+            M * N,
+            zi_r.worst_index,
+            zi_r.bound_at_worst);
+        fmt::print(
+            "detail zero_inject_vs_baseline packed_ratio={} zero_inject_ratio={}\n",
+            packed_r.worst_ratio,
+            zi_r.worst_ratio);
+
+        pass = spread_within_bound && uniform_within_bound && packed_exceeds_bound && custom_matches &&
+               reorder_ok && zi_within_bound;
         if (!mesh_device->close()) {
             pass = false;
         }

@@ -204,29 +204,23 @@ span at most ~11 binades. Data that already satisfies this keeps FP32-class accu
 multiplier utilisation, as the `uniform` case shows. Data that does not must be spread to one
 useful value per SOP group, which costs a factor of 8 in multiplier utilisation.
 
-## C: zero injection (design notes, kernel not in the tree)
+## C: zero injection
 
 The `packed` layout above loses 12 bits because eight values with different exponents share one
-SOP group. A zero-injection kernel runs that same layout with at most one useful value per group.
-It satisfied the FP32 bound on ttsim but produced half a tile's worth of missing K contribution on
-silicon, so it was removed from the tree while the B1/B2/B3 ordering work was done; recover it from
-`git log -- .../kernels/compute/mm_zero_inject.cpp`. The notes below are the design it has to be
-rebuilt to.
+SOP group. `kernels/compute/mm_zero_inject.cpp` runs that same layout with at most one useful
+value per group, and the result satisfies the FP32 bound.
 
-Measured on ttsim (Blackhole) only, same input, same `fp32_dest_acc_en=true`, same
-`MathFidelity::HiFi4` as the `packed` run:
+Measured, identical on ttsim and on Blackhole p150b silicon, same input, same
+`fp32_dest_acc_en=true` and same `MathFidelity::HiFi4` as the `packed` run:
 
 ```
-check=zero_inject_err_over_fp32_bound expected=1 actual=0.265 result=OK
-detail zero_inject elements_within_fp32_bound=1024/1024
-detail zero_inject_vs_baseline packed_ratio=620.646 zero_inject_ratio=0.265
+check=zero_inject_worst_element expected=17.19275699555874 actual=17.192771911621094 result=OK
+check=zero_inject_err_over_fp32_bound expected=1 actual=0.45486000796485393 result=OK
+detail zero_inject elements_within_fp32_bound=1024/1024 worst_index=989 bound=3.279264409676139e-05
+detail zero_inject_vs_baseline packed_ratio=620.6459961715897 zero_inject_ratio=0.45486000796485393
 ```
 
-620.6 to 0.265, on all 1024 elements. Only the SrcA occupancy differs. On silicon the same build
-satisfied the bound on 512 of 1024 elements, with the values matching the K0-15 contribution
-alone: the SrcB fetch base was moved by one face to select the K window, which reads one face past
-the end of the tile. SrcB must instead be fetched once per tile and left in place, with the K
-window selected by the address modes.
+620.6 to 0.455, on all 1024 elements. Only the SrcA occupancy differs.
 
 ### Only SrcA is zeroed
 
@@ -300,15 +294,25 @@ history), and each stale row contributes a K value that does not belong to the s
 What works is `UNPACR_NOP` with the stall-and-clear encoding at the top of each step: it zeroes the
 unpacker-side bank and waits until the matrix unit has released it. That makes the invariant local
 - on entry to the row writes, every row of the bank is zero - at one extra instruction per `l`.
-That instruction hung on silicon in the recovered version and has to be re-checked there.
+The LLK uses the same instruction on its partial-face path (`llk_unpack_AB_matmul.h`), and it
+behaves the same on silicon here.
 
-### Config contexts
+### Config registers
 
 Every cfg register this kernel writes has to be written in both context slots, because the kernel
 alternates config contexts per step and the unpacker reads the slot for the current one. This
 applies to the SrcA L1 base, the SrcA Dest address, and the SrcB L1 base. Writing only the
 context-0 slot is not a small error: it left every context-1 step reading a stale address, which
 showed up as exactly half the output tile being wrong.
+
+They also have to be written with `SETDMAREG` + `WRCFG` rather than by storing to the cfg
+pointer. A store is performed by ThCon as the TRISC issues it, while the `UNPACR` it configures
+sits in the instruction FIFO waiting for the matrix unit to release the SrcA bank. The TRISC runs
+ahead - ttsim allows 52 instructions of slack - so the `UNPACR` sees a later row's addresses.
+Measured that way, only `l=0` landed on rows 0,8,...,56; from `l=1` on, the destination row and
+the source address came from different iterations, e.g. row 57 paired with seven different
+sources in a row. `WRCFG` goes through the same FIFO as `UNPACR`, so the order is kept.
+`STALLWAIT(STALL_THCON, UNPACK)` is not a substitute: measured, it left the same interleaving.
 
 ### MVMUL sequence
 
@@ -325,7 +329,7 @@ with its `cr` marker, not by adding the complement.
 
 Per tile: 512 MVMULs against B1's 64, the 8x the analysis predicted; 8 SrcA rewrites of 8 rows
 each; 1 SrcB fetch, as in B1. Total bytes moved into SrcA are unchanged - the same rows, split
-across 8 UNPACRs instead of 1 - plus one bank-clear per `l`.
+across 64 UNPACRs of one row each instead of 1 of a whole tile - plus one bank-clear per `l`.
 
 ### Verifying changes to this kernel
 
