@@ -18,6 +18,10 @@ The same 32 products (exponents spanning ~21 bits) are fed through two K-layouts
 
 Only the layout differs, so any accuracy difference is attributable to intra-SOP alignment. The `uniform` case is the control: a fully populated 8-wide group is not itself a problem, so the loss comes from the alignment shift rather than from the group width.
 
+Inputs are tilized on the host. That is appropriate here because this is a test harness: on the
+device, data stays in 32x32 tile layout end to end (matmul rejects non-tiled inputs and emits
+tiled output), so a production path has no layout conversion at this point to begin with.
+
 ## Build
 
 ```bash
@@ -42,21 +46,72 @@ unset TT_METAL_SIMULATOR
 ./build_Release/programming_examples/metal_example_matmul_fp32_acc_check
 ```
 
+## Inputs and pass criterion
+
+Both operands vary along every axis, so a transposed or face-swapped operand cannot slip through
+unnoticed:
+
+```
+A[m][k]  = (1 + m/M) * terms[k]        B[k][n] = (1 + n/N)
+exact C[m][n] = (1 + m/M) * (1 + n/N) * sum_k terms[k]
+```
+
+`terms[k]` carries the exponent spread under test; the `m` and `n` factors make every output
+element a distinct value. All 1024 elements are checked, not just element 0.
+
+The reference is computed from the BF16 datums the device actually receives, not from the
+pre-rounding floats. Comparing against the floats would fold BF16 input quantization into what is
+meant to be a measurement of accumulator behaviour.
+
+The pass criterion is Higham's forward error bound for an inner product (Accuracy and Stability of
+Numerical Algorithms, 2nd ed., section 3.1):
+
+```
+|computed - exact| <= gamma_n * sum_k |a_k * b_k|,   gamma_n = n*u / (1 - n*u),   u = 2^-24
+```
+
+This is the bound a correct FP32-accumulating dot product must respect. `spread` and `uniform`
+must satisfy it; `packed` must violate it. Earlier versions of this example used hand-picked
+"effective bits" thresholds with no derivation behind them.
+
+## B1: custom LLK compute kernel
+
+`kernels/compute/mm_custom.cpp` is the same matmul with `matmul_init` / `matmul_tiles` replaced by
+the LLK calls they expand to. This is a prerequisite for later zero-injection work, which has to
+act between the unpack and the math call, a point `matmul_tiles()` does not expose.
+
+The example runs both kernels on all three layouts and requires bit-exact agreement. This was
+validated with a negative control: making the custom kernel accumulate into the wrong DST index
+for one K iteration turns all three checks into `NG` with 1024/1024 elements mismatching.
+
 ## How to read output
 
-Key lines:
+- `check=*_layout_worst_element`: expected vs actual at the element with the largest bound-relative
+  error
+- `check=*_layout_err_over_fp32_bound`: worst `|error| / bound`. At or below 1 means the layout
+  behaves like a correct FP32 accumulation
+- `detail elements_within_fp32_bound`: how many of the 1024 outputs satisfy the bound
+- `check=custom_kernel_bitexact_*`: number of elements where the B1 kernel differs from the
+  compute-API kernel; must be 0
+- `note ... mvmul_instruction_ratio=`: instruction-count cost of the spread layout
 
-- `check=packed_layout_effective_bits ...`: effective precision when values with differing exponents share SOP groups
-- `check=spread_layout_effective_bits ...`: effective precision with one value per SOP group
-- `check=uniform_exponent_layout_effective_bits ...`: effective precision with a full 8-wide group whose exponents agree
-- `check=layout_alone_changes_accuracy ...`: confirms the layout is the only variable
-- `note ... mvmul_instruction_ratio=...`: instruction-count cost of the spread layout
+Measured on Blackhole p150b silicon:
 
-Measured on `ttsim` (Blackhole):
+```
+note gamma_32=1.907352270798246e-06 gamma_256=1.5259021896696422e-05 checked_elements=1024
+check=spread_layout_err_over_fp32_bound expected=1 actual=0.0247595 result=OK
+check=uniform_layout_err_over_fp32_bound expected=1 actual=0 result=OK
+check=packed_layout_err_over_fp32_bound expected=1 actual=620.646 result=OK
+detail elements_within_fp32_bound spread=1024/1024 uniform=1024/1024 packed=12/1024
+detail packed worst_index=162 expected=5.714314600452781 actual=5.707550048828125 ratio=620.646
+check=custom_kernel_bitexact_packed expected=0 actual=0 result=OK
+```
 
-- `packed` (`K=32`): 12.7 effective bits
-- `spread` (`K=256`): 24.2 effective bits, exact to the FP32 reference
-- `uniform` (`K=32`): 24.0 effective bits, exact to the FP32 reference, at full multiplier utilisation
-- Cost: `MVMUL` instruction count scales with `Kt`, so the spread layout needs 8x the instructions for the same number of useful products (measured: 222 instructions at `Kt=1` versus 947 at `Kt=8`, i.e. ~104 per `matmul_tiles` plus fixed overhead).
+`spread` and `uniform` satisfy the FP32 bound on every element. `packed` exceeds it by a factor of
+620 and satisfies it on only 12 of 1024 elements, despite identical `fp32_dest_acc_en=true` and
+`MathFidelity::HiFi4`. Only the K-layout differs.
 
-The practical consequence is that full FP32-class accuracy currently requires each SOP group to span at most ~11 binades. Data that already satisfies this keeps FP32-class accuracy at full multiplier utilisation, as the `uniform` case shows. Data that does not must be spread to one useful value per SOP group, which costs a factor of 8 in multiplier utilisation.
+The practical consequence is that full FP32-class accuracy currently requires each SOP group to
+span at most ~11 binades. Data that already satisfies this keeps FP32-class accuracy at full
+multiplier utilisation, as the `uniform` case shows. Data that does not must be spread to one
+useful value per SOP group, which costs a factor of 8 in multiplier utilisation.
