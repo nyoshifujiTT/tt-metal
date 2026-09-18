@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include <tt-metalium/bfloat16.hpp>
@@ -64,7 +65,8 @@ void run_single_core_matmul(
     uint32_t n,
     uint32_t k,
     bool fp32_dest_acc_en,
-    const std::shared_ptr<distributed::MeshDevice>& mesh_device) {
+    const std::shared_ptr<distributed::MeshDevice>& mesh_device,
+    bool use_custom_kernel = false) {
     distributed::MeshCommandQueue& cq = mesh_device->mesh_command_queue();
     distributed::MeshWorkload workload;
     distributed::MeshCoordinateRange device_range(mesh_device->shape());
@@ -146,9 +148,13 @@ void run_single_core_matmul(
         });
 
     std::vector<uint32_t> compute_compile_time_args = {mt, kt, nt};
+    // B1: same matmul, LLK calls written out instead of matmul_init/matmul_tiles.
+    const char* compute_kernel = use_custom_kernel
+                                     ? OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/compute/mm_custom.cpp"
+                                     : OVERRIDE_KERNEL_PREFIX "matmul/matmul_single_core/kernels/compute/mm.cpp";
     tt_metal::CreateKernel(
         program,
-        OVERRIDE_KERNEL_PREFIX "matmul/matmul_single_core/kernels/compute/mm.cpp",
+        compute_kernel,
         core,
         tt_metal::ComputeConfig{
             .math_fidelity = MathFidelity::HiFi4,
@@ -249,6 +255,19 @@ int main() {
             uint32_t worst_index;
             double bound_at_worst;
             uint32_t within_bound;   // how many of the M*N outputs satisfy the bound
+        };
+
+        // Raw device output for one layout, so the two compute kernels can be compared directly.
+        auto run_raw = [&](const std::vector<float>& terms, bool fp32_dest_acc_en, bool use_custom_kernel) {
+            const uint32_t k = static_cast<uint32_t>(terms.size());
+            auto a = build_input_a(M, k, terms);
+            auto b = build_input_b(k, N);
+            auto a_tiled = tilize_nfaces(a, M, k);
+            auto b_tiled = tilize_nfaces(b, k, N);
+            std::vector<float> out_tiled(M * N, 0.0f);
+            run_single_core_matmul(
+                a_tiled, b_tiled, out_tiled, M, N, k, fp32_dest_acc_en, mesh_device, use_custom_kernel);
+            return untilize_nfaces(out_tiled, M, N);
         };
 
         auto run = [&](const std::vector<float>& terms, bool fp32_dest_acc_en) {
@@ -352,7 +371,27 @@ int main() {
             spread.size(),
             spread.size() / packed.size());
 
-        pass = spread_within_bound && uniform_within_bound && packed_exceeds_bound;
+        // B1: the hand-written LLK kernel must reproduce the compute-API kernel bit for bit. Run
+        // it on all three layouts so the comparison covers both the exact and the lossy regimes.
+        bool custom_matches = true;
+        for (const auto& [name, terms] : std::vector<std::pair<const char*, const std::vector<float>*>>{
+                 {"packed", &packed}, {"spread", &spread}, {"uniform", &uniform}}) {
+            const auto ref = run_raw(*terms, true, false);
+            const auto cus = run_raw(*terms, true, true);
+            uint32_t mismatches = 0;
+            for (uint32_t i = 0; i < M * N; ++i) {
+                // Bit-exact, not approximate: the two kernels issue the same instructions.
+                if (ref[i] != cus[i]) {
+                    ++mismatches;
+                }
+            }
+            const bool ok = mismatches == 0;
+            custom_matches = custom_matches && ok;
+            fmt::print(
+                "check=custom_kernel_bitexact_{} expected=0 actual={} result={}\n", name, mismatches, okng(ok));
+        }
+
+        pass = spread_within_bound && uniform_within_bound && packed_exceeds_bound && custom_matches;
         if (!mesh_device->close()) {
             pass = false;
         }
