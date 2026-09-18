@@ -74,15 +74,33 @@ This is the bound a correct FP32-accumulating dot product must respect. `spread`
 must satisfy it; `packed` must violate it. Earlier versions of this example used hand-picked
 "effective bits" thresholds with no derivation behind them.
 
-## B1: custom LLK compute kernel
+## B1: custom compute kernel
 
-`kernels/compute/mm_custom.cpp` is the same matmul with `matmul_init` / `matmul_tiles` replaced by
-the LLK calls they expand to. This is a prerequisite for later zero-injection work, which has to
-act between the unpack and the math call, a point `matmul_tiles()` does not expose.
+`kernels/compute/mm_custom.cpp` performs the same matmul without calling the LLK matmul library.
+Neither `llk_unpack_AB_matmul*` nor `llk_math_matmul*` appears in it:
 
-The example runs both kernels on all three layouts and requires bit-exact agreement. This was
-validated with a negative control: making the custom kernel accumulate into the wrong DST index
-for one K iteration turns all three checks into `NG` with 1024/1024 elements mismatching.
+- the unpack side programs `Haloize_mode`, the ADC counters and the SrcA/SrcB datum counts, then
+  issues the two `UNPACR`s itself, after taking the unpack context and posting the semaphore;
+- the math side programs `ADDR_MOD_0/1/2/4/5` and issues the 16-`MVMUL` full-tile sequence
+  directly, once per fidelity phase, with no MOP and no replay buffer.
+
+This is a prerequisite for the planned zero-injection work, which has to change what lands in
+SrcA/SrcB between the unpack and the MVMULs and has to control the MVMUL issue order. Neither is
+reachable through `matmul_tiles()` or through the LLK matmul entry points, which hide both behind
+a MOP.
+
+Restrictions: full 32x32 tiles (4 faces per operand), no transpose, `ct_dim = rt_dim = 1`.
+
+Two details cost real debugging time and are worth recording. The closing `SETRWC` must release
+**both** source registers: `CLR_A` after the last fidelity phase and `CLR_B` at the end of the
+reuse row. Releasing only SrcA leaves SrcB permanently valid and the unpacker blocks forever on
+the next tile. Separately, `TTI_*` macros expand to inline asm statements, so they cannot be
+placed inside `UNPACK((...))` / `MATH((...))`, which require an expression; they have to live in a
+function that the macro then calls.
+
+The example runs both kernels on all three layouts and requires bit-exact agreement. The check was
+validated with a negative control: changing the addr_mod of the final MVMUL in the custom kernel
+turns all three checks into `NG` (128/1024 elements differing).
 
 ## How to read output
 
