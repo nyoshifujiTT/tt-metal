@@ -245,13 +245,48 @@ aligned to. SrcB in those lanes is never read, so it needs no zero padding and n
 
 SOP groups are cut at lanes 0-7 and 8-15, and lane `i` reads SrcA row `src_a_row + i` and SrcB
 column `i`. The two constraints together fix the layout: a K value must sit at the same index on
-both sides, so SrcA row `r` must hold K=`r`, and the two useful values must be 8 rows apart to
-fall in different groups. Each step therefore takes K=`r` and K=`r+8` of one 16-wide K window,
-and 16 steps cover the 32 K values of a tile.
+both sides, and the two useful values must be 8 rows apart to fall in different groups. One pass
+therefore takes K=`l` and K=`l+8` of one 16-wide K window.
 
-SrcB is not moved to select the K window, because `SETRWC` cannot place its row counter at 16
-(`rwc_b` accepts only 0 or 8). Instead the unpacker re-points SrcB's L1 base at the face pair for
-the current K half, which it can do freely since SrcB is re-fetched every step anyway.
+### Loop order
+
+B1/B2/B3 consume a whole 16-wide K window per MVMUL, so K=32 is exhausted by `k` alone (K0-15,
+K16-31). This kernel uses 2 of the 16 lanes, so the window has to be subdivided further. That
+index is `l` (0..7), selecting the K pair (`l`, `l+8`) within the window. K = `k` x `l` x 2 = 32.
+
+```
+for l in 0..7:            # K pair within the window. The only SrcA rewrite boundary
+  for k in 0,1:           # which 16-wide K window
+    for i in 0..3:        # M, 8 rows at a time
+      for j in 0,1:       # N face
+        for f in 0..3:    # fidelity phase
+          MVMUL
+```
+
+`k`, `i` and `j` are free, as B2 and B3 established; they are ordered as in B3. What is not free
+is `l` and `f`, and in both cases the reason is the number of SrcA rewrites:
+
+`l` outermost. SrcB carries the useful values of all four faces after a single UNPACR, so `i` (M
+half) and `k` (K half) are reached by moving its row counter and cost no refetch. SrcA is the
+opposite: only 2 rows per face may be non-zero, so a full tile's SrcA holds 2 x 4 faces = 8 useful
+rows and advancing `l` means rewriting it. With `l` outermost that happens 8 times per tile, and
+each rewrite covers all four faces at once because SrcA's face index is `2k + j`. Putting `l`
+inside `k` halves what one rewrite can fill (16 rewrites); putting it inside `i` and `j` repeats
+the whole transition sequence per (i, j) pair (128 rewrites).
+
+`f` innermost. A fidelity phase only changes which mantissa bits are read out of SrcA and SrcB
+(ISA `SrcASrcB.md`: phase 0 takes SrcA's top 4+1 and SrcB's top 6+1 bits, phases 1-3 the
+remainders), not which rows are read and not their contents. So the four phases belong at the same
+(l, k, i, j) position. Hoisting `f` above `l` would put `l` inside it and take the SrcA rewrites
+from 8 to 32.
+
+Neither reason applies to B1/B2/B3, where one tile of each operand stays resident for all 64
+MVMULs: there `f` may sit anywhere, and it is outermost there only because that is where the LLK
+put it.
+
+SrcB is fetched once per tile and left in place; the K window is selected with the address modes.
+The version recovered from git moved SrcB's L1 base by one face instead, which reads one face past
+the end of the tile and is what lost the K16-31 contribution on silicon.
 
 ### Maintaining the zeros
 
@@ -264,7 +299,8 @@ history), and each stale row contributes a K value that does not belong to the s
 
 What works is `UNPACR_NOP` with the stall-and-clear encoding at the top of each step: it zeroes the
 unpacker-side bank and waits until the matrix unit has released it. That makes the invariant local
-- on entry to the row writes, every row of the bank is zero - at one extra instruction per step.
+- on entry to the row writes, every row of the bank is zero - at one extra instruction per `l`.
+That instruction hung on silicon in the recovered version and has to be re-checked there.
 
 ### Config contexts
 
@@ -277,20 +313,19 @@ showed up as exactly half the output tile being wrong.
 ### MVMUL sequence
 
 Both operands are four stacked 16x16 faces (TL, TR, BL, BR). SrcB is in0, M-by-K, so its faces
-are M0-15/K0-15, M0-15/K16-31, M16-31/K0-15, M16-31/K16-31. SrcA is in1, K-by-N, and this kernel
-writes the K rows of both N faces: SrcA rows 0-15 feed output columns 0-15, rows 16-31 feed
-columns 16-31.
+are M0-15/K0-15, M0-15/K16-31, M16-31/K0-15, M16-31/K16-31, i.e. face = `2*(M half) + (K half)`.
+SrcA is in1, K-by-N, face = `2*(K half) + (N half)`. One `l` writes rows `l` and `l+8` of each of
+SrcA's four faces, which is why one rewrite serves both `k` and both `j`.
 
-A step is 8 MVMULs per fidelity phase: {SrcB M0-15, M16-31} x {SrcA N0-15, N16-31}, each covering
-8 of the 64 Dst rows an fp32 32x32 tile occupies. Note that Dst increments are not modular, so
-returning the Dst counter to row 16 for the second SrcA face is done with its `cr` marker, not by
-adding 40.
+Each MVMUL covers 8 of the 64 Dst rows an fp32 32x32 tile occupies. Note that Dst increments are
+not modular (the counter is 10-bit and wraps at 1024, not at 64), so moving Dst backwards is done
+with its `cr` marker, not by adding the complement.
 
 ### Cost
 
-16 steps per tile instead of 2 MVMUL groups, i.e. the 8x MVMUL increase the analysis predicted.
-The unpacker writes one row at a time instead of a whole tile, which does not reduce the bytes
-moved, only splits them, and adds one bank-clear per step.
+Per tile: 512 MVMULs against B1's 64, the 8x the analysis predicted; 8 SrcA rewrites of 8 rows
+each; 1 SrcB fetch, as in B1. Total bytes moved into SrcA are unchanged - the same rows, split
+across 8 UNPACRs instead of 1 - plus one bank-clear per `l`.
 
 ### Verifying changes to this kernel
 
