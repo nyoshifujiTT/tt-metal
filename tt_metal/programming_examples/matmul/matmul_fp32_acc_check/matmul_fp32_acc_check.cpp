@@ -248,6 +248,7 @@ int main() {
             double worst_actual;     // device value at the worst element
             uint32_t worst_index;
             double bound_at_worst;
+            uint32_t within_bound;   // how many of the M*N outputs satisfy the bound
         };
 
         auto run = [&](const std::vector<float>& terms, bool fp32_dest_acc_en) {
@@ -283,11 +284,16 @@ int main() {
 
             // The bound scales with the number of accumulated products, which is K.
             const double g = gamma_n(k);
-            RunResult r{0.0, 0.0, 0.0, 0, 0.0};
+            // Seed with element 0 so the reported "worst element" is always a real element, even
+            // when the layout is exact everywhere and no ratio ever exceeds the seed.
+            RunResult r{0.0, expected[0], static_cast<double>(out[0]), 0, g * abs_sum[0], 0};
             for (uint32_t i = 0; i < M * N; ++i) {
                 const double bound = g * abs_sum[i];
                 const double err = std::fabs(static_cast<double>(out[i]) - expected[i]);
                 const double ratio = (bound == 0.0) ? ((err == 0.0) ? 0.0 : INFINITY) : err / bound;
+                if (ratio <= 1.0) {
+                    ++r.within_bound;
+                }
                 if (ratio > r.worst_ratio) {
                     r.worst_ratio = ratio;
                     r.worst_expected = expected[i];
@@ -322,6 +328,16 @@ int main() {
         print_check(
             "packed_layout_worst_element", packed_r.worst_expected, packed_r.worst_actual, packed_exceeds_bound);
         print_check("packed_layout_err_over_fp32_bound", 1.0, packed_r.worst_ratio, packed_exceeds_bound);
+
+        // Per-element counts, so a verdict never rests on one element.
+        fmt::print(
+            "detail elements_within_fp32_bound spread={}/{} uniform={}/{} packed={}/{}\n",
+            spread_r.within_bound,
+            M * N,
+            uniform_r.within_bound,
+            M * N,
+            packed_r.within_bound,
+            M * N);
 
         fmt::print(
             "detail packed worst_index={} expected={} actual={} bound={} ratio={}\n",
