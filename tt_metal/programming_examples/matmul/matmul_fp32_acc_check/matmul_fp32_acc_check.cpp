@@ -26,16 +26,30 @@ using namespace tt::tt_metal;
 
 namespace {
 
-std::vector<bfloat16> build_input_a(uint32_t m, uint32_t k) {
-    std::vector<bfloat16> a(m * k, bfloat16(1.0f));
+// A[m][kk] and B[kk][nn] both vary along every axis, so a transposed or face-swapped operand
+// cannot go unnoticed: the K-dependent factor carries the exponent spread under test, and the
+// m/n-dependent factors make each output element a distinct value.
+//
+// A[m][kk] = (1 + m/M) * terms[kk], B[kk][nn] = (1 + nn/N)
+// so exact C[m][nn] = (1 + m/M) * (1 + nn/N) * sum_kk terms[kk].
+// Every output element is a different multiple of the same sum, which is what makes the
+// K-layout comparison meaningful across the whole tile rather than at element 0 only.
+std::vector<bfloat16> build_input_a(uint32_t m, uint32_t k, const std::vector<float>& terms) {
+    std::vector<bfloat16> a(m * k, bfloat16(0.0f));
+    for (uint32_t mm = 0; mm < m; ++mm) {
+        const float row_scale = 1.0f + static_cast<float>(mm) / static_cast<float>(m);
+        for (uint32_t kk = 0; kk < k; ++kk) {
+            a[mm * k + kk] = bfloat16(row_scale * terms[kk]);
+        }
+    }
     return a;
 }
 
-std::vector<bfloat16> build_input_b_from_terms(uint32_t k, uint32_t n, const std::vector<float>& terms) {
+std::vector<bfloat16> build_input_b(uint32_t k, uint32_t n) {
     std::vector<bfloat16> b(k * n, bfloat16(0.0f));
     for (uint32_t kk = 0; kk < k; ++kk) {
         for (uint32_t nn = 0; nn < n; ++nn) {
-            b[kk * n + nn] = bfloat16(terms[kk]);
+            b[kk * n + nn] = bfloat16(1.0f + static_cast<float>(nn) / static_cast<float>(n));
         }
     }
     return b;
@@ -156,8 +170,20 @@ void run_single_core_matmul(
 
 const char* okng(bool ok) { return ok ? "OK" : "NG"; }
 
-void print_check(const char* name, float expected, float actual, bool ok) {
+void print_check(const char* name, double expected, double actual, bool ok) {
     fmt::print("check={} expected={} actual={} result={}\n", name, expected, actual, okng(ok));
+}
+
+// Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., section 3.1:
+// a length-n inner product accumulated in a format with unit roundoff u satisfies
+//   |computed - exact| <= gamma_n * sum_k |a_k * b_k|,   gamma_n = n*u / (1 - n*u).
+// With an FP32 accumulator u = 2^-24. This is the bound a correct FP32-accumulating dot product
+// must respect; it replaces the hand-picked "effective bits" thresholds this example used before,
+// which had no derivation behind them.
+double gamma_n(uint32_t n) {
+    constexpr double u = 1.0 / 16777216.0;  // 2^-24
+    const double nu = static_cast<double>(n) * u;
+    return nu / (1.0 - nu);
 }
 
 void print_terms(const std::vector<float>& terms) {
@@ -185,8 +211,6 @@ int main() {
     // group are aligned to the group's max exponent with only ~12 bits of headroom, so a term more
     // than ~11 binades below its group maximum is dropped before the FP32 accumulator ever sees it.
     constexpr uint32_t SOP_GROUP_LANES = 8;
-    constexpr double MIN_BITS_SOP_LIMITED = 16.0;
-    constexpr double MIN_BITS_FP32 = 23.0;
 
     bool pass = true;
 
@@ -215,71 +239,104 @@ int main() {
             uniform[j] = std::ldexp(1.0f, -3 * static_cast<int>(group));
         }
 
-        auto reference_sum = [](const std::vector<float>& terms) {
-            double acc = 0.0;
-            for (const float term : terms) {
-                acc += static_cast<double>(term);
-            }
-            return acc;
+        // One run: build the operands, quantize the reference from the same BF16 datums the device
+        // actually receives, run the device matmul, and compare every output element against
+        // Higham's bound. Returns the worst observed ratio of |error| to the bound.
+        struct RunResult {
+            double worst_ratio;      // max over outputs of |err| / bound
+            double worst_expected;   // expected value at the worst element
+            double worst_actual;     // device value at the worst element
+            uint32_t worst_index;
+            double bound_at_worst;
         };
 
-        auto run = [&](const std::vector<float>& terms) {
+        auto run = [&](const std::vector<float>& terms, bool fp32_dest_acc_en) {
             const uint32_t k = static_cast<uint32_t>(terms.size());
-            auto a = build_input_a(M, k);
-            auto b = build_input_b_from_terms(k, N, terms);
+            auto a = build_input_a(M, k, terms);
+            auto b = build_input_b(k, N);
+
+            // Reference from the BF16 datums, not from the pre-rounding floats: the device never
+            // sees the float values, so comparing against them would fold BF16 input quantization
+            // into what is meant to be a measurement of accumulator behaviour.
+            std::vector<double> expected(M * N, 0.0);
+            std::vector<double> abs_sum(M * N, 0.0);
+            for (uint32_t mm = 0; mm < M; ++mm) {
+                for (uint32_t nn = 0; nn < N; ++nn) {
+                    double acc = 0.0;
+                    double abs_acc = 0.0;
+                    for (uint32_t kk = 0; kk < k; ++kk) {
+                        const double term = static_cast<double>(static_cast<float>(a[mm * k + kk])) *
+                                            static_cast<double>(static_cast<float>(b[kk * N + nn]));
+                        acc += term;
+                        abs_acc += std::fabs(term);
+                    }
+                    expected[mm * N + nn] = acc;
+                    abs_sum[mm * N + nn] = abs_acc;
+                }
+            }
+
             auto a_tiled = tilize_nfaces(a, M, k);
             auto b_tiled = tilize_nfaces(b, k, N);
             std::vector<float> out_tiled(M * N, 0.0f);
-            run_single_core_matmul(a_tiled, b_tiled, out_tiled, M, N, k, true, mesh_device);
+            run_single_core_matmul(a_tiled, b_tiled, out_tiled, M, N, k, fp32_dest_acc_en, mesh_device);
             auto out = untilize_nfaces(out_tiled, M, N);
-            return static_cast<double>(out[0]);
+
+            // The bound scales with the number of accumulated products, which is K.
+            const double g = gamma_n(k);
+            RunResult r{0.0, 0.0, 0.0, 0, 0.0};
+            for (uint32_t i = 0; i < M * N; ++i) {
+                const double bound = g * abs_sum[i];
+                const double err = std::fabs(static_cast<double>(out[i]) - expected[i]);
+                const double ratio = (bound == 0.0) ? ((err == 0.0) ? 0.0 : INFINITY) : err / bound;
+                if (ratio > r.worst_ratio) {
+                    r.worst_ratio = ratio;
+                    r.worst_expected = expected[i];
+                    r.worst_actual = static_cast<double>(out[i]);
+                    r.worst_index = i;
+                    r.bound_at_worst = bound;
+                }
+            }
+            return r;
         };
 
-        const double exact = reference_sum(values);
-        const double packed_value = run(packed);
-        const double spread_value = run(spread);
-
-        const double uniform_exact = reference_sum(uniform);
-        const double uniform_value = run(uniform);
-
-        auto effective_bits_vs = [](double value, double reference) {
-            const double rel = std::fabs(value - reference) / std::fabs(reference);
-            return (rel == 0.0) ? 24.0 : -std::log2(rel);
-        };
-        auto effective_bits = [&](double value) { return effective_bits_vs(value, exact); };
-
-        const double packed_bits = effective_bits(packed_value);
-        const double spread_bits = effective_bits(spread_value);
-        const double uniform_bits = effective_bits_vs(uniform_value, uniform_exact);
-
-        // Same 32 products, same fp32_dest_acc_en, same MathFidelity: only the K-layout differs.
-        const bool packed_is_sop_limited = packed_bits < MIN_BITS_SOP_LIMITED;
-        const bool spread_reaches_fp32 = spread_bits >= MIN_BITS_FP32;
-        const bool layout_changes_accuracy = spread_bits > packed_bits + 1.0;
-        // A fully populated 8-wide group keeps FP32-class accuracy as long as its exponents agree,
-        // which shows the loss comes from the alignment shift and not from the group width.
-        const bool uniform_reaches_fp32 = uniform_bits >= MIN_BITS_FP32;
+        const RunResult packed_r = run(packed, true);
+        const RunResult spread_r = run(spread, true);
+        const RunResult uniform_r = run(uniform, true);
 
         print_terms(values);
-        print_check("reference_fp64_sum", exact, exact, true);
-        print_check("packed_layout_value", exact, packed_value, packed_is_sop_limited);
-        print_check("spread_layout_value", exact, spread_value, spread_reaches_fp32);
-        print_check("packed_layout_effective_bits", MIN_BITS_SOP_LIMITED, packed_bits, packed_is_sop_limited);
-        print_check("spread_layout_effective_bits", MIN_BITS_FP32, spread_bits, spread_reaches_fp32);
-        print_check("uniform_exponent_layout_value", uniform_exact, uniform_value, uniform_reaches_fp32);
-        print_check("uniform_exponent_layout_effective_bits", MIN_BITS_FP32, uniform_bits, uniform_reaches_fp32);
+        fmt::print(
+            "note gamma_32={} gamma_256={} checked_elements={}\n", gamma_n(32), gamma_n(256), M * N);
+
+        // spread and uniform must satisfy the FP32 bound; packed must violate it, which is the
+        // whole point: the violation is caused by the intra-SOP alignment, not by fp32_dest_acc_en.
+        const bool spread_within_bound = spread_r.worst_ratio <= 1.0;
+        const bool uniform_within_bound = uniform_r.worst_ratio <= 1.0;
+        const bool packed_exceeds_bound = packed_r.worst_ratio > 1.0;
+
         print_check(
-            "layout_alone_changes_accuracy",
-            1.0,
-            layout_changes_accuracy ? 1.0 : 0.0,
-            layout_changes_accuracy);
+            "spread_layout_worst_element", spread_r.worst_expected, spread_r.worst_actual, spread_within_bound);
+        print_check("spread_layout_err_over_fp32_bound", 1.0, spread_r.worst_ratio, spread_within_bound);
+        print_check(
+            "uniform_layout_worst_element", uniform_r.worst_expected, uniform_r.worst_actual, uniform_within_bound);
+        print_check("uniform_layout_err_over_fp32_bound", 1.0, uniform_r.worst_ratio, uniform_within_bound);
+        print_check(
+            "packed_layout_worst_element", packed_r.worst_expected, packed_r.worst_actual, packed_exceeds_bound);
+        print_check("packed_layout_err_over_fp32_bound", 1.0, packed_r.worst_ratio, packed_exceeds_bound);
+
+        fmt::print(
+            "detail packed worst_index={} expected={} actual={} bound={} ratio={}\n",
+            packed_r.worst_index,
+            packed_r.worst_expected,
+            packed_r.worst_actual,
+            packed_r.bound_at_worst,
+            packed_r.worst_ratio);
         fmt::print(
             "note packed_K={} spread_K={} mvmul_instruction_ratio={}x\n",
             packed.size(),
             spread.size(),
             spread.size() / packed.size());
 
-        pass = packed_is_sop_limited && spread_reaches_fp32 && layout_changes_accuracy && uniform_reaches_fp32;
+        pass = spread_within_bound && uniform_within_bound && packed_exceeds_bound;
         if (!mesh_device->close()) {
             pass = false;
         }
