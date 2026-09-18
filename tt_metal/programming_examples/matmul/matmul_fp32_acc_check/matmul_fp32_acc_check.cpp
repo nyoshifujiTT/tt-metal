@@ -41,26 +41,11 @@ std::vector<bfloat16> build_input_b_from_terms(uint32_t k, uint32_t n, const std
     return b;
 }
 
-float run_reference_fp32_acc(const std::vector<float>& terms) {
-    float acc = 0.0f;
-    for (const float term : terms) {
-        acc += term;
-    }
-    return acc;
-}
-
-float run_reference_bf16_sequential_acc(const std::vector<float>& terms) {
-    bfloat16 acc(0.0f);
-    for (const float term : terms) {
-        acc = bfloat16(static_cast<float>(acc) + term);
-    }
-    return static_cast<float>(acc);
-}
 
 void run_single_core_matmul(
     const std::vector<bfloat16>& a_tiled,
     const std::vector<bfloat16>& b_tiled,
-    std::vector<bfloat16>& output_tiled,
+    std::vector<float>& output_tiled,
     uint32_t m,
     uint32_t n,
     uint32_t k,
@@ -77,7 +62,7 @@ void run_single_core_matmul(
     const uint32_t nt = n / TILE_WIDTH;
 
     const uint32_t input_tile_size = sizeof(bfloat16) * TILE_HEIGHT * TILE_WIDTH;
-    const uint32_t output_tile_size = sizeof(bfloat16) * TILE_HEIGHT * TILE_WIDTH;
+    const uint32_t output_tile_size = sizeof(float) * TILE_HEIGHT * TILE_WIDTH;
 
     distributed::DeviceLocalBufferConfig dram_input_config{
         .page_size = input_tile_size,
@@ -90,14 +75,14 @@ void run_single_core_matmul(
 
     distributed::ReplicatedBufferConfig buffer_config_a{.size = static_cast<uint32_t>(sizeof(bfloat16) * a_tiled.size())};
     distributed::ReplicatedBufferConfig buffer_config_b{.size = static_cast<uint32_t>(sizeof(bfloat16) * b_tiled.size())};
-    distributed::ReplicatedBufferConfig buffer_config_c{.size = static_cast<uint32_t>(sizeof(bfloat16) * output_tiled.size())};
+    distributed::ReplicatedBufferConfig buffer_config_c{.size = static_cast<uint32_t>(sizeof(float) * output_tiled.size())};
 
     auto src0_dram_buffer = distributed::MeshBuffer::create(buffer_config_a, dram_input_config, mesh_device.get());
     auto src1_dram_buffer = distributed::MeshBuffer::create(buffer_config_b, dram_input_config, mesh_device.get());
     auto dst_dram_buffer = distributed::MeshBuffer::create(buffer_config_c, dram_output_config, mesh_device.get());
 
     constexpr tt::DataFormat cb_data_format = tt::DataFormat::Float16_b;
-    constexpr tt::DataFormat cb_output_format = tt::DataFormat::Float16_b;
+    constexpr tt::DataFormat cb_output_format = tt::DataFormat::Float32;
     constexpr uint32_t src0_cb_index = CBIndex::c_0;
     constexpr uint32_t src1_cb_index = CBIndex::c_1;
     constexpr uint32_t output_cb_index = CBIndex::c_16;
@@ -185,77 +170,116 @@ void print_terms(const std::vector<float>& terms) {
 
 }  // namespace
 
+
+
+
+
+
+
 int main() {
     constexpr int device_id = 0;
     constexpr uint32_t M = TILE_HEIGHT;
     constexpr uint32_t N = TILE_WIDTH;
-    constexpr uint32_t K = 32;  // single matmul_tiles call => single K tile (Kt=1)
-    constexpr float TOL = 1e-7f;
-    constexpr float EXPECTED_NON_FP32_THEORY = -0.44921875f;  // 8-step rounded accumulation model for this fixed test vector
+    constexpr uint32_t NUM_VALUES = 32;
+    // Each MVMUL reduces 16 K-elements as two independent 8-lane SOP groups. Products inside a
+    // group are aligned to the group's max exponent with only ~12 bits of headroom, so a term more
+    // than ~11 binades below its group maximum is dropped before the FP32 accumulator ever sees it.
+    constexpr uint32_t SOP_GROUP_LANES = 8;
+    constexpr double MIN_BITS_SOP_LIMITED = 16.0;
+    constexpr double MIN_BITS_FP32 = 23.0;
 
     bool pass = true;
 
     try {
         auto mesh_device = distributed::MeshDevice::create_unit_mesh(device_id);
 
-        // Fixed K=32 test vector chosen to make fp32_dest_acc_en=true/false diverge in HiFi4.
-        const std::vector<float> terms = {
-            1.0f,         0.25f,        -0.00390625f, -0.03125f,    -0.00390625f, 1.0f,         -1.0f,       -0.5f,
-            -0.00390625f, -1.0f,        0.5f,         1.0f,         -0.5f,        -1.0f,        -0.5f,       -0.5f,
-            0.03125f,     -0.5f,        -0.00390625f, -0.25f,       0.00390625f,  0.25f,        -0.5f,       0.03125f,
-            -0.25f,       0.5f,         0.25f,        0.00390625f,  0.5f,         1.0f,         -0.25f,      0.03125f,
+        // 32 values whose exponents span ~21 bits. Packed together they exceed the intra-group
+        // alignment window; spread one-per-group they do not.
+        std::vector<float> values(NUM_VALUES);
+        for (uint32_t j = 0; j < NUM_VALUES; ++j) {
+            values[j] = std::ldexp(1.0f + 0.125f * (j % 8), -3 * static_cast<int>(j % 8));
+        }
+
+        std::vector<float> packed(values);
+        std::vector<float> spread(NUM_VALUES * SOP_GROUP_LANES, 0.0f);
+        for (uint32_t j = 0; j < NUM_VALUES; ++j) {
+            spread[SOP_GROUP_LANES * j] = values[j];
+        }
+
+        // Third layout: every lane of every SOP group carries a useful value, but all values within
+        // a group share one exponent, so no intra-group right-shift happens. This isolates the
+        // alignment window from the group size: a full 8-wide group is not itself a problem.
+        std::vector<float> uniform(NUM_VALUES, 0.0f);
+        for (uint32_t j = 0; j < NUM_VALUES; ++j) {
+            const uint32_t group = j / SOP_GROUP_LANES;
+            uniform[j] = std::ldexp(1.0f, -3 * static_cast<int>(group));
+        }
+
+        auto reference_sum = [](const std::vector<float>& terms) {
+            double acc = 0.0;
+            for (const float term : terms) {
+                acc += static_cast<double>(term);
+            }
+            return acc;
         };
 
-        auto a = build_input_a(M, K);
-        auto b = build_input_b_from_terms(K, N, terms);
-        auto a_tiled = tilize_nfaces(a, M, K);
-        auto b_tiled = tilize_nfaces(b, K, N);
+        auto run = [&](const std::vector<float>& terms) {
+            const uint32_t k = static_cast<uint32_t>(terms.size());
+            auto a = build_input_a(M, k);
+            auto b = build_input_b_from_terms(k, N, terms);
+            auto a_tiled = tilize_nfaces(a, M, k);
+            auto b_tiled = tilize_nfaces(b, k, N);
+            std::vector<float> out_tiled(M * N, 0.0f);
+            run_single_core_matmul(a_tiled, b_tiled, out_tiled, M, N, k, true, mesh_device);
+            auto out = untilize_nfaces(out_tiled, M, N);
+            return static_cast<double>(out[0]);
+        };
 
-        std::vector<bfloat16> out_fp32_tiled(M * N, bfloat16(0.0f));
-        std::vector<bfloat16> out_non_fp32_tiled(M * N, bfloat16(0.0f));
+        const double exact = reference_sum(values);
+        const double packed_value = run(packed);
+        const double spread_value = run(spread);
 
-        run_single_core_matmul(a_tiled, b_tiled, out_non_fp32_tiled, M, N, K, false, mesh_device);
-        run_single_core_matmul(a_tiled, b_tiled, out_fp32_tiled, M, N, K, true, mesh_device);
+        const double uniform_exact = reference_sum(uniform);
+        const double uniform_value = run(uniform);
 
-        auto out_fp32 = untilize_nfaces(out_fp32_tiled, M, N);
-        auto out_non_fp32 = untilize_nfaces(out_non_fp32_tiled, M, N);
+        auto effective_bits_vs = [](double value, double reference) {
+            const double rel = std::fabs(value - reference) / std::fabs(reference);
+            return (rel == 0.0) ? 24.0 : -std::log2(rel);
+        };
+        auto effective_bits = [&](double value) { return effective_bits_vs(value, exact); };
 
-        const float expected_fp32 = run_reference_fp32_acc(terms);
-        const float expected_fp32_rounded_to_bf16 = static_cast<float>(bfloat16(expected_fp32));
-        const float expected_bf16_sequential = run_reference_bf16_sequential_acc(terms);
-        const float expected_non_fp32_theory = EXPECTED_NON_FP32_THEORY;
-        const float actual_fp32 = static_cast<float>(out_fp32[0]);
-        const float actual_non_fp32 = static_cast<float>(out_non_fp32[0]);
+        const double packed_bits = effective_bits(packed_value);
+        const double spread_bits = effective_bits(spread_value);
+        const double uniform_bits = effective_bits_vs(uniform_value, uniform_exact);
 
-        const float fp32_err_vs_fp32_ref = std::fabs(actual_fp32 - expected_fp32);
-        const float non_fp32_err_vs_fp32_ref = std::fabs(actual_non_fp32 - expected_fp32);
+        // Same 32 products, same fp32_dest_acc_en, same MathFidelity: only the K-layout differs.
+        const bool packed_is_sop_limited = packed_bits < MIN_BITS_SOP_LIMITED;
+        const bool spread_reaches_fp32 = spread_bits >= MIN_BITS_FP32;
+        const bool layout_changes_accuracy = spread_bits > packed_bits + 1.0;
+        // A fully populated 8-wide group keeps FP32-class accuracy as long as its exponents agree,
+        // which shows the loss comes from the alignment shift and not from the group width.
+        const bool uniform_reaches_fp32 = uniform_bits >= MIN_BITS_FP32;
 
-        const bool fp32_matches_fp32_rounded = std::fabs(actual_fp32 - expected_fp32_rounded_to_bf16) <= TOL;
-        const bool non_fp32_matches_theory = std::fabs(actual_non_fp32 - expected_non_fp32_theory) <= TOL;
-        const bool true_false_different = std::fabs(actual_fp32 - actual_non_fp32) > TOL;
-        const bool fp32_is_closer_to_fp32_ref = fp32_err_vs_fp32_ref + TOL < non_fp32_err_vs_fp32_ref;
-        const bool non_fp32_differs_from_fp32_rounded = std::fabs(actual_non_fp32 - expected_fp32_rounded_to_bf16) > TOL;
-
-        print_terms(terms);
-        print_check("reference_fp32_value", expected_fp32, expected_fp32, true);
-        print_check("reference_fp32_rounded_to_bf16", expected_fp32_rounded_to_bf16, expected_fp32_rounded_to_bf16, true);
-        print_check("reference_bf16_sequential_acc", expected_bf16_sequential, expected_bf16_sequential, true);
-        print_check("reference_non_fp32_theory", expected_non_fp32_theory, expected_non_fp32_theory, true);
-        print_check("actual_fp32_mode", expected_fp32_rounded_to_bf16, actual_fp32, fp32_matches_fp32_rounded);
-        print_check("actual_non_fp32_mode_matches_theory", expected_non_fp32_theory, actual_non_fp32, non_fp32_matches_theory);
-        print_check("actual_non_fp32_mode", expected_fp32_rounded_to_bf16, actual_non_fp32, non_fp32_differs_from_fp32_rounded);
-        print_check("actual_fp32_mode_error_vs_reference_fp32", 0.0f, fp32_err_vs_fp32_ref, true);
-        print_check("actual_non_fp32_mode_error_vs_reference_fp32", 0.0f, non_fp32_err_vs_fp32_ref, true);
-        print_check("true_false_modes_produce_different_results", 1.0f, true_false_different ? 1.0f : 0.0f, true_false_different);
+        print_terms(values);
+        print_check("reference_fp64_sum", exact, exact, true);
+        print_check("packed_layout_value", exact, packed_value, packed_is_sop_limited);
+        print_check("spread_layout_value", exact, spread_value, spread_reaches_fp32);
+        print_check("packed_layout_effective_bits", MIN_BITS_SOP_LIMITED, packed_bits, packed_is_sop_limited);
+        print_check("spread_layout_effective_bits", MIN_BITS_FP32, spread_bits, spread_reaches_fp32);
+        print_check("uniform_exponent_layout_value", uniform_exact, uniform_value, uniform_reaches_fp32);
+        print_check("uniform_exponent_layout_effective_bits", MIN_BITS_FP32, uniform_bits, uniform_reaches_fp32);
         print_check(
-            "actual_fp32_mode_is_closer_to_reference_fp32_than_non_fp32_mode",
-            1.0f,
-            fp32_is_closer_to_fp32_ref ? 1.0f : 0.0f,
-            fp32_is_closer_to_fp32_ref);
+            "layout_alone_changes_accuracy",
+            1.0,
+            layout_changes_accuracy ? 1.0 : 0.0,
+            layout_changes_accuracy);
+        fmt::print(
+            "note packed_K={} spread_K={} mvmul_instruction_ratio={}x\n",
+            packed.size(),
+            spread.size(),
+            spread.size() / packed.size());
 
-        pass =
-            fp32_matches_fp32_rounded && non_fp32_matches_theory && true_false_different && fp32_is_closer_to_fp32_ref &&
-            non_fp32_differs_from_fp32_rounded;
+        pass = packed_is_sop_limited && spread_reaches_fp32 && layout_changes_accuracy && uniform_reaches_fp32;
         if (!mesh_device->close()) {
             pass = false;
         }
@@ -266,10 +290,10 @@ int main() {
     }
 
     if (pass) {
-        fmt::print("check=overall expected=FP32_ACC_CONFIRMED actual=FP32_ACC_CONFIRMED result=OK\n");
+        fmt::print("check=overall expected=SOP_LIMIT_CONFIRMED actual=SOP_LIMIT_CONFIRMED result=OK\n");
         return 0;
     }
 
-    fmt::print("check=overall expected=FP32_ACC_CONFIRMED actual=NOT_CONFIRMED result=NG\n");
+    fmt::print("check=overall expected=SOP_LIMIT_CONFIRMED actual=NOT_CONFIRMED result=NG\n");
     return 1;
 }
