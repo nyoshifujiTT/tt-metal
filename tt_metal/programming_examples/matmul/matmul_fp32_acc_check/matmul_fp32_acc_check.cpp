@@ -60,7 +60,7 @@ std::vector<bfloat16> build_input_b(uint32_t k, uint32_t n) {
 
 // Which compute kernel to run: the stock compute-API matmul, the B1 rewrite of it, or the C
 // zero-injecting variant.
-enum class KernelVariant { ComputeApi, Custom, CustomB2 };
+enum class KernelVariant { ComputeApi, Custom, CustomB2, CustomB3 };
 
 void run_single_core_matmul(
     const std::vector<bfloat16>& a_tiled,
@@ -165,6 +165,10 @@ void run_single_core_matmul(
         case KernelVariant::CustomB2:
             // B2: same matmul as B1 with the M dimension contiguous (no i split).
             compute_kernel = OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/compute/mm_custom_b2.cpp";
+            break;
+        case KernelVariant::CustomB3:
+            // B3: same matmul walked as k -> i -> j, with N innermost.
+            compute_kernel = OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/compute/mm_custom_b3.cpp";
             break;
     }
     tt_metal::CreateKernel(
@@ -407,33 +411,39 @@ int main() {
                 "check=custom_kernel_bitexact_{} expected=0 actual={} result={}\n", name, mismatches, okng(ok));
         }
 
-        // B2: same matmul as B1 with M contiguous (no i split). The issue order differs, so the
-        // accumulation order differs and the result is not bit-identical to B1. What must hold is
-        // that it still behaves like a correct FP32-accumulating matmul, so it is judged against
-        // the same Higham bound: spread and uniform within bound, packed over it.
-        bool b2_ok = true;
-        for (const auto& [name, terms, expect_within] :
-             std::vector<std::tuple<const char*, const std::vector<float>*, bool>>{
-                 {"spread", &spread, true}, {"uniform", &uniform, true}, {"packed", &packed, false}}) {
-            const RunResult r = run(*terms, true, KernelVariant::CustomB2);
-            const bool within = r.worst_ratio <= 1.0;
-            const bool ok = (within == expect_within);
-            b2_ok = b2_ok && ok;
-            fmt::print(
-                "check=b2_no_i_split_{} expected={} actual={} result={}\n",
-                name,
-                expect_within ? "within_bound" : "over_bound",
-                within ? "within_bound" : "over_bound",
-                okng(ok));
-            fmt::print(
-                "detail b2 {} err_over_bound={} elements_within={}/{}\n",
-                name,
-                r.worst_ratio,
-                r.within_bound,
-                M * N);
+        // B2 and B3: the same 16 products as B1 without the LLK's M split, issued as k -> j -> i
+        // (M innermost) and k -> i -> j (N innermost). The issue order differs from B1, so the
+        // accumulation order differs and the results are not bit-identical to B1. What must hold
+        // is that they still behave like correct FP32-accumulating matmuls, so they are judged
+        // against the same Higham bound: spread and uniform within bound, packed over it.
+        bool reorder_ok = true;
+        for (const auto& [tag, variant] : std::vector<std::pair<const char*, KernelVariant>>{
+                 {"b2_no_i_split", KernelVariant::CustomB2}, {"b3_n_innermost", KernelVariant::CustomB3}}) {
+            for (const auto& [name, terms, expect_within] :
+                 std::vector<std::tuple<const char*, const std::vector<float>*, bool>>{
+                     {"spread", &spread, true}, {"uniform", &uniform, true}, {"packed", &packed, false}}) {
+                const RunResult r = run(*terms, true, variant);
+                const bool within = r.worst_ratio <= 1.0;
+                const bool ok = (within == expect_within);
+                reorder_ok = reorder_ok && ok;
+                fmt::print(
+                    "check={}_{} expected={} actual={} result={}\n",
+                    tag,
+                    name,
+                    expect_within ? "within_bound" : "over_bound",
+                    within ? "within_bound" : "over_bound",
+                    okng(ok));
+                fmt::print(
+                    "detail {} {} err_over_bound={} elements_within={}/{}\n",
+                    tag,
+                    name,
+                    r.worst_ratio,
+                    r.within_bound,
+                    M * N);
+            }
         }
 
-        pass = spread_within_bound && uniform_within_bound && packed_exceeds_bound && custom_matches && b2_ok;
+        pass = spread_within_bound && uniform_within_bound && packed_exceeds_bound && custom_matches && reorder_ok;
         if (!mesh_device->close()) {
             pass = false;
         }

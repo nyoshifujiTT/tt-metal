@@ -149,6 +149,29 @@ climbing: measured, Dst went 0,8,32,40 then 80,88,112,120,128 and never came bac
 moves use the `cr` marker instead - advance the marker by 16 on the `j` step, clear it on the `k`
 step.
 
+## B3: the same matmul with N innermost
+
+B2 shows one replacement order works. B3 (`kernels/compute/mm_custom_b3.cpp`) is the remaining
+permutation, `for k in 0,1: for i in 0..3: for j in 0,1`, so the conclusion is that the order is
+free rather than that one particular substitution happens to be safe. Same 16 products, same Dst,
+same instruction count, five address modes as in B1 and B2.
+
+Dst needs two different backward moves here, -8 between `i` steps and -56 on the `k` step, which a
+single marker cannot park on directly. They are expressed as forward motion instead: the marker
+walks the pair bases 0, 8, 32, 40 (advancing by 8 or 24) and the `j` step moves +16 forward from
+it. The `k` step clears the marker.
+
+Measured, identical to B1 and B2 ratios:
+
+```
+check=b3_n_innermost_spread  expected=within_bound actual=within_bound result=OK
+detail b3_n_innermost spread  err_over_bound=0.0247595 elements_within=1024/1024
+check=b3_n_innermost_uniform expected=within_bound actual=within_bound result=OK
+detail b3_n_innermost uniform err_over_bound=0        elements_within=1024/1024
+check=b3_n_innermost_packed  expected=over_bound   actual=over_bound   result=OK
+detail b3_n_innermost packed  err_over_bound=620.646  elements_within=12/1024
+```
+
 ## How to read output
 
 - `check=*_layout_worst_element`: expected vs actual at the element with the largest bound-relative
@@ -181,14 +204,17 @@ span at most ~11 binades. Data that already satisfies this keeps FP32-class accu
 multiplier utilisation, as the `uniform` case shows. Data that does not must be spread to one
 useful value per SOP group, which costs a factor of 8 in multiplier utilisation.
 
-## C: zero injection
+## C: zero injection (design notes, kernel not in the tree)
 
 The `packed` layout above loses 12 bits because eight values with different exponents share one
-SOP group. `kernels/compute/mm_zero_inject.cpp` runs that same layout with at most one useful
-value per group, and the result satisfies the FP32 bound.
+SOP group. A zero-injection kernel runs that same layout with at most one useful value per group.
+It satisfied the FP32 bound on ttsim but produced half a tile's worth of missing K contribution on
+silicon, so it was removed from the tree while the B1/B2/B3 ordering work was done; recover it from
+`git log -- .../kernels/compute/mm_zero_inject.cpp`. The notes below are the design it has to be
+rebuilt to.
 
-Measured on ttsim (Blackhole), same input, same `fp32_dest_acc_en=true`, same `MathFidelity::HiFi4`
-as the `packed` run:
+Measured on ttsim (Blackhole) only, same input, same `fp32_dest_acc_en=true`, same
+`MathFidelity::HiFi4` as the `packed` run:
 
 ```
 check=zero_inject_err_over_fp32_bound expected=1 actual=0.265 result=OK
@@ -196,7 +222,11 @@ detail zero_inject elements_within_fp32_bound=1024/1024
 detail zero_inject_vs_baseline packed_ratio=620.646 zero_inject_ratio=0.265
 ```
 
-620.6 to 0.265, on all 1024 elements. Only the SrcA occupancy differs.
+620.6 to 0.265, on all 1024 elements. Only the SrcA occupancy differs. On silicon the same build
+satisfied the bound on 512 of 1024 elements, with the values matching the K0-15 contribution
+alone: the SrcB fetch base was moved by one face to select the K window, which reads one face past
+the end of the tile. SrcB must instead be fetched once per tile and left in place, with the K
+window selected by the address modes.
 
 ### Only SrcA is zeroed
 
