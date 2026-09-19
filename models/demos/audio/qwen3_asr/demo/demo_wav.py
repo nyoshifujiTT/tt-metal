@@ -29,10 +29,15 @@ sys.path.insert(0, os.path.join(ROOT, "reference"))
 sys.path.insert(0, os.path.join(ROOT, "tt"))
 import audio_encoder as tt_enc  # noqa: E402
 import audio_encoder_ref as ref  # noqa: E402
-from qwen3_asr_decoder import Qwen3ASRDecoder  # noqa: E402
+from qwen3_asr_decoder import Qwen3ASRDecoder, decoder_weight_dtype  # noqa: E402
 
-WAV_DIR = os.environ.get("WAV_DIR", "/ttwork/qwen3_asr_wav")
-CKPT = os.environ.get("HF_MODEL", "/ttwork/qwen3_asr_text_decoder")
+# Same resolution order the tests use (tests/conftest.py): the QWEN3ASR_-prefixed
+# name first, the older unprefixed one as a fallback. prep_wav.py writes to
+# $QWEN3ASR_WAV_DIR, so without that first name the producer and this consumer
+# do not meet -- and the old default pointed at /ttwork, a path that only
+# exists inside the bring-up container.
+WAV_DIR = os.environ.get("QWEN3ASR_WAV_DIR", os.environ.get("WAV_DIR", "/tmp/qwen3_asr_wav"))
+CKPT = os.environ.get("QWEN3ASR_TEXT_DECODER", os.environ.get("HF_MODEL", "/tmp/qwen3_asr_text_decoder"))
 AUDIO_TOKEN_ID = 151676
 
 
@@ -61,8 +66,9 @@ def main():
         enc_params = tt_enc.preprocess_weights(w, dev)
         args = ModelArgs(dev, max_batch_size=1, max_seq_len=2048)
         sd = args.load_state_dict()
+        dtype = decoder_weight_dtype()
         model = Qwen3ASRDecoder(
-            args, ttnn.bfloat16, dev, sd, args.weight_cache_path(ttnn.bfloat16), use_paged_kv_cache=False
+            args, dtype, dev, sd, args.weight_cache_path(dtype), use_paged_kv_cache=False
         )
 
         for npz in sorted(glob.glob(os.path.join(WAV_DIR, "*.npz"))):
