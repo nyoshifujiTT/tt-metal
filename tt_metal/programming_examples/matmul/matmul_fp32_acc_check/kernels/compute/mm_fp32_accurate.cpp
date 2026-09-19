@@ -2,7 +2,17 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// C: zero injection, so that at most one useful value lands in each 8-lane SOP group.
+// A matmul that reaches FP32 accuracy, by zero injection.
+//
+// The LLK matmul cannot: on data whose exponents spread within an 8-lane SOP group it loses about
+// 12 bits, and no amount of fp32_dest_acc_en recovers them. This kernel puts at most
+// USEFUL_PER_SOP useful values in each group, and at USEFUL_PER_SOP=1 the loss is gone entirely:
+// the result then satisfies Higham's forward error bound for an FP32 inner product, which is
+// what "FP32 accuracy" means for a floating-point dot product.
+//
+// USEFUL_PER_SOP trades that accuracy back for speed. It costs 64*ceil(8/S) MVMULs per tile, so
+// S=1 is 8x the LLK's instruction count and S=8 is the same as the LLK, with the accuracy to
+// match at each end. That tradeoff is a side effect; reaching FP32 accuracy at all is the point.
 //
 // Background. One MVMUL reduces 16 K-elements as two independent 8-lane sum-of-products groups.
 // Inside a group every product is right-shifted to the group's maximum exponent, and a product
@@ -60,11 +70,11 @@ using std::uint32_t;
 // MVMULs: with S per group, one MVMUL consumes 2*S useful K-elements instead of 2, so a tile
 // needs 8/S passes instead of 8. At S=8 every lane is useful, which is what B1/B2/B3 already do,
 // so that case issues the same 16 MVMULs per fidelity phase over the same fully populated SrcA.
-#ifndef ZI_USEFUL_PER_SOP
-#define ZI_USEFUL_PER_SOP 1
+#ifndef USEFUL_PER_SOP
+#define USEFUL_PER_SOP 1
 #endif
-constexpr uint32_t kUsefulPerSop = ZI_USEFUL_PER_SOP;
-static_assert(kUsefulPerSop >= 1 && kUsefulPerSop <= 8, "ZI_USEFUL_PER_SOP must be 1..8");
+constexpr uint32_t kUsefulPerSop = USEFUL_PER_SOP;
+static_assert(kUsefulPerSop >= 1 && kUsefulPerSop <= 8, "USEFUL_PER_SOP must be 1..8");
 
 // A 32x32 tile holds 32 K-elements, and one MVMUL spans a 16-wide K window cut into two 8-lane
 // SOP groups. One l pass fills at most kUsefulPerSop lanes of each group, so it takes
@@ -79,9 +89,9 @@ constexpr uint32_t kLPerTile = (8 + kUsefulPerSop - 1) / kUsefulPerSop;
 // pass count, so S=4,5,6,7 all reduce to the same two passes of [0,2,4,6] and [1,3,5,7] and every
 // S above 4 silently behaves as 4. Contiguous runs make the count actually be kUsefulPerSop, with
 // only the final pass narrower when kUsefulPerSop does not divide 8.
-constexpr uint32_t zi_lane_base(uint32_t l) { return l * kUsefulPerSop; }
-constexpr uint32_t zi_lanes_in_pass(uint32_t l) {
-    const uint32_t base = zi_lane_base(l);
+constexpr uint32_t acc_lane_base(uint32_t l) { return l * kUsefulPerSop; }
+constexpr uint32_t acc_lanes_in_pass(uint32_t l) {
+    const uint32_t base = acc_lane_base(l);
     return (base + kUsefulPerSop <= 8) ? kUsefulPerSop : (8 - base);
 }
 
@@ -98,7 +108,7 @@ namespace {
 //        (16,0,16) (16,8,24) (16,32,48) (16,40,56) j=1
 //   k=1: (32,16,0) (32,24,8) (32,48,32) (32,56,40) j=0
 //        (48,16,16) (48,24,24) (48,48,48) (48,56,56) j=1
-inline void zi_configure_addrmod() {
+inline void acc_configure_addrmod() {
     constexpr uint32_t fidelity_increment = (MATH_FIDELITY != ckernel::MathFidelity::LoFi) ? 1 : 0;
 
     // f step: nothing moves, only the fidelity phase.
@@ -163,7 +173,7 @@ inline void zi_configure_addrmod() {
 // SrcA holds useful values only in this pass's lanes of each face, so each MVMUL consumes exactly
 // 2 * kUsefulPerSop useful K-elements, kUsefulPerSop per SOP group. SrcB holds the whole in0 tile
 // and is not moved between l values.
-inline void zi_matmul_one_l() {
+inline void acc_matmul_one_l() {
     constexpr bool high_fidelity = (MATH_FIDELITY != ckernel::MathFidelity::LoFi);
     constexpr uint32_t phases = high_fidelity ? static_cast<uint32_t>(MATH_FIDELITY) : 1;
 
@@ -192,7 +202,7 @@ inline void zi_matmul_one_l() {
 }
 
 // SrcB is fetched once per tile, so it is released once per tile.
-inline void zi_release_srcb() { TTI_SETRWC(ckernel::p_setrwc::CLR_B, 0, 0, 0, 0, ckernel::p_setrwc::SET_ABD_F); }
+inline void acc_release_srcb() { TTI_SETRWC(ckernel::p_setrwc::CLR_B, 0, 0, 0, 0, ckernel::p_setrwc::SET_ABD_F); }
 
 }  // namespace
 #endif
@@ -200,7 +210,7 @@ inline void zi_release_srcb() { TTI_SETRWC(ckernel::p_setrwc::CLR_B, 0, 0, 0, 0,
 #ifdef TRISC_UNPACK
 namespace {
 
-inline void zi_unpack_init() {
+inline void acc_unpack_init() {
     cfg_reg_rmw_tensix<THCON_SEC0_REG2_Haloize_mode_RMW>(0);
     TTI_SETADCZW(0b011, 0, 0, 0, 0, 0b1111);
     // SrcB takes a whole 32x32 tile (4 faces), as in B1. SrcA takes one 16-datum row per UNPACR.
@@ -218,7 +228,7 @@ inline void zi_unpack_init() {
 // TRISC runs ahead and the UNPACR sees a later row's addresses. Measured that way, only l=0
 // landed on rows 0,8,...,56; from l=1 on, the destination row and the source address came from
 // different iterations. WRCFG goes through the same FIFO as UNPACR, so the order is kept.
-inline void zi_unpack_srca_row(uint32_t l1_addr_16b, uint32_t srca_row, uint32_t set_dvalid) {
+inline void acc_unpack_srca_row(uint32_t l1_addr_16b, uint32_t srca_row, uint32_t set_dvalid) {
     // Both config-context slots are written, because the kernel alternates contexts and the
     // unpacker reads the slot belonging to the current one. Writing only the context-0 slot left
     // every context-1 step reading a stale address, i.e. exactly half the output tile wrong.
@@ -242,7 +252,7 @@ inline void zi_unpack_srca_row(uint32_t l1_addr_16b, uint32_t srca_row, uint32_t
 // Fetch the whole in0 tile into SrcB. Called once per tile: SrcB carries the useful values of all
 // four faces, so both k and both M halves are reached by moving the row counter, and nothing here
 // depends on l. Programmed through WRCFG for the ordering reason described above.
-inline void zi_unpack_srcb_tile(uint32_t cb_id_in0) {
+inline void acc_unpack_srcb_tile(uint32_t cb_id_in0) {
     const uint32_t base_in0 = get_local_cb_interface(cb_id_in0).fifo_rd_ptr - 1;
 
     TT_SETDMAREG(0, LOWER_HALFWORD(base_in0), 0, LO_16(ckernel::p_gpr_unpack::TMP0));
@@ -262,7 +272,7 @@ inline void zi_unpack_srcb_tile(uint32_t cb_id_in0) {
 //
 // One bf16 row of 16 datums is 32 B, and the unpacker address is in 16 B units, so a row is 2
 // units and a face is 32 units.
-inline void zi_unpack_srca_rows(uint32_t cb_id_in1, uint32_t l) {
+inline void acc_unpack_srca_rows(uint32_t cb_id_in1, uint32_t l) {
     const uint32_t base_in1 = get_local_cb_interface(cb_id_in1).fifo_rd_ptr - 1;
     constexpr uint32_t kRowUnits = 2;
     constexpr uint32_t kFaceUnits = 32;
@@ -282,22 +292,22 @@ inline void zi_unpack_srca_rows(uint32_t cb_id_in1, uint32_t l) {
     // The useful lanes of both SOP groups, in each of the four faces. dvalid on the very last row
     // only, so the math thread sees a complete SrcA.
     //
-    // Pass l owns the contiguous lane run starting at zi_lane_base(l) in the low group (SrcA rows
+    // Pass l owns the contiguous lane run starting at acc_lane_base(l) in the low group (SrcA rows
     // 0..7 of the face) and the same lanes of the high group (rows 8..15). The count is
     // kUsefulPerSop except in the final pass when kUsefulPerSop does not divide 8.
     //
     // At kUsefulPerSop == 8 there is a single pass owning all eight lanes of both groups, i.e.
     // the whole tile, which is exactly the SrcA contents B1/B2/B3 unpack in one go.
-    const uint32_t lanes = zi_lanes_in_pass(l);
-    const uint32_t lane_base = zi_lane_base(l);
+    const uint32_t lanes = acc_lanes_in_pass(l);
+    const uint32_t lane_base = acc_lane_base(l);
     for (uint32_t face = 0; face < 4; ++face) {
         const uint32_t face_base = base_in1 + face * kFaceUnits;
         const uint32_t srca_face = face * 16;
         for (uint32_t s = 0; s < lanes; ++s) {
             const uint32_t lane = lane_base + s;  // lane within the 8-lane SOP group
             const bool last = (face == 3) && (s == lanes - 1);
-            zi_unpack_srca_row(face_base + lane * kRowUnits, srca_face + lane, 0);
-            zi_unpack_srca_row(face_base + (lane + 8) * kRowUnits, srca_face + lane + 8, last ? 1 : 0);
+            acc_unpack_srca_row(face_base + lane * kRowUnits, srca_face + lane, 0);
+            acc_unpack_srca_row(face_base + (lane + 8) * kRowUnits, srca_face + lane + 8, last ? 1 : 0);
         }
     }
 
@@ -320,9 +330,9 @@ void kernel_main() {
     compute_kernel_hw_startup<SrcOrder::Reverse>(cb_in0, cb_in1, cb_out);
     state_configure(cb_in1, cb_in0, __builtin_LINE());
 
-    MATH((zi_configure_addrmod()));
+    MATH((acc_configure_addrmod()));
     MATH((ckernel::math::reset_counters(ckernel::p_setrwc::SET_ABD_F)));
-    UNPACK((zi_unpack_init()));
+    UNPACK((acc_unpack_init()));
 
     for (uint32_t mt = 0; mt < Mt; ++mt) {
         for (uint32_t nt = 0; nt < Nt; ++nt) {
@@ -334,19 +344,19 @@ void kernel_main() {
                 cb_wait_front(cb_in0, 1);
                 cb_wait_front(cb_in1, 1);
 
-                UNPACK((zi_unpack_srcb_tile(cb_in0)));
+                UNPACK((acc_unpack_srcb_tile(cb_in0)));
 
                 for (uint32_t l = 0; l < kLPerTile; ++l) {
-                    UNPACK((zi_unpack_srca_rows(cb_in1, l)));
+                    UNPACK((acc_unpack_srca_rows(cb_in1, l)));
                     MATH((ckernel::math::set_dst_write_addr<ckernel::DstTileShape::Tile32x32,
                                                            ckernel::UnpackDestination::SrcRegs>(0)));
-                    MATH((zi_matmul_one_l()));
+                    MATH((acc_matmul_one_l()));
                 }
 
                 // SrcB was fetched once for the tile, so it is released once here. Releasing only
                 // one of the two source registers leaves the other permanently valid and the
                 // unpacker blocks on the next tile.
-                MATH((zi_release_srcb()));
+                MATH((acc_release_srcb()));
 
                 cb_pop_front(cb_in0, 1);
                 cb_pop_front(cb_in1, 1);

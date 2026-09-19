@@ -142,27 +142,27 @@ span at most ~11 binades. Data that already satisfies this keeps FP32-class accu
 multiplier utilisation, as the `uniform` case shows. Data that does not must be spread to one
 useful value per SOP group, which costs a factor of 8 in multiplier utilisation.
 
-## C: zero injection
+## The FP32-accurate matmul
 
 The `packed` layout above loses 12 bits because eight values with different exponents share one
-SOP group. `kernels/compute/mm_zero_inject.cpp` runs that same layout with at most one useful
+SOP group. `kernels/compute/mm_fp32_accurate.cpp` runs that same layout with at most one useful
 value per group, and the result satisfies the FP32 bound.
 
 Measured, identical on ttsim and on Blackhole p150b silicon, same input, same
 `fp32_dest_acc_en=true` and same `MathFidelity::HiFi4` as the `packed` run:
 
 ```
-check=zero_inject_worst_element expected=17.19275699555874 actual=17.192771911621094 result=OK
-check=zero_inject_err_over_fp32_bound expected=1 actual=0.45486000796485393 result=OK
-detail zero_inject elements_within_fp32_bound=1024/1024 worst_index=989 bound=3.279264409676139e-05
-detail zero_inject_vs_baseline packed_ratio=620.6459961715897 zero_inject_ratio=0.45486000796485393
+check=fp32_accurate_worst_element expected=17.19275699555874 actual=17.192771911621094 result=OK
+check=fp32_accurate_err_over_fp32_bound expected=1 actual=0.45486000796485393 result=OK
+detail fp32_accurate elements_within_fp32_bound=1024/1024 worst_index=989 bound=3.279264409676139e-05
+detail fp32_accurate_vs_llk packed_ratio=620.6459961715897 fp32_accurate_ratio=0.45486000796485393
 ```
 
 620.6 to 0.455, on all 1024 elements. Only the SrcA occupancy differs.
 
 ### Useful values per SOP group
 
-`ZI_USEFUL_PER_SOP`, a compile-time constant in the kernel and settable per run from the host,
+`USEFUL_PER_SOP`, a compile-time constant in the kernel and settable per run from the host,
 chooses how many of a group's 8 lanes carry a useful value, 1 to 8. It need not divide 8. With
 `S` per group one MVMUL consumes up to `2*S` useful K-elements instead of 2, so a tile takes
 `ceil(8/S)` passes and `64*ceil(8/S)` MVMULs, and each pass writes up to `2*S` SrcA rows per face.

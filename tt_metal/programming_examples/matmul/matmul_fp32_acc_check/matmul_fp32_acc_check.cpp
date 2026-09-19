@@ -38,7 +38,11 @@ namespace {
 
 // Which compute kernel to run: the stock compute-API matmul, the B1 rewrite of it, or the C
 // zero-injecting variant.
-enum class KernelVariant { ComputeApi, ZeroInject };
+// Which compute kernel to run.
+//
+// LlkInaccurate is the LLK matmul: the ordinary path, which cannot reach FP32 accuracy on data
+// whose exponents spread within an SOP group. Fp32Accurate is this example's answer to that.
+enum class KernelVariant { LlkInaccurate, Fp32Accurate };
 
 void run_single_core_matmul(
     std::vector<float>& output_tiled,
@@ -47,8 +51,8 @@ void run_single_core_matmul(
     uint32_t k,
     bool fp32_dest_acc_en,
     const std::shared_ptr<distributed::MeshDevice>& mesh_device,
-    KernelVariant variant = KernelVariant::ComputeApi,
-    // Useful values per 8-lane SOP group for the ZeroInject kernel, 1 to 8. Ignored otherwise.
+    KernelVariant variant = KernelVariant::LlkInaccurate,
+    // Useful values per 8-lane SOP group for the Fp32Accurate kernel, 1 to 8. Ignored otherwise.
     uint32_t useful_per_sop = 1,
     // Which K-layout the reader should materialise.
     problem::Layout layout = problem::Layout::Packed) {
@@ -127,12 +131,12 @@ void run_single_core_matmul(
     std::vector<uint32_t> compute_compile_time_args = {mt, kt, nt};
     const char* compute_kernel = nullptr;
     switch (variant) {
-        case KernelVariant::ComputeApi:
+        case KernelVariant::LlkInaccurate:
             compute_kernel = OVERRIDE_KERNEL_PREFIX "matmul/matmul_single_core/kernels/compute/mm.cpp";
             break;
-        case KernelVariant::ZeroInject:
+        case KernelVariant::Fp32Accurate:
             // C: one useful value per SOP group, walked as l -> k -> i -> j -> f.
-            compute_kernel = OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/compute/mm_zero_inject.cpp";
+            compute_kernel = OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/compute/mm_fp32_accurate.cpp";
             break;
     }
 
@@ -142,8 +146,8 @@ void run_single_core_matmul(
     if (std::getenv("MM_ZONE_PER_K_TILE") != nullptr) {
         compute_defines["ZONE_PER_K_TILE"] = "1";
     }
-    if (variant == KernelVariant::ZeroInject) {
-        compute_defines["ZI_USEFUL_PER_SOP"] = std::to_string(useful_per_sop);
+    if (variant == KernelVariant::Fp32Accurate) {
+        compute_defines["USEFUL_PER_SOP"] = std::to_string(useful_per_sop);
     }
 
     tt_metal::CreateKernel(
@@ -229,7 +233,7 @@ int main() {
 
         auto run = [&](problem::Layout layout,
                        bool fp32_dest_acc_en,
-                       KernelVariant variant = KernelVariant::ComputeApi,
+                       KernelVariant variant = KernelVariant::LlkInaccurate,
                        uint32_t useful_per_sop = 1) {
             const uint32_t k = problem::k_dim(layout);
 
@@ -323,20 +327,20 @@ int main() {
         // FP32 bound that the baseline violates by a factor of 620. Same input, same
         // fp32_dest_acc_en, same fidelity: the only difference is that each SOP group now holds
         // one useful value instead of eight, so there is no intra-group alignment to lose bits to.
-        const RunResult zi_r = run(problem::Layout::Packed, true, KernelVariant::ZeroInject);
-        const bool zi_within_bound = zi_r.worst_ratio <= 1.0;
-        print_check("zero_inject_worst_element", zi_r.worst_expected, zi_r.worst_actual, zi_within_bound);
-        print_check("zero_inject_err_over_fp32_bound", 1.0, zi_r.worst_ratio, zi_within_bound);
+        const RunResult acc_r = run(problem::Layout::Packed, true, KernelVariant::Fp32Accurate);
+        const bool accurate_within_bound = acc_r.worst_ratio <= 1.0;
+        print_check("fp32_accurate_worst_element", acc_r.worst_expected, acc_r.worst_actual, accurate_within_bound);
+        print_check("fp32_accurate_err_over_fp32_bound", 1.0, acc_r.worst_ratio, accurate_within_bound);
         fmt::print(
-            "detail zero_inject elements_within_fp32_bound={}/{} worst_index={} bound={}\n",
-            zi_r.within_bound,
+            "detail fp32_accurate elements_within_fp32_bound={}/{} worst_index={} bound={}\n",
+            acc_r.within_bound,
             M * N,
-            zi_r.worst_index,
-            zi_r.bound_at_worst);
+            acc_r.worst_index,
+            acc_r.bound_at_worst);
         fmt::print(
-            "detail zero_inject_vs_baseline packed_ratio={} zero_inject_ratio={}\n",
+            "detail fp32_accurate_vs_llk packed_ratio={} fp32_accurate_ratio={}\n",
             packed_r.worst_ratio,
-            zi_r.worst_ratio);
+            acc_r.worst_ratio);
 
         // The same kernel with 1, 2, 4 and 8 useful values per SOP group. This is the accuracy
         // knob: with S per group, one MVMUL takes 2*S useful K-elements, so the tile needs 8/S
@@ -346,10 +350,10 @@ int main() {
         // S=8 fills every lane, which is the SrcA occupancy the LLK matmul works with, and it
         // issues the same 64 MVMULs per tile. It is compared against the LLK kernel below.
         bool sweep_ok = true;
-        const auto llk_ref = run_raw(problem::Layout::Packed, true, KernelVariant::ComputeApi);
+        const auto llk_ref = run_raw(problem::Layout::Packed, true, KernelVariant::LlkInaccurate);
         double prev_ratio = -1.0;
         for (uint32_t s = 1; s <= 8; ++s) {
-            const RunResult r = run(problem::Layout::Packed, true, KernelVariant::ZeroInject, s);
+            const RunResult r = run(problem::Layout::Packed, true, KernelVariant::Fp32Accurate, s);
             // S need not divide 8: the passes that absorb the remainder are narrower, and the
             // knob's guarantee is an upper bound on how many values share a group. The cost only
             // changes when ceil(8/S) does, so S=5,6,7 cost the same as S=4 and only lose
@@ -387,7 +391,7 @@ int main() {
                     okng(ok));
             }
             if (s == 8) {
-                const auto full = run_raw(problem::Layout::Packed, true, KernelVariant::ZeroInject, 8);
+                const auto full = run_raw(problem::Layout::Packed, true, KernelVariant::Fp32Accurate, 8);
                 uint32_t mismatches = 0;
                 for (uint32_t i = 0; i < M * N; ++i) {
                     if (full[i] != llk_ref[i]) {
@@ -412,7 +416,7 @@ int main() {
             sweep_ok ? "monotone" : "not_monotone",
             okng(sweep_ok));
 
-        pass = spread_within_bound && uniform_within_bound && packed_exceeds_bound && zi_within_bound &&
+        pass = spread_within_bound && uniform_within_bound && packed_exceeds_bound && accurate_within_bound &&
                sweep_ok;
         if (!mesh_device->close()) {
             pass = false;
