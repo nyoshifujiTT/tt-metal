@@ -20,6 +20,7 @@
 
 #include "api/dataflow/dataflow_api.h"
 #include "api/debug/dprint.h"
+#include "report.hpp"
 
 #include "../../problem.hpp"
 
@@ -60,10 +61,16 @@ void kernel_main() {
         uint32_t within_bound = 0;
 
         for (uint32_t m = 0; m < kM; ++m) {
+            // Hoisted for the same reason as in the writer: the reference is a row sum times
+            // b_at(n), and the row sum is what walks K. Evaluated per element it would run the K
+            // loop kM*kN times instead of kM, which ttsim cannot finish.
+            const double row = row_sum(kLayout, m);
+            const double row_abs = row_abs_sum(kLayout, m);
             for (uint32_t n = 0; n < kN; ++n) {
                 const double got = static_cast<double>(tile[tiled_index(m, n, kN)]);
-                const double want = expected_at(kLayout, m, n);
-                const double bound = bound_at(kLayout, m, n);
+                const double b = static_cast<double>(b_at(n));
+                const double want = row * b;
+                const double bound = gamma_n(k_dim(kLayout)) * row_abs * const_abs(b);
                 const double err = const_abs(got - want);
 
                 // A zero bound means every term was zero, so only an exact result will do.
@@ -126,6 +133,26 @@ void kernel_main() {
                 }
             }
         }
+#ifdef REPORT_VIA_ECALL
+        // Under ttsim only the verdicts are reported; see report.hpp.
+        {
+            constexpr uint32_t cb_id_report = 25;
+            char* line_buf = reinterpret_cast<char*>(get_write_ptr(cb_id_report));
+            report::Line(line_buf, kReportLineBytes)
+                .str("check=accuracy_monotone_in_useful_per_sop result=")
+                .str(monotone ? "OK" : "NG")
+                .flush();
+            report::Line(line_buf, kReportLineBytes)
+                .str("check=s1_within_bound result=")
+                .str(slot_ratio[0] <= 1.0 ? "OK" : "NG")
+                .flush();
+            report::Line(line_buf, kReportLineBytes)
+                .str("check=s8_over_bound result=")
+                .str(slot_ratio[7] > 1.0 ? "OK" : "NG")
+                .flush();
+        }
+        (void)first_bad;
+#else
         DPRINT(
             "check=accuracy_monotone_in_useful_per_sop expected=1 actual={} first_regression_at={}\n",
             monotone ? 1u : 0u,
@@ -141,6 +168,7 @@ void kernel_main() {
             "check=s8_over_bound expected=1 actual={} err_over_bound={:.17g}\n",
             slot_ratio[7] > 1.0 ? 1u : 0u,
             slot_ratio[7]);
+#endif
     }
 
     // S=8 against the LLK matmul. Both reduce the same 32 products with the same intra-group
@@ -157,6 +185,7 @@ void kernel_main() {
         uint32_t differing = 0;
 
         for (uint32_t m = 0; m < kM; ++m) {
+            const double row_abs = row_abs_sum(kLayout, m);
             for (uint32_t n = 0; n < kN; ++n) {
                 const uint32_t idx = tiled_index(m, n, kN);
                 const double a = static_cast<double>(s8[idx]);
@@ -164,7 +193,8 @@ void kernel_main() {
                 if (a != b) {
                     ++differing;
                 }
-                const double bound = 2.0 * bound_at(kLayout, m, n);
+                const double bound =
+                    2.0 * gamma_n(k_dim(kLayout)) * row_abs * const_abs(static_cast<double>(b_at(n)));
                 if (bound != 0.0) {
                     const double ratio = const_abs(a - b) / bound;
                     if (ratio > worst_ratio) {
@@ -175,6 +205,18 @@ void kernel_main() {
             }
         }
 
+#ifdef REPORT_VIA_ECALL
+        {
+            constexpr uint32_t cb_id_report = 25;
+            char* line_buf = reinterpret_cast<char*>(get_write_ptr(cb_id_report));
+            report::Line(line_buf, kReportLineBytes)
+                .str("check=s8_vs_llk_order_only result=")
+                .str(worst_ratio <= 1.0 ? "OK" : "NG")
+                .flush();
+        }
+        (void)differing;
+        (void)worst_index;
+#else
         DPRINT(
             "check=s8_vs_llk_order_only expected=1 actual={:.17g} differing={}/{} worst_index={} "
             "within_order_bound={}\n",
@@ -185,5 +227,6 @@ void kernel_main() {
             // DPRINT has no string or char type, so the verdict is a number: 1 means the two
             // differ by no more than reordering an FP32 sum permits.
             worst_ratio <= 1.0 ? 1u : 0u);
+#endif
     }
 }

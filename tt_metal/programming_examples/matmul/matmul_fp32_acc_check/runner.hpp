@@ -216,39 +216,6 @@ void place_variant(
     tt_metal::SetRuntimeArgs(program, writer_id, core, writer_args);
 }
 
-// One variant on one core, run to completion, with the output tile read back.
-void run_single_core_matmul(
-    std::vector<float>& output_tiled,
-    uint32_t m,
-    uint32_t n,
-    uint32_t k,
-    bool fp32_dest_acc_en,
-    const std::shared_ptr<distributed::MeshDevice>& mesh_device,
-    KernelVariant variant = KernelVariant::LlkInaccurate,
-    uint32_t useful_per_sop = 1,
-    problem::Layout layout = problem::Layout::Packed) {
-    distributed::MeshCommandQueue& cq = mesh_device->mesh_command_queue();
-    distributed::MeshWorkload workload;
-    distributed::MeshCoordinateRange device_range(mesh_device->shape());
-    Program program{};
-    CoreCoord core({0, 0});
-
-    const uint32_t output_tile_size = sizeof(float) * TILE_HEIGHT * TILE_WIDTH;
-    distributed::DeviceLocalBufferConfig dram_output_config{
-        .page_size = output_tile_size,
-        .buffer_type = tt_metal::BufferType::DRAM,
-    };
-    distributed::ReplicatedBufferConfig buffer_config_c{
-        .size = static_cast<uint32_t>(sizeof(float) * output_tiled.size())};
-    auto dst_dram_buffer = distributed::MeshBuffer::create(buffer_config_c, dram_output_config, mesh_device.get());
-
-    place_variant(program, core, dst_dram_buffer, m, n, k, fp32_dest_acc_en, variant, useful_per_sop, layout);
-
-    workload.add_program(device_range, std::move(program));
-    distributed::EnqueueMeshWorkload(cq, workload, false);
-    distributed::EnqueueReadMeshBuffer(cq, output_tiled, dst_dram_buffer, true);
-}
-
 // All nine variants at once: USEFUL_PER_SOP 1 through 8, plus the LLK matmul, each on its own
 // core, all forwarding their output tile to an aggregator core that reports on the lot.
 //
@@ -291,6 +258,13 @@ void run_all_variants(
             .set_page_size(scratch_cb_index, output_tile_size);
     tt_metal::CreateCircularBuffer(program, all_cores, cb_scratch_config);
 
+    // Line buffer for the ttsim reporting path; see place_variant.
+    constexpr uint32_t report_cb_index = CBIndex::c_25;
+    CircularBufferConfig cb_report_config =
+        CircularBufferConfig(kReportLineBytes, {{report_cb_index, tt::DataFormat::Float32}})
+            .set_page_size(report_cb_index, kReportLineBytes);
+    tt_metal::CreateCircularBuffer(program, all_cores, cb_report_config);
+
     const uint32_t agg_semaphore = tt_metal::CreateSemaphore(program, all_cores, 0);
 
     AggregatorTarget target;
@@ -316,6 +290,11 @@ void run_all_variants(
             &target);
     }
 
+    std::map<std::string, std::string> aggregator_defines{
+        {"LAYOUT_ID", std::to_string(static_cast<uint32_t>(layout))},
+        {"NUM_SLOTS", std::to_string(kVariants)}};
+    add_report_define(aggregator_defines);
+
     const auto aggregator_id = tt_metal::CreateKernel(
         program,
         OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/dataflow/aggregator.cpp",
@@ -323,9 +302,7 @@ void run_all_variants(
         tt_metal::DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_0,
             .noc = NOC::RISCV_0_default,
-            .defines =
-                {{"LAYOUT_ID", std::to_string(static_cast<uint32_t>(layout))},
-                 {"NUM_SLOTS", std::to_string(kVariants)}},
+            .defines = aggregator_defines,
         });
     tt_metal::SetRuntimeArgs(program, aggregator_id, aggregator_core, {agg_semaphore});
 
@@ -335,10 +312,6 @@ void run_all_variants(
 }
 
 const char* okng(bool ok) { return ok ? "OK" : "NG"; }
-
-void print_check(const char* name, double expected, double actual, bool ok) {
-    fmt::print("check={} expected={} actual={} result={}\n", name, expected, actual, okng(ok));
-}
 
 void print_terms(problem::Layout layout) {
     const uint32_t k = problem::k_dim(layout);
