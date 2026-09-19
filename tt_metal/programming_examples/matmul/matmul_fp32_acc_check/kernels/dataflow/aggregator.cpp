@@ -47,7 +47,9 @@ void kernel_main() {
     volatile tt_l1_ptr uint32_t* sem_ptr = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(semaphore);
     noc_semaphore_wait_min(sem_ptr, kSlots);
 
-    // Per-slot verdict against the bound.
+    // Per-slot verdict against the bound, keeping each ratio so the sweep can be judged as a
+    // whole afterwards.
+    double slot_ratio[kSlots];
     for (uint32_t slot = 0; slot < kSlots; ++slot) {
         volatile tt_l1_ptr float* tile = scratch + slot * kOutDatums;
 
@@ -80,6 +82,8 @@ void kernel_main() {
             }
         }
 
+        slot_ratio[slot] = worst_ratio;
+
         if (slot == kLlkSlot) {
             DPRINT(
                 "variant=llk worst_index={} expected={:.17g} actual={:.17g} err_over_bound={:.17g} "
@@ -106,6 +110,37 @@ void kernel_main() {
                 within_bound,
                 kOutDatums);
         }
+    }
+
+    // The accuracy has to degrade monotonically as more values share a group: that is the whole
+    // claim the knob makes. Judged here rather than on the host because it spans all nine runs,
+    // which only this core sees together.
+    {
+        bool monotone = true;
+        uint32_t first_bad = 0;
+        for (uint32_t s = 1; s < 8; ++s) {
+            if (slot_ratio[s] < slot_ratio[s - 1]) {
+                monotone = false;
+                if (first_bad == 0) {
+                    first_bad = s + 1;
+                }
+            }
+        }
+        DPRINT(
+            "check=accuracy_monotone_in_useful_per_sop expected=1 actual={} first_regression_at={}\n",
+            monotone ? 1u : 0u,
+            first_bad);
+
+        // S=1 must satisfy the bound and S=8 must not: the knob really does span from FP32
+        // accuracy back to what the LLK matmul achieves.
+        DPRINT(
+            "check=s1_within_bound expected=1 actual={} err_over_bound={:.17g}\n",
+            slot_ratio[0] <= 1.0 ? 1u : 0u,
+            slot_ratio[0]);
+        DPRINT(
+            "check=s8_over_bound expected=1 actual={} err_over_bound={:.17g}\n",
+            slot_ratio[7] > 1.0 ? 1u : 0u,
+            slot_ratio[7]);
     }
 
     // S=8 against the LLK matmul. Both reduce the same 32 products with the same intra-group
