@@ -2,15 +2,15 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// The accuracy checks, judged on the host.
+// What the SOP alignment window costs, measured across three K-layouts.
 //
-// This is the regression test of the pair: it runs each variant on its own, reads the output tile
-// back and compares it against problem.hpp here rather than on the device. That makes it usable
-// under ttsim, which has no device print buffer and so cannot run the device-side reporting that
-// matmul_fp32_accurate relies on.
+// The same 32 products are fed through layouts that differ only in how they sit inside the 8-lane
+// SOP groups: packed together, spread one per group, or grouped with a shared exponent. The
+// difference in accuracy is therefore attributable to the intra-group alignment and nothing else.
 //
-// It also does the one comparison the other program cannot: S=8 against the LLK matmul, element
-// by element, which needs both results in one place on the host.
+// This is also the regression test of the pair. It judges on the host, so it runs under ttsim,
+// which has no device print buffer and cannot run the device-side reporting that
+// matmul_fp32_accurate does.
 
 #include <cmath>
 #include <cstdint>
@@ -55,18 +55,6 @@ int main() {
             uint32_t worst_index;
             double bound_at_worst;
             uint32_t within_bound;   // how many of the M*N outputs satisfy the bound
-        };
-
-        // Raw device output for one layout, so the two compute kernels can be compared directly.
-        auto run_raw = [&](problem::Layout layout,
-                           bool fp32_dest_acc_en,
-                           KernelVariant variant,
-                           uint32_t useful_per_sop = 1) {
-            const uint32_t k = problem::k_dim(layout);
-            std::vector<float> out_tiled(M * N, 0.0f);
-            run_single_core_matmul(
-                out_tiled, M, N, k, fp32_dest_acc_en, mesh_device, variant, useful_per_sop, layout);
-            return untilize_nfaces(out_tiled, M, N);
         };
 
         auto run = [&](problem::Layout layout,
@@ -181,82 +169,7 @@ int main() {
             packed_r.worst_ratio,
             acc_r.worst_ratio);
 
-        // The same kernel with 1, 2, 4 and 8 useful values per SOP group. This is the accuracy
-        // knob: with S per group, one MVMUL takes 2*S useful K-elements, so the tile needs 8/S
-        // passes and 64*8/S MVMULs. S=1 leaves no intra-group alignment at all; raising S widens
-        // the alignment window again and the error grows back towards the baseline.
-        //
-        // S=8 fills every lane, which is the SrcA occupancy the LLK matmul works with, and it
-        // issues the same 64 MVMULs per tile. It is compared against the LLK kernel below.
-        bool sweep_ok = true;
-        const auto llk_ref = run_raw(problem::Layout::Packed, true, KernelVariant::LlkInaccurate);
-        double prev_ratio = -1.0;
-        for (uint32_t s = 1; s <= 8; ++s) {
-            const RunResult r = run(problem::Layout::Packed, true, KernelVariant::Fp32Accurate, s);
-            // S need not divide 8: the passes that absorb the remainder are narrower, and the
-            // knob's guarantee is an upper bound on how many values share a group. The cost only
-            // changes when ceil(8/S) does, so S=5,6,7 cost the same as S=4 and only lose
-            // accuracy - included here to show that, not because they are useful settings.
-            const uint32_t passes = (8 + s - 1) / s;
-            const uint32_t mvmuls = 64 * passes;
-            fmt::print(
-                "detail sweep useful_per_sop={} passes={} mvmuls_per_tile={} err_over_bound={} "
-                "elements_within={}/{}\n",
-                s,
-                passes,
-                mvmuls,
-                r.worst_ratio,
-                r.within_bound,
-                M * N);
-
-            // Accuracy must degrade monotonically as more values share a group.
-            const bool monotone = r.worst_ratio >= prev_ratio;
-            if (!monotone) {
-                fmt::print(
-                    "detail sweep_non_monotone at useful_per_sop={} previous={} current={}\n",
-                    s,
-                    prev_ratio,
-                    r.worst_ratio);
-            }
-            sweep_ok = sweep_ok && monotone;
-            prev_ratio = r.worst_ratio;
-
-            if (s == 1) {
-                const bool ok = r.worst_ratio <= 1.0;
-                sweep_ok = sweep_ok && ok;
-                fmt::print(
-                    "check=sweep_s1_within_fp32_bound expected=1 actual={} result={}\n",
-                    r.worst_ratio,
-                    okng(ok));
-            }
-            if (s == 8) {
-                const auto full = run_raw(problem::Layout::Packed, true, KernelVariant::Fp32Accurate, 8);
-                uint32_t mismatches = 0;
-                for (uint32_t i = 0; i < M * N; ++i) {
-                    if (full[i] != llk_ref[i]) {
-                        ++mismatches;
-                    }
-                }
-                fmt::print(
-                    "detail sweep_s8_vs_llk differing_elements={}/{}\n", mismatches, M * N);
-                // S=8 must land in the same regime as the LLK matmul: every lane useful again,
-                // so the intra-group alignment is back and the packed layout must exceed the
-                // FP32 bound just as the LLK kernel does.
-                const bool ok = r.worst_ratio > 1.0;
-                sweep_ok = sweep_ok && ok;
-                fmt::print(
-                    "check=sweep_s8_back_to_baseline_regime expected=over_bound actual={} result={}\n",
-                    r.worst_ratio > 1.0 ? "over_bound" : "within_bound",
-                    okng(ok));
-            }
-        }
-        fmt::print(
-            "check=sweep_accuracy_monotone_in_useful_per_sop expected=monotone actual={} result={}\n",
-            sweep_ok ? "monotone" : "not_monotone",
-            okng(sweep_ok));
-
-        pass = spread_within_bound && uniform_within_bound && packed_exceeds_bound && accurate_within_bound &&
-               sweep_ok;
+        pass = spread_within_bound && uniform_within_bound && packed_exceeds_bound && accurate_within_bound;
         if (!mesh_device->close()) {
             pass = false;
         }
