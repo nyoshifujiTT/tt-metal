@@ -25,13 +25,16 @@ tiled output), so a production path has no layout conversion at this point to be
 ## The two programs
 
 `metal_example_matmul_fp32_accurate` is the headline: it runs all nine variants at once, one per
-core, and an aggregator core prints the table. The host only launches. Needs
-`TT_METAL_DPRINT_CORES=all`, and silicon.
+core, and an aggregator core judges them and prints the table. The host only launches, and every
+conclusion about the sweep - the monotonicity, the two ends of the range, and the comparison of
+S=8 against the LLK matmul - is reached on the device. Needs `TT_METAL_DPRINT_CORES=all`, and
+silicon.
 
-`metal_example_matmul_fp32_acc_check` is the regression test: it runs each variant on its own,
-reads the output tile back and judges it on the host. That works under ttsim, which has no device
-print buffer, and it does the element-by-element comparison of S=8 against the LLK matmul, which
-needs both results in one place.
+`metal_example_matmul_fp32_acc_check` measures what a single run cannot show: the three K-layouts
+against each other. They carry the same 32 products and differ only in how those sit inside the
+SOP groups, so the accuracy gap between them isolates the intra-group alignment. It judges on the
+host, which is also what makes it the regression test - it runs under ttsim, where there is no
+device print buffer.
 
 Both take the problem - operands, tile layout, reference, error bound - from `problem.hpp`, which
 the kernels include too, so host and device cannot drift apart.
@@ -57,7 +60,7 @@ Only the check program runs here, and `TT_METAL_DPRINT_CORES` must stay unset: t
 implement the device print buffer, so a kernel that prints waits forever for a host flush that
 never comes.
 
-Expect around nine minutes. ttsim simulates the reader's per-datum loop instruction by
+Expect two to three minutes. ttsim simulates the reader's per-datum loop instruction by
 instruction; on silicon it is not measurable.
 
 ## Run on real device
@@ -88,6 +91,9 @@ variant=useful_per_sop=6 passes=2 mvmuls_per_tile=128 err_over_bound=617.1460205
 variant=useful_per_sop=7 passes=2 mvmuls_per_tile=128 err_over_bound=620.29599860842711  within=10/1024
 variant=useful_per_sop=8 passes=1 mvmuls_per_tile=64  err_over_bound=620.64599617158967  within=12/1024
 variant=llk                      mvmuls_per_tile=64  err_over_bound=620.64599617158967  within=12/1024
+check=accuracy_monotone_in_useful_per_sop expected=1 actual=1 first_regression_at=0
+check=s1_within_bound expected=1 actual=1 err_over_bound=0.45486000796485393
+check=s8_over_bound  expected=1 actual=1 err_over_bound=620.64599617158967
 check=s8_vs_llk_order_only expected=1 actual=0.031197124296817688 differing=213/1024 within_order_bound=1
 ```
 
@@ -167,15 +173,15 @@ row-granular, and the math/pack handshake is per Dst section rather than per row
   behaves like a correct FP32 accumulation
 - `detail elements_within_fp32_bound`: how many of the 1024 outputs satisfy the bound
 - `note ... mvmul_instruction_ratio=`: instruction-count cost of the spread layout
-- `detail sweep useful_per_sop=`: one line per `S`, with the pass count, the MVMULs per tile and
-  the resulting error
-- `check=sweep_s1_within_fp32_bound`: one useful value per group must satisfy the bound
-- `check=sweep_s8_back_to_baseline_regime`: eight must not, i.e. `S` really does span from
-  FP32-class back to the ordinary matmul
-- `check=sweep_accuracy_monotone_in_useful_per_sop`: the error must not improve as more values
-  share a group
-- `variant=` and `check=s8_vs_llk_order_only`: the device-side table and comparison, from
-  `metal_example_matmul_fp32_accurate`
+From `metal_example_matmul_fp32_accurate`, all reported by the aggregator core:
+
+- `variant=`: one line per variant, with the pass count, the MVMULs per tile and the error
+- `check=s1_within_bound` and `check=s8_over_bound`: `S` really does span from FP32 accuracy back
+  to what the LLK matmul achieves
+- `check=accuracy_monotone_in_useful_per_sop`: the error must not improve as more values share a
+  group
+- `check=s8_vs_llk_order_only`: `S=8` and the LLK matmul differ by no more than reassociating an
+  FP32 sum permits
 
 Measured on Blackhole p150b silicon:
 
