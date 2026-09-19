@@ -139,6 +139,7 @@ class Qwen3EmbeddingForTTvLLM(Qwen3ForEmbedding):
         self,
         input_ids: torch.Tensor,
         positions: Optional[torch.Tensor] = None,
+        keep_hidden_states_on_device: bool = False,
         **kwargs,
     ) -> torch.Tensor:
         """Forward the pooling runner's call to the model's pre-pooling stage.
@@ -168,6 +169,13 @@ class Qwen3EmbeddingForTTvLLM(Qwen3ForEmbedding):
         ``encode_token_hidden_states``, which is defined in terms of ``forward``
         -- and ``forward`` is this override, so going through the named accessor
         would call straight back into here.
+
+        ``keep_hidden_states_on_device`` is named explicitly rather than left to
+        ``**kwargs``: the runner decides whether to ask for the device form by
+        inspecting this signature, and a parameter swallowed by ``**kwargs`` is
+        invisible to that check. Spelling it out is what makes the device
+        pooling path reachable at all -- with it hidden, the runner concluded the
+        model could not do it and every request paid for the host composition.
         """
         requested_full = kwargs.pop("return_full_hidden_states", True)
         if not requested_full:
@@ -181,5 +189,6 @@ class Qwen3EmbeddingForTTvLLM(Qwen3ForEmbedding):
             input_ids,
             kwargs.pop("attention_mask", None),
             return_full_hidden_states=True,
+            keep_hidden_states_on_device=keep_hidden_states_on_device,
             **kwargs,
         )

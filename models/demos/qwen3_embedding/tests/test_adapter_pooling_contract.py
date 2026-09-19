@@ -79,6 +79,42 @@ def test_forward_accepts_positions_for_the_vllm_signature_check(monkeypatch):
     assert model.forward_kwargs["return_full_hidden_states"] is True
 
 
+def test_keep_hidden_states_on_device_is_visible_in_the_signature(monkeypatch):
+    """The runner decides by inspecting this signature, so it must be named.
+
+    The pooling runner asks for the device form only if ``forward`` declares
+    ``keep_hidden_states_on_device``. Swallowed by ``**kwargs`` it is invisible
+    to that check, the runner concludes the model cannot do it, and every
+    request silently pays for the host composition again -- which is exactly the
+    regression this guards.
+    """
+    import inspect
+
+    cls = _load_adapter_with_stub_base(monkeypatch)
+
+    parameters = inspect.signature(cls.forward).parameters
+    assert "keep_hidden_states_on_device" in parameters, (
+        "the adapter hides the flag behind **kwargs; the runner's capability "
+        "check cannot see it and will not request device pooling"
+    )
+    # Default off: asking for the device form is the caller's decision.
+    assert parameters["keep_hidden_states_on_device"].default is False
+
+
+@pytest.mark.parametrize("requested", [False, True])
+def test_forward_passes_the_device_request_through_to_the_base(monkeypatch, requested):
+    cls = _load_adapter_with_stub_base(monkeypatch)
+    model = cls()
+
+    model.forward(
+        input_ids=torch.zeros(1, 2, dtype=torch.long),
+        keep_hidden_states_on_device=requested,
+    )
+
+    assert model.forward_kwargs["keep_hidden_states_on_device"] is requested
+    # Still the pre-pooling stage either way; only the transfer differs.
+    assert model.forward_kwargs["return_full_hidden_states"] is True
+
 def test_forward_accepts_the_runners_explicit_request_for_full_hidden(monkeypatch):
     cls = _load_adapter_with_stub_base(monkeypatch)
     model = cls()
