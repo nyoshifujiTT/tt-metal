@@ -175,3 +175,38 @@ def test_no_scheduled_requests_is_not_an_error(keep_on_device):
     )
 
     assert out == []
+
+
+def test_every_full_hidden_copy_is_guarded_by_the_flag():
+    """No full-hidden path may copy to host unconditionally.
+
+    The batched path is covered above by behaviour; the sequential and
+    non-traced paths sit inside one long prefill loop that a device-free test
+    cannot drive. This reads the source instead, because the failure mode is
+    specific and expensive: a path that still calls .cpu() hands the pooler a
+    host tensor, the device pooler slices it as if it were a ttnn tensor, and
+    the engine dies mid-run -- which is exactly what happened on the 8192-wide
+    non-traced path after the traced ones were fixed.
+
+    ``embed_single_trace`` is excluded: it carries an already-pooled
+    ``[batch, dim]`` row, so it is not a full-hidden copy at all.
+    """
+    import inspect
+
+    source = inspect.getsource(Generator._prefill_forward_text_impl)
+    lines = source.splitlines()
+
+    unguarded = []
+    for i, line in enumerate(lines):
+        if "hidden_states.cpu(blocking=False)" not in line:
+            continue
+        window = "\n".join(lines[max(0, i - 12) : i + 1])
+        if "embed_single_trace" in window:
+            continue  # already-pooled single row, nothing to save
+        if "keep_hidden_states_on_device" not in window:
+            unguarded.append(line.strip())
+
+    assert not unguarded, (
+        "full per-token hidden states are copied to host without honouring "
+        f"keep_hidden_states_on_device: {unguarded}"
+    )

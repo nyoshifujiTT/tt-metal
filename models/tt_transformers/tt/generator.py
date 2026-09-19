@@ -1465,7 +1465,11 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                             "idx": idx,
                             "model_id": model_id,
                             "last_token_idx": last_token_idx,
-                            "hidden_states": hidden_states.cpu(blocking=False),
+                            "hidden_states": (
+                                hidden_states
+                                if keep_hidden_states_on_device
+                                else hidden_states.cpu(blocking=False)
+                            ),
                             "full_hidden": return_full_hidden_states,
                             "seq_len": seq_len,
                         }
