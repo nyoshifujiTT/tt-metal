@@ -39,11 +39,23 @@ TT_METAL_SIMULATOR=/home/ubuntu/ttsim/src/_out/release_bh/libttsim.so \
   ./build_Release/programming_examples/metal_example_matmul_fp32_acc_check
 ```
 
+Do not set `TT_METAL_DPRINT_CORES` under ttsim. ttsim does not implement the device print buffer,
+so the kernel-side writer waits forever for a host flush that never comes and the run hangs. The
+device-side verdict is therefore only available on silicon; the host-side checks, which cover the
+same ground, run under both.
+
 ## Run on real device
 
 ```bash
 unset TT_METAL_SIMULATOR
 ./build_Release/programming_examples/metal_example_matmul_fp32_acc_check
+```
+
+With `TT_METAL_DPRINT_CORES=0,0` the writer also reports its own verdict, reached on the device
+from the constant expressions in `problem.hpp` rather than from anything the host sends:
+
+```
+0:0-0:BR: device_check layout=0 worst_index=162 expected=5.7143146004527807 actual=5.707550048828125 bound=1.0899210929229183e-05 err_over_bound=620.64599617158967 within=12/1024
 ```
 
 ## Timing

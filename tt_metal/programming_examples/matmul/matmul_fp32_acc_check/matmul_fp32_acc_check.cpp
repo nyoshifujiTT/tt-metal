@@ -103,6 +103,15 @@ void run_single_core_matmul(
             .set_page_size(output_cb_index, output_tile_size);
     tt_metal::CreateCircularBuffer(program, core, cb_output_config);
 
+    // Scratch for the writer to drain the output into before checking it. A circular buffer is
+    // just a convenient way to have the framework place an L1 region; the writer addresses it
+    // directly rather than going through the CB protocol.
+    constexpr uint32_t scratch_cb_index = CBIndex::c_24;
+    CircularBufferConfig cb_scratch_config =
+        CircularBufferConfig(output_tile_size, {{scratch_cb_index, cb_output_format}})
+            .set_page_size(scratch_cb_index, output_tile_size);
+    tt_metal::CreateCircularBuffer(program, core, cb_scratch_config);
+
     tt_metal::CreateKernel(
         program,
         OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/dataflow/reader_constexpr_mm.cpp",
@@ -120,12 +129,15 @@ void run_single_core_matmul(
 
     const auto writer_id = tt_metal::CreateKernel(
         program,
-        OVERRIDE_KERNEL_PREFIX "matmul/matmul_single_core/kernels/dataflow/writer_single_core_mm.cpp",
+        OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/dataflow/writer_check_mm.cpp",
         core,
         tt_metal::DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_0,
             .noc = NOC::RISCV_0_default,
             .compile_args = writer_compile_time_args,
+            // The writer reaches its own verdict from the same constant expressions the reader
+            // uses, so it needs to know which layout is being run.
+            .defines = {{"LAYOUT_ID", std::to_string(static_cast<uint32_t>(layout))}},
         });
 
     std::vector<uint32_t> compute_compile_time_args = {mt, kt, nt};
@@ -163,7 +175,9 @@ void run_single_core_matmul(
         });
 
     // The reader takes no runtime args: its operands are compile-time constants.
-    tt_metal::SetRuntimeArgs(program, writer_id, core, {dst_dram_buffer->address(), mt, nt});
+    // Mt and Nt are 1 here, and the writer takes its shape from problem.hpp, so the output
+    // address is the only runtime argument it needs.
+    tt_metal::SetRuntimeArgs(program, writer_id, core, {dst_dram_buffer->address()});
 
     workload.add_program(device_range, std::move(program));
     distributed::EnqueueMeshWorkload(cq, workload, false);
