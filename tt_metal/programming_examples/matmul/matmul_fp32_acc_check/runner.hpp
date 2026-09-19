@@ -43,6 +43,18 @@ using namespace tt::tt_metal;
 // tt_metal has its own Layout, so the problem definitions are reached through an alias rather
 // than a using-directive.
 namespace problem = mm_fp32_acc_check;
+// Text buffer the reporting kernels assemble a line in, under ttsim.
+constexpr uint32_t kReportLineBytes = 256;
+
+// ttsim has no device print buffer, so the reporting kernels go through RISC-V semihosting there
+// instead of DPRINT, and report only their verdict. Detected from TT_METAL_SIMULATOR, which is
+// how the simulator is selected in the first place.
+void add_report_define(std::map<std::string, std::string>& defines) {
+    if (std::getenv("TT_METAL_SIMULATOR") != nullptr) {
+        defines["REPORT_VIA_ECALL"] = "1";
+    }
+}
+
 // Which compute kernel to run.
 //
 // LlkInaccurate is the LLK matmul: the ordinary path, which cannot reach FP32 accuracy on data
@@ -113,6 +125,14 @@ void place_variant(
             CircularBufferConfig(output_tile_size, {{scratch_cb_index, cb_output_format}})
                 .set_page_size(scratch_cb_index, output_tile_size);
         tt_metal::CreateCircularBuffer(program, core, cb_scratch_config);
+
+        // Line buffer for the ttsim reporting path, which assembles its text in L1 because that
+        // is all the simulator's semihosting reads.
+        constexpr uint32_t report_cb_index = CBIndex::c_25;
+        CircularBufferConfig cb_report_config =
+            CircularBufferConfig(kReportLineBytes, {{report_cb_index, cb_output_format}})
+                .set_page_size(report_cb_index, kReportLineBytes);
+        tt_metal::CreateCircularBuffer(program, core, cb_report_config);
     }
 
     tt_metal::CreateKernel(
@@ -134,6 +154,7 @@ void place_variant(
         // The writer reaches its own verdict from the same constant expressions the reader uses,
         // so it needs to know which layout is being run.
         {"LAYOUT_ID", std::to_string(static_cast<uint32_t>(layout))}};
+    add_report_define(writer_defines);
     if (aggregator != nullptr) {
         writer_defines["AGGREGATOR_SLOT"] = std::to_string(aggregator->slot);
     }

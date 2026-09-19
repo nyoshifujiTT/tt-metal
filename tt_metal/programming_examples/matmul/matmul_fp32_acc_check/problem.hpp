@@ -146,22 +146,34 @@ constexpr double gamma_n(uint32_t n) {
     return nu / (1.0 - nu);
 }
 
-// Exact C[m][n], accumulated in double from the BF16 datums the device receives.
-constexpr double expected_at(Layout layout, uint32_t m, uint32_t n) {
+// B[k][n] does not depend on k, so both sums below factor into a row sum times b_at(n). Keeping
+// them in that form matters for the kernels: computed per element the K loop runs kM*kN times,
+// and under ttsim, which simulates instruction by instruction, that is the difference between
+// seconds and tens of minutes.
+constexpr double row_sum(Layout layout, uint32_t m) {
     double acc = 0.0;
     for (uint32_t k = 0; k < k_dim(layout); ++k) {
-        acc += static_cast<double>(a_at(layout, m, k)) * static_cast<double>(b_at(n));
+        acc += static_cast<double>(a_at(layout, m, k));
     }
     return acc;
 }
 
-// sum_k |a_k * b_k| for the same element, which is what the bound scales.
-constexpr double abs_sum_at(Layout layout, uint32_t m, uint32_t n) {
+constexpr double row_abs_sum(Layout layout, uint32_t m) {
     double acc = 0.0;
     for (uint32_t k = 0; k < k_dim(layout); ++k) {
-        acc += const_fabs(static_cast<double>(a_at(layout, m, k)) * static_cast<double>(b_at(n)));
+        acc += const_fabs(static_cast<double>(a_at(layout, m, k)));
     }
     return acc;
+}
+
+// Exact C[m][n], from the BF16 datums the device receives.
+constexpr double expected_at(Layout layout, uint32_t m, uint32_t n) {
+    return row_sum(layout, m) * static_cast<double>(b_at(n));
+}
+
+// sum_k |a_k * b_k| for the same element, which is what the bound scales.
+constexpr double abs_sum_at(Layout layout, uint32_t m, uint32_t n) {
+    return row_abs_sum(layout, m) * const_fabs(static_cast<double>(b_at(n)));
 }
 
 constexpr double bound_at(Layout layout, uint32_t m, uint32_t n) {

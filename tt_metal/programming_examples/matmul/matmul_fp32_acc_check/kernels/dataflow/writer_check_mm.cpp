@@ -26,6 +26,7 @@
 
 #include "api/dataflow/dataflow_api.h"
 #include "api/debug/dprint.h"
+#include "report.hpp"
 
 // The kernel's own directory is on the include path, so the header is reached relative to this
 // file.
@@ -105,10 +106,17 @@ void kernel_main() {
     uint32_t within_bound = 0;
 
     for (uint32_t m = 0; m < kM; ++m) {
+        // Hoisted out of the n loop: expected_at and abs_sum_at are a row sum times b_at(n), and
+        // the row sum is the part that walks K. Recomputing it per element would run the K loop
+        // kM*kN times instead of kM, which on silicon is invisible and under ttsim is the
+        // difference between a minute and not finishing.
+        const double row = row_sum(kLayout, m);
+        const double row_abs = row_abs_sum(kLayout, m);
         for (uint32_t n = 0; n < kN; ++n) {
             const double got = static_cast<double>(scratch[tiled_index(m, n, kN)]);
-            const double want = expected_at(kLayout, m, n);
-            const double bound = bound_at(kLayout, m, n);
+            const double b = static_cast<double>(b_at(n));
+            const double want = row * b;
+            const double bound = gamma_n(k_dim(kLayout)) * row_abs * const_abs(b);
             const double err = const_abs(got - want);
 
             // A zero bound means every term was zero, so only an exact result is acceptable.
@@ -129,6 +137,23 @@ void kernel_main() {
         }
     }
 
+#ifdef REPORT_VIA_ECALL
+    // ttsim has no device print buffer, and its own README points at source-level instrumentation
+    // for anything more detailed, so only the verdict is reported here.
+    {
+        constexpr uint32_t cb_id_report = 25;
+        char* line_buf = reinterpret_cast<char*>(get_write_ptr(cb_id_report));
+        report::Line(line_buf, kReportLineBytes)
+            .str("check=device_all_elements_within_bound result=")
+            .str(within_bound == kOutDatums ? "OK" : "NG")
+            .flush();
+    }
+    (void)worst_expected;
+    (void)worst_actual;
+    (void)worst_bound;
+    (void)worst_ratio;
+    (void)worst_index;
+#else
     DPRINT(
         "device_check layout={} worst_index={} expected={:.17g} actual={:.17g} bound={:.17g} "
         "err_over_bound={:.17g} within={}/{}\n",
@@ -140,4 +165,5 @@ void kernel_main() {
         worst_ratio,
         within_bound,
         kOutDatums);
+#endif
 }
