@@ -10,34 +10,26 @@ Accumulation across SOP groups, and across `MVMUL` instructions, is done at FP32
 
 ## What the example measures
 
-The same 32 products (exponents spanning ~21 bits) are fed through two K-layouts with identical `fp32_dest_acc_en=true` and `MathFidelity::HiFi4`:
+The same 32 products, with exponents spanning ~21 bits, are run through nine kernels under
+identical `fp32_dest_acc_en=true` and `MathFidelity::HiFi4`: the LLK matmul, and the
+FP32-accurate kernel at each `USEFUL_PER_SOP` from 1 to 8. Only how many useful values share an
+8-lane SOP group differs between them, so the accuracy difference is attributable to the
+intra-group alignment and nothing else.
 
-- `packed`: `K=32`, eight values per 8-lane SOP group, exponents spread across the group.
-- `spread`: `K=256`, values placed every 8th slot so each SOP group holds at most one value.
-- `uniform`: `K=32`, every lane of every SOP group carries a useful value, but all values within a group share one exponent.
+At one value per group there is no alignment to lose bits to, and the result satisfies the FP32
+bound on every element. At eight it matches what the LLK matmul achieves, which on this data is
+620 times outside that bound.
 
-Only the layout differs, so any accuracy difference is attributable to intra-SOP alignment. The `uniform` case is the control: a fully populated 8-wide group is not itself a problem, so the loss comes from the alignment shift rather than from the group width.
+## The program
 
-Inputs are tilized on the host. That is appropriate here because this is a test harness: on the
-device, data stays in 32x32 tile layout end to end (matmul rejects non-tiled inputs and emits
-tiled output), so a production path has no layout conversion at this point to begin with.
+`metal_example_matmul_fp32_accurate` runs all nine variants at once, one per core, and an
+aggregator core judges them. The host only launches: the operands, the reference, the error bound
+and every conclusion - the monotonicity, the two ends of the range, the comparison of S=8 against
+the LLK matmul - come from `problem.hpp`, which the kernels evaluate themselves.
 
-## The two programs
-
-`metal_example_matmul_fp32_accurate` is the headline: it runs all nine variants at once, one per
-core, and an aggregator core judges them and prints the table. The host only launches, and every
-conclusion about the sweep - the monotonicity, the two ends of the range, and the comparison of
-S=8 against the LLK matmul - is reached on the device. Needs `TT_METAL_DPRINT_CORES=all`, and
-silicon.
-
-`metal_example_matmul_fp32_acc_check` measures what a single run cannot show: the three K-layouts
-against each other. They carry the same 32 products and differ only in how those sit inside the
-SOP groups, so the accuracy gap between them isolates the intra-group alignment. It judges on the
-host, which is also what makes it the regression test - it runs under ttsim, where there is no
-device print buffer.
-
-Both take the problem - operands, tile layout, reference, error bound - from `problem.hpp`, which
-the kernels include too, so host and device cannot drift apart.
+On silicon it reports through DPRINT with the numbers behind each verdict. ttsim has no device
+print buffer, so there it reports through RISC-V semihosting instead, and only the verdicts;
+ttsim's own README points at source-level instrumentation for anything more detailed.
 
 ## Build
 
@@ -52,22 +44,29 @@ cd /home/ubuntu/tt-metal
 
 ```bash
 cp tt_metal/soc_descriptors/blackhole_140_arch.yaml /home/ubuntu/ttsim/src/_out/release_bh/soc_descriptor.yaml
-TT_METAL_SIMULATOR=/home/ubuntu/ttsim/src/_out/release_bh/libttsim.so \
-  ./build_Release/programming_examples/metal_example_matmul_fp32_acc_check
+TTSIM_SEMIHOSTING=1 TT_METAL_SIMULATOR=/home/ubuntu/ttsim/src/_out/release_bh/libttsim.so \
+  ./build_Release/programming_examples/metal_example_matmul_fp32_accurate
 ```
 
-Only the check program runs here, and `TT_METAL_DPRINT_CORES` must stay unset: ttsim does not
-implement the device print buffer, so a kernel that prints waits forever for a host flush that
-never comes.
+`TTSIM_SEMIHOSTING=1` is what lets the kernels report at all here, and `TT_METAL_DPRINT_CORES`
+must stay unset: ttsim does not implement the device print buffer, so a kernel that uses DPRINT
+waits forever for a host flush that never comes. The verdicts look like this:
 
-Expect two to three minutes. ttsim simulates the reader's per-datum loop instruction by
-instruction; on silicon it is not measurable.
+```
+check=device_all_elements_within_bound result=OK
+check=accuracy_monotone_in_useful_per_sop result=OK
+check=s1_within_bound result=OK
+check=s8_over_bound result=OK
+check=s8_vs_llk_order_only result=OK
+```
+
+Expect around ten minutes. ttsim simulates the readers' per-datum loops instruction by
+instruction, nine cores of them; on silicon none of it is measurable.
 
 ## Run on real device
 
 ```bash
 unset TT_METAL_SIMULATOR
-./build_Release/programming_examples/metal_example_matmul_fp32_acc_check
 TT_METAL_DPRINT_CORES=all ./build_Release/programming_examples/metal_example_matmul_fp32_accurate
 ```
 
@@ -114,7 +113,7 @@ unchanged, so the accuracy runs are never affected.
 
 ```bash
 MM_ZONE_PER_K_TILE=1 TT_METAL_DEVICE_PROFILER=1 \
-  ./build_Release/programming_examples/metal_example_matmul_fp32_acc_check
+  ./build_Release/programming_examples/metal_example_matmul_fp32_accurate
 # zone durations land in generated/profiler/.logs/profile_log_device.csv, one START/END pair per
 # K iteration per TRISC
 ```
@@ -143,8 +142,8 @@ Numerical Algorithms, 2nd ed., section 3.1):
 |computed - exact| <= gamma_n * sum_k |a_k * b_k|,   gamma_n = n*u / (1 - n*u),   u = 2^-24
 ```
 
-This is the bound a correct FP32-accumulating dot product must respect. `spread` and `uniform`
-must satisfy it; `packed` must violate it. Earlier versions of this example used hand-picked
+This is the bound a correct FP32-accumulating dot product must respect. `USEFUL_PER_SOP=1` must
+satisfy it and `USEFUL_PER_SOP=8` must not. Earlier versions of this example used hand-picked
 "effective bits" thresholds with no derivation behind them.
 
 ## MVMUL issue order
@@ -167,14 +166,7 @@ row-granular, and the math/pack handshake is per Dst section rather than per row
 
 ## How to read output
 
-- `check=*_layout_worst_element`: expected vs actual at the element with the largest bound-relative
-  error
-- `check=*_layout_err_over_fp32_bound`: worst `|error| / bound`. At or below 1 means the layout
-  behaves like a correct FP32 accumulation
-- `detail elements_within_fp32_bound`: how many of the 1024 outputs satisfy the bound
-- `note ... mvmul_instruction_ratio=`: instruction-count cost of the spread layout
-From `metal_example_matmul_fp32_accurate`, all reported by the aggregator core:
-
+- `check=device_all_elements_within_bound`: each writer's own verdict on the tile it produced
 - `variant=`: one line per variant, with the pass count, the MVMULs per tile and the error
 - `check=s1_within_bound` and `check=s8_over_bound`: `S` really does span from FP32 accuracy back
   to what the LLK matmul achieves
@@ -183,27 +175,25 @@ From `metal_example_matmul_fp32_accurate`, all reported by the aggregator core:
 - `check=s8_vs_llk_order_only`: `S=8` and the LLK matmul differ by no more than reassociating an
   FP32 sum permits
 
+The `variant=` lines and the numbers behind each verdict are silicon only; under ttsim the
+verdicts appear alone.
+
 Measured on Blackhole p150b silicon:
 
 ```
-note gamma_32=1.907352270798246e-06 gamma_256=1.5259021896696422e-05 checked_elements=1024
-check=spread_layout_err_over_fp32_bound expected=1 actual=0.0247595 result=OK
-check=uniform_layout_err_over_fp32_bound expected=1 actual=0 result=OK
-check=packed_layout_err_over_fp32_bound expected=1 actual=620.646 result=OK
-detail elements_within_fp32_bound spread=1024/1024 uniform=1024/1024 packed=12/1024
-detail packed worst_index=162 expected=5.714314600452781 actual=5.707550048828125 ratio=620.646
+check=accuracy_monotone_in_useful_per_sop expected=1 actual=1 first_regression_at=0
+check=s1_within_bound expected=1 actual=1 err_over_bound=0.45486000796485393
+check=s8_over_bound  expected=1 actual=1 err_over_bound=620.64599617158967
+check=s8_vs_llk_order_only expected=1 actual=0.031197124296817688 differing=213/1024 within_order_bound=1
 ```
 
-`spread` and `uniform` satisfy the FP32 bound on every element. `packed` exceeds it by a factor of
-620 and satisfies it on only 12 of 1024 elements, despite identical `fp32_dest_acc_en=true` and
-`MathFidelity::HiFi4`. Only the K-layout differs.
+At `S=1` the result satisfies the FP32 bound on all 1024 elements; at `S=8`, with the same
+`fp32_dest_acc_en=true` and `MathFidelity::HiFi4`, it exceeds it by a factor of 620 and satisfies
+it on 12. Only the SrcA occupancy differs between those two runs.
 
 The practical consequence is that FP32 accuracy through the LLK matmul requires each SOP group to
-span at most ~11 binades, which real data does not promise. `uniform` meets it only because the
-exponents were made to line up, and `spread` only by inflating K eightfold - eight times the DRAM
-footprint and bandwidth as well as the MVMULs, and not something the matmul API offers in any
-case. The FP32-accurate kernel gets there without touching the input: same K, same tiles, at the
-same 8x in MVMULs that `spread` pays anyway.
+span at most ~11 binades, which real data does not promise. The FP32-accurate kernel does not need
+that promise: it gets there on the same input, at the 8x in MVMULs the analysis predicts.
 
 ## The FP32-accurate matmul
 
