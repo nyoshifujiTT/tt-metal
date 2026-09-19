@@ -38,7 +38,7 @@ namespace {
 
 // Which compute kernel to run: the stock compute-API matmul, the B1 rewrite of it, or the C
 // zero-injecting variant.
-enum class KernelVariant { ComputeApi, Custom, CustomB2, CustomB3, ZeroInject };
+enum class KernelVariant { ComputeApi, ZeroInject };
 
 void run_single_core_matmul(
     std::vector<float>& output_tiled,
@@ -129,18 +129,6 @@ void run_single_core_matmul(
     switch (variant) {
         case KernelVariant::ComputeApi:
             compute_kernel = OVERRIDE_KERNEL_PREFIX "matmul/matmul_single_core/kernels/compute/mm.cpp";
-            break;
-        case KernelVariant::Custom:
-            // B1: same matmul, written out as direct UNPACR and MVMUL sequences.
-            compute_kernel = OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/compute/mm_custom.cpp";
-            break;
-        case KernelVariant::CustomB2:
-            // B2: same matmul as B1 with the M dimension contiguous (no i split).
-            compute_kernel = OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/compute/mm_custom_b2.cpp";
-            break;
-        case KernelVariant::CustomB3:
-            // B3: same matmul walked as k -> i -> j, with N innermost.
-            compute_kernel = OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/compute/mm_custom_b3.cpp";
             break;
         case KernelVariant::ZeroInject:
             // C: one useful value per SOP group, walked as l -> k -> i -> j -> f.
@@ -331,61 +319,6 @@ int main() {
             problem::k_dim(problem::Layout::Spread),
             problem::k_dim(problem::Layout::Spread) / problem::k_dim(problem::Layout::Packed));
 
-        // B1: the hand-written LLK kernel must reproduce the compute-API kernel bit for bit. Run
-        // it on all three layouts so the comparison covers both the exact and the lossy regimes.
-        bool custom_matches = true;
-        for (const auto& [name, layout] : std::vector<std::pair<const char*, problem::Layout>>{
-                 {"packed", problem::Layout::Packed},
-                 {"spread", problem::Layout::Spread},
-                 {"uniform", problem::Layout::Uniform}}) {
-            const auto ref = run_raw(layout, true, KernelVariant::ComputeApi);
-            const auto cus = run_raw(layout, true, KernelVariant::Custom);
-            uint32_t mismatches = 0;
-            for (uint32_t i = 0; i < M * N; ++i) {
-                // Bit-exact, not approximate: the two kernels issue the same instructions.
-                if (ref[i] != cus[i]) {
-                    ++mismatches;
-                }
-            }
-            const bool ok = mismatches == 0;
-            custom_matches = custom_matches && ok;
-            fmt::print(
-                "check=custom_kernel_bitexact_{} expected=0 actual={} result={}\n", name, mismatches, okng(ok));
-        }
-
-        // B2 and B3: the same 16 products as B1 without the LLK's M split, issued as k -> j -> i
-        // (M innermost) and k -> i -> j (N innermost). The issue order differs from B1, so the
-        // accumulation order differs and the results are not bit-identical to B1. What must hold
-        // is that they still behave like correct FP32-accumulating matmuls, so they are judged
-        // against the same Higham bound: spread and uniform within bound, packed over it.
-        bool reorder_ok = true;
-        for (const auto& [tag, variant] : std::vector<std::pair<const char*, KernelVariant>>{
-                 {"b2_no_i_split", KernelVariant::CustomB2}, {"b3_n_innermost", KernelVariant::CustomB3}}) {
-            for (const auto& [name, layout, expect_within] :
-                 std::vector<std::tuple<const char*, problem::Layout, bool>>{
-                     {"spread", problem::Layout::Spread, true}, {"uniform", problem::Layout::Uniform, true},
-                     {"packed", problem::Layout::Packed, false}}) {
-                const RunResult r = run(layout, true, variant);
-                const bool within = r.worst_ratio <= 1.0;
-                const bool ok = (within == expect_within);
-                reorder_ok = reorder_ok && ok;
-                fmt::print(
-                    "check={}_{} expected={} actual={} result={}\n",
-                    tag,
-                    name,
-                    expect_within ? "within_bound" : "over_bound",
-                    within ? "within_bound" : "over_bound",
-                    okng(ok));
-                fmt::print(
-                    "detail {} {} err_over_bound={} elements_within={}/{}\n",
-                    tag,
-                    name,
-                    r.worst_ratio,
-                    r.within_bound,
-                    M * N);
-            }
-        }
-
         // C: the zero-injecting kernel runs the same packed layout, at K=32, and must satisfy the
         // FP32 bound that the baseline violates by a factor of 620. Same input, same
         // fp32_dest_acc_en, same fidelity: the only difference is that each SOP group now holds
@@ -410,15 +343,10 @@ int main() {
         // passes and 64*8/S MVMULs. S=1 leaves no intra-group alignment at all; raising S widens
         // the alignment window again and the error grows back towards the baseline.
         //
-        // S=8 fills every lane, so SrcA holds what B1/B2/B3 unpack in one go and the same 16
-        // MVMULs per fidelity phase are issued over it. B3 is the one to compare against: it
-        // walks k, i, j in the same order, whereas B1 splits M around N. The remaining difference
-        // is where the fidelity phase sits - B3 has it outermost, this kernel innermost - so the
-        // four phases and the two k values reach each Dst element in a different order, which FP
-        // addition does not have to be indifferent to. Whether that shows up is measured here
-        // rather than assumed.
+        // S=8 fills every lane, which is the SrcA occupancy the LLK matmul works with, and it
+        // issues the same 64 MVMULs per tile. It is compared against the LLK kernel below.
         bool sweep_ok = true;
-        const auto b3_ref = run_raw(problem::Layout::Packed, true, KernelVariant::CustomB3);
+        const auto llk_ref = run_raw(problem::Layout::Packed, true, KernelVariant::ComputeApi);
         double prev_ratio = -1.0;
         for (uint32_t s = 1; s <= 8; ++s) {
             const RunResult r = run(problem::Layout::Packed, true, KernelVariant::ZeroInject, s);
@@ -462,15 +390,15 @@ int main() {
                 const auto full = run_raw(problem::Layout::Packed, true, KernelVariant::ZeroInject, 8);
                 uint32_t mismatches = 0;
                 for (uint32_t i = 0; i < M * N; ++i) {
-                    if (full[i] != b3_ref[i]) {
+                    if (full[i] != llk_ref[i]) {
                         ++mismatches;
                     }
                 }
                 fmt::print(
-                    "detail sweep_s8_vs_b3 differing_elements={}/{}\n", mismatches, M * N);
-                // S=8 must at least land in the same regime as the ordinary matmul: every lane
-                // useful again, so the intra-group alignment is back and the packed layout must
-                // exceed the FP32 bound just as B1/B2/B3 do.
+                    "detail sweep_s8_vs_llk differing_elements={}/{}\n", mismatches, M * N);
+                // S=8 must land in the same regime as the LLK matmul: every lane useful again,
+                // so the intra-group alignment is back and the packed layout must exceed the
+                // FP32 bound just as the LLK kernel does.
                 const bool ok = r.worst_ratio > 1.0;
                 sweep_ok = sweep_ok && ok;
                 fmt::print(
@@ -484,8 +412,8 @@ int main() {
             sweep_ok ? "monotone" : "not_monotone",
             okng(sweep_ok));
 
-        pass = spread_within_bound && uniform_within_bound && packed_exceeds_bound && custom_matches &&
-               reorder_ok && zi_within_bound && sweep_ok;
+        pass = spread_within_bound && uniform_within_bound && packed_exceeds_bound && zi_within_bound &&
+               sweep_ok;
         if (!mesh_device->close()) {
             pass = false;
         }

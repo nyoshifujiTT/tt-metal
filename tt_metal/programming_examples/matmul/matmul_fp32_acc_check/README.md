@@ -49,7 +49,7 @@ unset TT_METAL_SIMULATOR
 ## Timing
 
 Requires a Tracy-enabled build (`ENABLE_TRACY=ON`). `MM_ZONE_PER_K_TILE` adds a device-profiler
-zone around one K iteration of the B1 and C compute kernels; without it the kernels are built
+zone around one K iteration of the compute kernels; without it the kernels are built
 unchanged, so the accuracy runs are never affected.
 
 ```bash
@@ -87,103 +87,23 @@ This is the bound a correct FP32-accumulating dot product must respect. `spread`
 must satisfy it; `packed` must violate it. Earlier versions of this example used hand-picked
 "effective bits" thresholds with no derivation behind them.
 
-## B1: custom compute kernel
+## MVMUL issue order
 
-`kernels/compute/mm_custom.cpp` performs the same matmul without calling the LLK matmul library.
-Neither `llk_unpack_AB_matmul*` nor `llk_math_matmul*` appears in it:
+The zero-injecting kernel below issues its MVMULs directly rather than through the LLK matmul,
+which raises the question of whether the order the LLK uses is required. It is not. Three
+hand-written kernels established that, and were removed once the answer was in:
 
-- the unpack side programs `Haloize_mode`, the ADC counters and the SrcA/SrcB datum counts, then
-  issues the two `UNPACR`s itself, after taking the unpack context and posting the semaphore;
-- the math side programs `ADDR_MOD_0/1/2/4/5` and issues the 16-`MVMUL` full-tile sequence
-  directly, once per fidelity phase, with no MOP and no replay buffer.
+- `a72b0bb47b8` reproduces the LLK order bit for bit, which is what made the comparison possible
+- `86547bc7a7a` keeps M contiguous, dropping the LLK's split of M around N
+- `5f371c661a3` puts N innermost instead
 
-This is a prerequisite for the planned zero-injection work, which has to change what lands in
-SrcA/SrcB between the unpack and the MVMULs and has to control the MVMUL issue order. Neither is
-reachable through `matmul_tiles()` or through the LLK matmul entry points, which hide both behind
-a MOP.
+All three produce the same accuracy, so `k`, `i` and `j` may be walked in any order. The LLK's
+split is inherited from Grayskull, where the MOP was a fixed two-level loop and the ColMajor dest
+face layout let 16 MVMULs fit one run while RowMajor fit only 8 (tt-metal#3546, tt-metal#5420).
+Blackhole has REPLAY and no such constraint.
 
-Restrictions: full 32x32 tiles (4 faces per operand), no transpose, `ct_dim = rt_dim = 1`.
-
-Two details cost real debugging time and are worth recording. The closing `SETRWC` must release
-**both** source registers: `CLR_A` after the last fidelity phase and `CLR_B` at the end of the
-reuse row. Releasing only SrcA leaves SrcB permanently valid and the unpacker blocks forever on
-the next tile. Separately, `TTI_*` macros expand to inline asm statements, so they cannot be
-placed inside `UNPACK((...))` / `MATH((...))`, which require an expression; they have to live in a
-function that the macro then calls.
-
-The example runs both kernels on all three layouts and requires bit-exact agreement. The check was
-validated with a negative control: changing the addr_mod of the final MVMUL in the custom kernel
-turns all three checks into `NG` (128/1024 elements differing).
-
-## B2: the same matmul with M contiguous
-
-`kernels/compute/mm_custom_b2.cpp` answers a question B1 raises. B1 issues the 16 MVMULs in the
-order the LLK uses, which splits M into a face index (outer) and an 8-row half (inner) with N in
-between:
-
-```
-B0A0 B0A0 B0A1 B0A1  B2A0 B2A0 B2A1 B2A1  B1A2 B1A2 B1A3 B1A3  B3A2 B3A2 B3A3 B3A3
-```
-
-That split is inherited, not required. It dates to Grayskull, where the MOP was a fixed two-level
-loop: with the ColMajor dest face layout 16 MVMULs fit one MOP run, while RowMajor only fit 8 and
-needed extra `SETRWC`s in the math thread. The Grayskull code shows this directly, as
-`ckernel_template tmp(2, 8, ...)` for ColMajor against `tmp(2, 4, ...)` for RowMajor. Blackhole has
-REPLAY and does not have that constraint, ColMajor was deleted for Wormhole B0 and the
-`DstTileFaceLayout` parameter was removed entirely, yet the instruction order carried over. See
-tt-metal#3546 and tt-metal#5420 for the contemporaneous discussion.
-
-Nothing else was found to depend on the order. The packer can start anywhere in Dst and can pack
-row-granular (`pack_rows`, 1 to 64 rows), and the math/pack handshake is per Dst section rather
-than per row, so neither constrains how math fills a tile.
-
-B2 therefore walks `for k in 0,1: for j in 0,1: for i in 0..3` with M contiguous and innermost.
-Same 16 products, same Dst, different issue order, so the accumulation order differs and the
-result is *not* bit-identical to B1. It is judged against the same Higham bound instead.
-
-Measured, identical on ttsim and on Blackhole p150b silicon, and identical to B1's ratios:
-
-```
-check=b2_no_i_split_spread  expected=within_bound actual=within_bound result=OK
-detail b2 spread  err_over_bound=0.0247595  elements_within=1024/1024
-check=b2_no_i_split_uniform expected=within_bound actual=within_bound result=OK
-detail b2 uniform err_over_bound=0          elements_within=1024/1024
-check=b2_no_i_split_packed  expected=over_bound   actual=over_bound   result=OK
-detail b2 packed  err_over_bound=620.646    elements_within=12/1024
-```
-
-So the split is safe to drop: M can be kept contiguous with the same four increments, the same
-instruction count, and the same accuracy.
-
-One detail cost real debugging time. Moving Dst backwards cannot be done by wrapping. The SrcA and
-SrcB counters are 6-bit and wrap at 64 rows, but the Dst counter is 10-bit (`uint10_t Dst, Dst_Cr`
-in the ISA's RWCs) and wraps at 1024, so a `dest` increment of 40 intended as -24 just keeps
-climbing: measured, Dst went 0,8,32,40 then 80,88,112,120,128 and never came back. The backward
-moves use the `cr` marker instead - advance the marker by 16 on the `j` step, clear it on the `k`
-step.
-
-## B3: the same matmul with N innermost
-
-B2 shows one replacement order works. B3 (`kernels/compute/mm_custom_b3.cpp`) is the remaining
-permutation, `for k in 0,1: for i in 0..3: for j in 0,1`, so the conclusion is that the order is
-free rather than that one particular substitution happens to be safe. Same 16 products, same Dst,
-same instruction count, five address modes as in B1 and B2.
-
-Dst needs two different backward moves here, -8 between `i` steps and -56 on the `k` step, which a
-single marker cannot park on directly. They are expressed as forward motion instead: the marker
-walks the pair bases 0, 8, 32, 40 (advancing by 8 or 24) and the `j` step moves +16 forward from
-it. The `k` step clears the marker.
-
-Measured, identical to B1 and B2 ratios:
-
-```
-check=b3_n_innermost_spread  expected=within_bound actual=within_bound result=OK
-detail b3_n_innermost spread  err_over_bound=0.0247595 elements_within=1024/1024
-check=b3_n_innermost_uniform expected=within_bound actual=within_bound result=OK
-detail b3_n_innermost uniform err_over_bound=0        elements_within=1024/1024
-check=b3_n_innermost_packed  expected=over_bound   actual=over_bound   result=OK
-detail b3_n_innermost packed  err_over_bound=620.646  elements_within=12/1024
-```
+Nothing was found to depend on the order: the packer can start anywhere in Dst and can pack
+row-granular, and the math/pack handshake is per Dst section rather than per row.
 
 ## How to read output
 
@@ -192,8 +112,6 @@ detail b3_n_innermost packed  err_over_bound=620.646  elements_within=12/1024
 - `check=*_layout_err_over_fp32_bound`: worst `|error| / bound`. At or below 1 means the layout
   behaves like a correct FP32 accumulation
 - `detail elements_within_fp32_bound`: how many of the 1024 outputs satisfy the bound
-- `check=custom_kernel_bitexact_*`: number of elements where the B1 kernel differs from the
-  compute-API kernel; must be 0
 - `note ... mvmul_instruction_ratio=`: instruction-count cost of the spread layout
 - `detail sweep useful_per_sop=`: one line per `S`, with the pass count, the MVMULs per tile and
   the resulting error
@@ -267,7 +185,7 @@ S   passes  MVMULs/tile  err_over_bound   elements_within
 ```
 
 So the knob spans the whole range: `S=1` is FP32-class on every element, and `S=8` returns
-exactly the 620.646 that B1, B2 and B3 produce, i.e. the accuracy of the ordinary matmul. The
+exactly the 620.646 that the LLK matmul produces, i.e. the accuracy of the ordinary matmul. The
 example checks that the error is monotone in `S`, that `S=1` is within the bound, and that `S=8`
 is back over it.
 
@@ -281,14 +199,14 @@ and `[1,3,5,7]` and every `S` above 4 silently behaves as 4. That showed up as a
 sweep - `S=3` measuring *better* than `S=2` - because with the strided split the groups' exponent
 spreads no longer follow `S`. Contiguous runs make the occupancy actually be `S`.
 
-`S=8` is *not* bit-identical to B3, though it issues the same 16 MVMULs per fidelity phase over
+`S=8` is *not* bit-identical to the LLK matmul, though it issues the same 16 MVMULs per fidelity phase over
 the same fully populated SrcA and walks `k, i, j` in the same order: measured, 213 of 1024
-elements differ. The remaining difference is where the fidelity phase sits. B3 has `f` outermost
+elements differ. The remaining difference is where the fidelity phase sits. The LLK has `f` outermost
 and this kernel has it innermost, so with `k` being the reduction dimension the four phases and
 the two `k` values reach a given Dst element in a different order:
 
 ```
-B3 : f0k0, f0k1, f1k0, f1k1, f2k0, f2k1, f3k0, f3k1
+LLK: f0k0, f0k1, f1k0, f1k1, f2k0, f2k1, f3k0, f3k1
 C  : k0f0, k0f1, k0f2, k0f3, k1f0, k1f1, k1f2, k1f3
 ```
 
@@ -319,7 +237,7 @@ therefore takes K=`l` and K=`l+8` of one 16-wide K window.
 
 ### Loop order
 
-B1/B2/B3 consume a whole 16-wide K window per MVMUL, so K=32 is exhausted by `k` alone (K0-15,
+The LLK matmul consumes a whole 16-wide K window per MVMUL, so K=32 is exhausted by `k` alone (K0-15,
 K16-31). This kernel uses 2 of the 16 lanes, so the window has to be subdivided further. That
 index is `l` (0..7), selecting the K pair (`l`, `l+8`) within the window. K = `k` x `l` x 2 = 32.
 
@@ -332,7 +250,7 @@ for l in 0..7:            # K pair within the window. The only SrcA rewrite boun
           MVMUL
 ```
 
-`k`, `i` and `j` are free, as B2 and B3 established; they are ordered as in B3. What is not free
+`k`, `i` and `j` are free, as the removed order experiments established. What is not free
 is `l` and `f`, and in both cases the reason is the number of SrcA rewrites:
 
 `l` outermost. SrcB carries the useful values of all four faces after a single UNPACR, so `i` (M
@@ -349,7 +267,7 @@ remainders), not which rows are read and not their contents. So the four phases 
 (l, k, i, j) position. Hoisting `f` above `l` would put `l` inside it and take the SrcA rewrites
 from 8 to 32.
 
-Neither reason applies to B1/B2/B3, where one tile of each operand stays resident for all 64
+Neither reason applies to the LLK matmul, where one tile of each operand stays resident for all 64
 MVMULs: there `f` may sit anywhere, and it is outermost there only because that is where the LLK
 put it.
 
@@ -402,24 +320,24 @@ with its `cr` marker, not by adding the complement.
 
 ### Cost
 
-Per tile at `S=1`: 512 MVMULs against B1's 64, the 8x the analysis predicted; 8 SrcA rewrites of
-8 rows each; 1 SrcB fetch, as in B1. Total bytes moved into SrcA are unchanged - the same rows,
+Per tile at `S=1`: 512 MVMULs against the LLK's 64, the 8x the analysis predicted; 8 SrcA rewrites
+of 8 rows each; 1 SrcB fetch, as in the LLK. Total bytes moved into SrcA are unchanged - same rows,
 split across 64 UNPACRs of one row each instead of 1 of a whole tile - plus one bank-clear per
 `l`. In general it is `64*ceil(8/S)` MVMULs and `ceil(8/S)` rewrites, so the MVMUL cost falls back
-to B1's at `S=8`.
+to the LLK's at `S=8`.
 
 Measured on silicon with a device-profiler zone around one K iteration (`MM_ZONE_PER_K_TILE=1`,
 `TT_METAL_DEVICE_PROFILER=1`), at `S=1`, Blackhole p150b at 1350 MHz, cycles:
 
 ```
-TRISC          B1 (median of 10)   C (S=1)   ratio
+TRISC          LLK (median of 10)  C (S=1)   ratio
 TRISC_0 UNPACK       1168            3519     3.01x
 TRISC_1 MATH         1167            3980     3.41x
 TRISC_2 PACK           21              33     1.57x
 ```
 
-MATH is 3.4x, not the 8x the MVMUL count suggests, because B1's math thread is not MVMUL-bound:
-1167 cycles for 64 MVMULs is 18 cycles each, against 7.8 for C's 512. C fills in stalls that B1
+MATH is 3.4x, not the 8x the MVMUL count suggests, because the LLK's math thread is not
+MVMUL-bound: 1167 cycles for 64 MVMULs is 18 cycles each, against 7.8 for C's 512. C fills stalls that the LLK
 spent waiting on the unpacker. With MATH at 3980 against UNPACK's 3519, C has moved the
 bottleneck onto the math thread. The TRISC numbering is from
 `tt_metal/llrt/hal/tt-1xx/hal_1xx_common.cpp`.
