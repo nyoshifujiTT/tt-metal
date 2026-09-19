@@ -21,9 +21,14 @@
 
 #include "tt-metalium/core_coord.hpp"
 
+#include "problem.hpp"
+
 using namespace tt::constants;
 using namespace tt;
 using namespace tt::tt_metal;
+// This file already pulls in three namespaces wholesale, and tt_metal has its own Layout, so the
+// problem definitions are reached through an alias instead of a fourth using-directive.
+namespace problem = mm_fp32_acc_check;
 
 #ifndef OVERRIDE_KERNEL_PREFIX
 #define OVERRIDE_KERNEL_PREFIX ""
@@ -31,43 +36,11 @@ using namespace tt::tt_metal;
 
 namespace {
 
-// A[m][kk] and B[kk][nn] both vary along every axis, so a transposed or face-swapped operand
-// cannot go unnoticed: the K-dependent factor carries the exponent spread under test, and the
-// m/n-dependent factors make each output element a distinct value.
-//
-// A[m][kk] = (1 + m/M) * terms[kk], B[kk][nn] = (1 + nn/N)
-// so exact C[m][nn] = (1 + m/M) * (1 + nn/N) * sum_kk terms[kk].
-// Every output element is a different multiple of the same sum, which is what makes the
-// K-layout comparison meaningful across the whole tile rather than at element 0 only.
-std::vector<bfloat16> build_input_a(uint32_t m, uint32_t k, const std::vector<float>& terms) {
-    std::vector<bfloat16> a(m * k, bfloat16(0.0f));
-    for (uint32_t mm = 0; mm < m; ++mm) {
-        const float row_scale = 1.0f + static_cast<float>(mm) / static_cast<float>(m);
-        for (uint32_t kk = 0; kk < k; ++kk) {
-            a[mm * k + kk] = bfloat16(row_scale * terms[kk]);
-        }
-    }
-    return a;
-}
-
-std::vector<bfloat16> build_input_b(uint32_t k, uint32_t n) {
-    std::vector<bfloat16> b(k * n, bfloat16(0.0f));
-    for (uint32_t kk = 0; kk < k; ++kk) {
-        for (uint32_t nn = 0; nn < n; ++nn) {
-            b[kk * n + nn] = bfloat16(1.0f + static_cast<float>(nn) / static_cast<float>(n));
-        }
-    }
-    return b;
-}
-
-
 // Which compute kernel to run: the stock compute-API matmul, the B1 rewrite of it, or the C
 // zero-injecting variant.
 enum class KernelVariant { ComputeApi, Custom, CustomB2, CustomB3, ZeroInject };
 
 void run_single_core_matmul(
-    const std::vector<bfloat16>& a_tiled,
-    const std::vector<bfloat16>& b_tiled,
     std::vector<float>& output_tiled,
     uint32_t m,
     uint32_t n,
@@ -76,7 +49,9 @@ void run_single_core_matmul(
     const std::shared_ptr<distributed::MeshDevice>& mesh_device,
     KernelVariant variant = KernelVariant::ComputeApi,
     // Useful values per 8-lane SOP group for the ZeroInject kernel, 1 to 8. Ignored otherwise.
-    uint32_t useful_per_sop = 1) {
+    uint32_t useful_per_sop = 1,
+    // Which K-layout the reader should materialise.
+    problem::Layout layout = problem::Layout::Packed) {
     distributed::MeshCommandQueue& cq = mesh_device->mesh_command_queue();
     distributed::MeshWorkload workload;
     distributed::MeshCoordinateRange device_range(mesh_device->shape());
@@ -90,21 +65,15 @@ void run_single_core_matmul(
     const uint32_t input_tile_size = sizeof(bfloat16) * TILE_HEIGHT * TILE_WIDTH;
     const uint32_t output_tile_size = sizeof(float) * TILE_HEIGHT * TILE_WIDTH;
 
-    distributed::DeviceLocalBufferConfig dram_input_config{
-        .page_size = input_tile_size,
-        .buffer_type = tt_metal::BufferType::DRAM,
-    };
     distributed::DeviceLocalBufferConfig dram_output_config{
         .page_size = output_tile_size,
         .buffer_type = tt_metal::BufferType::DRAM,
     };
 
-    distributed::ReplicatedBufferConfig buffer_config_a{.size = static_cast<uint32_t>(sizeof(bfloat16) * a_tiled.size())};
-    distributed::ReplicatedBufferConfig buffer_config_b{.size = static_cast<uint32_t>(sizeof(bfloat16) * b_tiled.size())};
     distributed::ReplicatedBufferConfig buffer_config_c{.size = static_cast<uint32_t>(sizeof(float) * output_tiled.size())};
 
-    auto src0_dram_buffer = distributed::MeshBuffer::create(buffer_config_a, dram_input_config, mesh_device.get());
-    auto src1_dram_buffer = distributed::MeshBuffer::create(buffer_config_b, dram_input_config, mesh_device.get());
+    // The operands never leave the device: the reader materialises them straight into L1 from
+    // constant expressions, so only the output needs a DRAM buffer.
     auto dst_dram_buffer = distributed::MeshBuffer::create(buffer_config_c, dram_output_config, mesh_device.get());
 
     constexpr tt::DataFormat cb_data_format = tt::DataFormat::Float16_b;
@@ -130,18 +99,16 @@ void run_single_core_matmul(
             .set_page_size(output_cb_index, output_tile_size);
     tt_metal::CreateCircularBuffer(program, core, cb_output_config);
 
-    std::vector<uint32_t> reader_compile_time_args;
-    TensorAccessorArgs(*src0_dram_buffer).append_to(reader_compile_time_args);
-    TensorAccessorArgs(*src1_dram_buffer).append_to(reader_compile_time_args);
-
-    const auto reader_id = tt_metal::CreateKernel(
+    tt_metal::CreateKernel(
         program,
-        OVERRIDE_KERNEL_PREFIX "matmul/matmul_single_core/kernels/dataflow/reader_single_core_mm.cpp",
+        OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/dataflow/reader_constexpr_mm.cpp",
         core,
         tt_metal::DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_1,
             .noc = NOC::RISCV_1_default,
-            .compile_args = reader_compile_time_args,
+            // The operands are compile-time constants; the layout under test is all the reader
+            // needs to know.
+            .defines = {{"LAYOUT_ID", std::to_string(static_cast<uint32_t>(layout))}},
         });
 
     std::vector<uint32_t> writer_compile_time_args;
@@ -203,12 +170,9 @@ void run_single_core_matmul(
             .defines = compute_defines,
         });
 
-    tt_metal::SetRuntimeArgs(
-        program, reader_id, core, {src0_dram_buffer->address(), src1_dram_buffer->address(), mt, kt, nt});
+    // The reader takes no runtime args: its operands are compile-time constants.
     tt_metal::SetRuntimeArgs(program, writer_id, core, {dst_dram_buffer->address(), mt, nt});
 
-    distributed::EnqueueWriteMeshBuffer(cq, src0_dram_buffer, a_tiled, false);
-    distributed::EnqueueWriteMeshBuffer(cq, src1_dram_buffer, b_tiled, false);
     workload.add_program(device_range, std::move(program));
     distributed::EnqueueMeshWorkload(cq, workload, false);
     distributed::EnqueueReadMeshBuffer(cq, output_tiled, dst_dram_buffer, true);
@@ -220,22 +184,11 @@ void print_check(const char* name, double expected, double actual, bool ok) {
     fmt::print("check={} expected={} actual={} result={}\n", name, expected, actual, okng(ok));
 }
 
-// Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., section 3.1:
-// a length-n inner product accumulated in a format with unit roundoff u satisfies
-//   |computed - exact| <= gamma_n * sum_k |a_k * b_k|,   gamma_n = n*u / (1 - n*u).
-// With an FP32 accumulator u = 2^-24. This is the bound a correct FP32-accumulating dot product
-// must respect; it replaces the hand-picked "effective bits" thresholds this example used before,
-// which had no derivation behind them.
-double gamma_n(uint32_t n) {
-    constexpr double u = 1.0 / 16777216.0;  // 2^-24
-    const double nu = static_cast<double>(n) * u;
-    return nu / (1.0 - nu);
-}
-
-void print_terms(const std::vector<float>& terms) {
+void print_terms(problem::Layout layout) {
+    const uint32_t k = problem::k_dim(layout);
     fmt::print("input_terms=[");
-    for (size_t i = 0; i < terms.size(); ++i) {
-        fmt::print("{}{}", terms[i], (i + 1 == terms.size()) ? "" : ",");
+    for (uint32_t i = 0; i < k; ++i) {
+        fmt::print("{}{}", problem::term_at(layout, i), (i + 1 == k) ? "" : ",");
     }
     fmt::print("]\n");
 }
@@ -250,40 +203,17 @@ void print_terms(const std::vector<float>& terms) {
 
 int main() {
     constexpr int device_id = 0;
-    constexpr uint32_t M = TILE_HEIGHT;
-    constexpr uint32_t N = TILE_WIDTH;
-    constexpr uint32_t NUM_VALUES = 32;
     // Each MVMUL reduces 16 K-elements as two independent 8-lane SOP groups. Products inside a
     // group are aligned to the group's max exponent with only ~12 bits of headroom, so a term more
-    // than ~11 binades below its group maximum is dropped before the FP32 accumulator ever sees it.
-    constexpr uint32_t SOP_GROUP_LANES = 8;
+    // than ~11 binades below its group maximum is dropped before the FP32 accumulator ever sees
+    // it. The three K-layouts that probe this are defined in problem.hpp.
+    constexpr uint32_t M = problem::kM;
+    constexpr uint32_t N = problem::kN;
 
     bool pass = true;
 
     try {
         auto mesh_device = distributed::MeshDevice::create_unit_mesh(device_id);
-
-        // 32 values whose exponents span ~21 bits. Packed together they exceed the intra-group
-        // alignment window; spread one-per-group they do not.
-        std::vector<float> values(NUM_VALUES);
-        for (uint32_t j = 0; j < NUM_VALUES; ++j) {
-            values[j] = std::ldexp(1.0f + 0.125f * (j % 8), -3 * static_cast<int>(j % 8));
-        }
-
-        std::vector<float> packed(values);
-        std::vector<float> spread(NUM_VALUES * SOP_GROUP_LANES, 0.0f);
-        for (uint32_t j = 0; j < NUM_VALUES; ++j) {
-            spread[SOP_GROUP_LANES * j] = values[j];
-        }
-
-        // Third layout: every lane of every SOP group carries a useful value, but all values within
-        // a group share one exponent, so no intra-group right-shift happens. This isolates the
-        // alignment window from the group size: a full 8-wide group is not itself a problem.
-        std::vector<float> uniform(NUM_VALUES, 0.0f);
-        for (uint32_t j = 0; j < NUM_VALUES; ++j) {
-            const uint32_t group = j / SOP_GROUP_LANES;
-            uniform[j] = std::ldexp(1.0f, -3 * static_cast<int>(group));
-        }
 
         // One run: build the operands, quantize the reference from the same BF16 datums the device
         // actually receives, run the device matmul, and compare every output element against
@@ -298,58 +228,41 @@ int main() {
         };
 
         // Raw device output for one layout, so the two compute kernels can be compared directly.
-        auto run_raw = [&](const std::vector<float>& terms,
+        auto run_raw = [&](problem::Layout layout,
                            bool fp32_dest_acc_en,
                            KernelVariant variant,
                            uint32_t useful_per_sop = 1) {
-            const uint32_t k = static_cast<uint32_t>(terms.size());
-            auto a = build_input_a(M, k, terms);
-            auto b = build_input_b(k, N);
-            auto a_tiled = tilize_nfaces(a, M, k);
-            auto b_tiled = tilize_nfaces(b, k, N);
+            const uint32_t k = problem::k_dim(layout);
             std::vector<float> out_tiled(M * N, 0.0f);
             run_single_core_matmul(
-                a_tiled, b_tiled, out_tiled, M, N, k, fp32_dest_acc_en, mesh_device, variant, useful_per_sop);
+                out_tiled, M, N, k, fp32_dest_acc_en, mesh_device, variant, useful_per_sop, layout);
             return untilize_nfaces(out_tiled, M, N);
         };
 
-        auto run = [&](const std::vector<float>& terms,
+        auto run = [&](problem::Layout layout,
                        bool fp32_dest_acc_en,
                        KernelVariant variant = KernelVariant::ComputeApi,
                        uint32_t useful_per_sop = 1) {
-            const uint32_t k = static_cast<uint32_t>(terms.size());
-            auto a = build_input_a(M, k, terms);
-            auto b = build_input_b(k, N);
+            const uint32_t k = problem::k_dim(layout);
 
-            // Reference from the BF16 datums, not from the pre-rounding floats: the device never
-            // sees the float values, so comparing against them would fold BF16 input quantization
-            // into what is meant to be a measurement of accumulator behaviour.
+            // Reference and bound come from problem.hpp, which the reader uses too, so both sides
+            // are built from the same definitions.
             std::vector<double> expected(M * N, 0.0);
             std::vector<double> abs_sum(M * N, 0.0);
             for (uint32_t mm = 0; mm < M; ++mm) {
                 for (uint32_t nn = 0; nn < N; ++nn) {
-                    double acc = 0.0;
-                    double abs_acc = 0.0;
-                    for (uint32_t kk = 0; kk < k; ++kk) {
-                        const double term = static_cast<double>(static_cast<float>(a[mm * k + kk])) *
-                                            static_cast<double>(static_cast<float>(b[kk * N + nn]));
-                        acc += term;
-                        abs_acc += std::fabs(term);
-                    }
-                    expected[mm * N + nn] = acc;
-                    abs_sum[mm * N + nn] = abs_acc;
+                    expected[mm * N + nn] = problem::expected_at(layout, mm, nn);
+                    abs_sum[mm * N + nn] = problem::abs_sum_at(layout, mm, nn);
                 }
             }
 
-            auto a_tiled = tilize_nfaces(a, M, k);
-            auto b_tiled = tilize_nfaces(b, k, N);
             std::vector<float> out_tiled(M * N, 0.0f);
             run_single_core_matmul(
-                a_tiled, b_tiled, out_tiled, M, N, k, fp32_dest_acc_en, mesh_device, variant, useful_per_sop);
+                out_tiled, M, N, k, fp32_dest_acc_en, mesh_device, variant, useful_per_sop, layout);
             auto out = untilize_nfaces(out_tiled, M, N);
 
             // The bound scales with the number of accumulated products, which is K.
-            const double g = gamma_n(k);
+            const double g = problem::gamma_n(k);
             // Seed with element 0 so the reported "worst element" is always a real element, even
             // when the layout is exact everywhere and no ratio ever exceeds the seed.
             RunResult r{0.0, expected[0], static_cast<double>(out[0]), 0, g * abs_sum[0], 0};
@@ -371,13 +284,13 @@ int main() {
             return r;
         };
 
-        const RunResult packed_r = run(packed, true);
-        const RunResult spread_r = run(spread, true);
-        const RunResult uniform_r = run(uniform, true);
+        const RunResult packed_r = run(problem::Layout::Packed, true);
+        const RunResult spread_r = run(problem::Layout::Spread, true);
+        const RunResult uniform_r = run(problem::Layout::Uniform, true);
 
-        print_terms(values);
+        print_terms(problem::Layout::Packed);
         fmt::print(
-            "note gamma_32={} gamma_256={} checked_elements={}\n", gamma_n(32), gamma_n(256), M * N);
+            "note gamma_32={} gamma_256={} checked_elements={}\n", problem::gamma_n(32), problem::gamma_n(256), M * N);
 
         // spread and uniform must satisfy the FP32 bound; packed must violate it, which is the
         // whole point: the violation is caused by the intra-SOP alignment, not by fp32_dest_acc_en.
@@ -414,17 +327,19 @@ int main() {
             packed_r.worst_ratio);
         fmt::print(
             "note packed_K={} spread_K={} mvmul_instruction_ratio={}x\n",
-            packed.size(),
-            spread.size(),
-            spread.size() / packed.size());
+            problem::k_dim(problem::Layout::Packed),
+            problem::k_dim(problem::Layout::Spread),
+            problem::k_dim(problem::Layout::Spread) / problem::k_dim(problem::Layout::Packed));
 
         // B1: the hand-written LLK kernel must reproduce the compute-API kernel bit for bit. Run
         // it on all three layouts so the comparison covers both the exact and the lossy regimes.
         bool custom_matches = true;
-        for (const auto& [name, terms] : std::vector<std::pair<const char*, const std::vector<float>*>>{
-                 {"packed", &packed}, {"spread", &spread}, {"uniform", &uniform}}) {
-            const auto ref = run_raw(*terms, true, KernelVariant::ComputeApi);
-            const auto cus = run_raw(*terms, true, KernelVariant::Custom);
+        for (const auto& [name, layout] : std::vector<std::pair<const char*, problem::Layout>>{
+                 {"packed", problem::Layout::Packed},
+                 {"spread", problem::Layout::Spread},
+                 {"uniform", problem::Layout::Uniform}}) {
+            const auto ref = run_raw(layout, true, KernelVariant::ComputeApi);
+            const auto cus = run_raw(layout, true, KernelVariant::Custom);
             uint32_t mismatches = 0;
             for (uint32_t i = 0; i < M * N; ++i) {
                 // Bit-exact, not approximate: the two kernels issue the same instructions.
@@ -446,10 +361,11 @@ int main() {
         bool reorder_ok = true;
         for (const auto& [tag, variant] : std::vector<std::pair<const char*, KernelVariant>>{
                  {"b2_no_i_split", KernelVariant::CustomB2}, {"b3_n_innermost", KernelVariant::CustomB3}}) {
-            for (const auto& [name, terms, expect_within] :
-                 std::vector<std::tuple<const char*, const std::vector<float>*, bool>>{
-                     {"spread", &spread, true}, {"uniform", &uniform, true}, {"packed", &packed, false}}) {
-                const RunResult r = run(*terms, true, variant);
+            for (const auto& [name, layout, expect_within] :
+                 std::vector<std::tuple<const char*, problem::Layout, bool>>{
+                     {"spread", problem::Layout::Spread, true}, {"uniform", problem::Layout::Uniform, true},
+                     {"packed", problem::Layout::Packed, false}}) {
+                const RunResult r = run(layout, true, variant);
                 const bool within = r.worst_ratio <= 1.0;
                 const bool ok = (within == expect_within);
                 reorder_ok = reorder_ok && ok;
@@ -474,7 +390,7 @@ int main() {
         // FP32 bound that the baseline violates by a factor of 620. Same input, same
         // fp32_dest_acc_en, same fidelity: the only difference is that each SOP group now holds
         // one useful value instead of eight, so there is no intra-group alignment to lose bits to.
-        const RunResult zi_r = run(packed, true, KernelVariant::ZeroInject);
+        const RunResult zi_r = run(problem::Layout::Packed, true, KernelVariant::ZeroInject);
         const bool zi_within_bound = zi_r.worst_ratio <= 1.0;
         print_check("zero_inject_worst_element", zi_r.worst_expected, zi_r.worst_actual, zi_within_bound);
         print_check("zero_inject_err_over_fp32_bound", 1.0, zi_r.worst_ratio, zi_within_bound);
@@ -502,10 +418,10 @@ int main() {
         // addition does not have to be indifferent to. Whether that shows up is measured here
         // rather than assumed.
         bool sweep_ok = true;
-        const auto b3_ref = run_raw(packed, true, KernelVariant::CustomB3);
+        const auto b3_ref = run_raw(problem::Layout::Packed, true, KernelVariant::CustomB3);
         double prev_ratio = -1.0;
         for (uint32_t s = 1; s <= 8; ++s) {
-            const RunResult r = run(packed, true, KernelVariant::ZeroInject, s);
+            const RunResult r = run(problem::Layout::Packed, true, KernelVariant::ZeroInject, s);
             // S need not divide 8: the passes that absorb the remainder are narrower, and the
             // knob's guarantee is an upper bound on how many values share a group. The cost only
             // changes when ceil(8/S) does, so S=5,6,7 cost the same as S=4 and only lose
@@ -543,7 +459,7 @@ int main() {
                     okng(ok));
             }
             if (s == 8) {
-                const auto full = run_raw(packed, true, KernelVariant::ZeroInject, 8);
+                const auto full = run_raw(problem::Layout::Packed, true, KernelVariant::ZeroInject, 8);
                 uint32_t mismatches = 0;
                 for (uint32_t i = 0; i < M * N; ++i) {
                     if (full[i] != b3_ref[i]) {
