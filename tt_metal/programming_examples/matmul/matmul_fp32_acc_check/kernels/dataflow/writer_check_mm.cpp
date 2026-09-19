@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Writer that checks the result on the device.
+// Writer that checks the result on the device, and forwards it to an aggregator core.
 //
 // The reference and the error bound are constant expressions (see problem.hpp), so the verdict
 // can be reached without the host: the writer drains the output into a scratch area of L1, then
@@ -16,6 +16,11 @@
 // The output still goes to DRAM as well. The device-side verdict covers the error bound, but the
 // example also compares whole output tiles between kernels for bit-exactness, which needs the
 // values themselves on the host.
+//
+// With AGGREGATOR_SLOT defined, the drained tile is also written into the aggregator core's
+// scratch, at the slot this run owns, and a semaphore there is incremented. The aggregator waits
+// for all its slots before comparing them, so each sender writes to a distinct region and no
+// handshake is needed before the write.
 
 #include <cstdint>
 
@@ -39,6 +44,12 @@ constexpr double const_abs(double x) { return x < 0.0 ? -x : x; }
 
 void kernel_main() {
     const uint32_t dst_addr = get_arg_val<uint32_t>(0);
+#ifdef AGGREGATOR_SLOT
+    const uint32_t agg_x = get_arg_val<uint32_t>(1);
+    const uint32_t agg_y = get_arg_val<uint32_t>(2);
+    const uint32_t agg_scratch_addr = get_arg_val<uint32_t>(3);
+    const uint32_t agg_semaphore = get_semaphore(get_arg_val<uint32_t>(4));
+#endif
 
     constexpr uint32_t cb_id_out0 = 16;
     // Scratch to drain the output into. It is a circular buffer only so that the framework places
@@ -62,6 +73,18 @@ void kernel_main() {
         for (uint32_t i = 0; i < kTileDatums; ++i) {
             scratch[i] = src[i];
         }
+
+#ifdef AGGREGATOR_SLOT
+        // Send this run's tile to the aggregator, then tell it one more slot is filled.
+        const uint32_t bytes = kTileDatums * sizeof(float);
+        const uint64_t slot_addr = get_noc_addr(agg_x, agg_y, agg_scratch_addr + AGGREGATOR_SLOT * bytes);
+        noc_async_write(l1_read_addr, slot_addr, bytes);
+        noc_async_write_barrier();
+
+        const uint64_t sem_addr = get_noc_addr(agg_x, agg_y, agg_semaphore);
+        noc_semaphore_inc(sem_addr, 1);
+        noc_async_atomic_barrier();
+#endif
     }
     cb_pop_front(cb_id_out0, 1);
 

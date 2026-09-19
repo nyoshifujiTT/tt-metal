@@ -44,41 +44,37 @@ namespace {
 // whose exponents spread within an SOP group. Fp32Accurate is this example's answer to that.
 enum class KernelVariant { LlkInaccurate, Fp32Accurate };
 
-void run_single_core_matmul(
-    std::vector<float>& output_tiled,
+// Where a variant should forward its output tile, when several run at once.
+struct AggregatorTarget {
+    CoreCoord core;
+    uint32_t slot = 0;
+    uint32_t scratch_addr = 0;
+    uint32_t semaphore_id = 0;
+};
+
+// Places one variant on one core: the reader that materialises the operands, the compute kernel
+// under test, and the writer that drains and checks the result.
+void place_variant(
+    Program& program,
+    CoreCoord core,
+    const std::shared_ptr<distributed::MeshBuffer>& dst_dram_buffer,
     uint32_t m,
     uint32_t n,
     uint32_t k,
     bool fp32_dest_acc_en,
-    const std::shared_ptr<distributed::MeshDevice>& mesh_device,
-    KernelVariant variant = KernelVariant::LlkInaccurate,
-    // Useful values per 8-lane SOP group for the Fp32Accurate kernel, 1 to 8. Ignored otherwise.
-    uint32_t useful_per_sop = 1,
-    // Which K-layout the reader should materialise.
-    problem::Layout layout = problem::Layout::Packed) {
-    distributed::MeshCommandQueue& cq = mesh_device->mesh_command_queue();
-    distributed::MeshWorkload workload;
-    distributed::MeshCoordinateRange device_range(mesh_device->shape());
-    Program program{};
-    CoreCoord core({0, 0});
+    KernelVariant variant,
+    uint32_t useful_per_sop,
+    problem::Layout layout,
+    const AggregatorTarget* aggregator = nullptr) {
 
     const uint32_t mt = m / TILE_HEIGHT;
     const uint32_t kt = k / TILE_WIDTH;
     const uint32_t nt = n / TILE_WIDTH;
 
+    // The operands never leave the device: the reader materialises them straight into L1 from
+    // constant expressions, so only the output needs a DRAM buffer, and the caller owns it.
     const uint32_t input_tile_size = sizeof(bfloat16) * TILE_HEIGHT * TILE_WIDTH;
     const uint32_t output_tile_size = sizeof(float) * TILE_HEIGHT * TILE_WIDTH;
-
-    distributed::DeviceLocalBufferConfig dram_output_config{
-        .page_size = output_tile_size,
-        .buffer_type = tt_metal::BufferType::DRAM,
-    };
-
-    distributed::ReplicatedBufferConfig buffer_config_c{.size = static_cast<uint32_t>(sizeof(float) * output_tiled.size())};
-
-    // The operands never leave the device: the reader materialises them straight into L1 from
-    // constant expressions, so only the output needs a DRAM buffer.
-    auto dst_dram_buffer = distributed::MeshBuffer::create(buffer_config_c, dram_output_config, mesh_device.get());
 
     constexpr tt::DataFormat cb_data_format = tt::DataFormat::Float16_b;
     constexpr tt::DataFormat cb_output_format = tt::DataFormat::Float32;
@@ -177,7 +173,43 @@ void run_single_core_matmul(
     // The reader takes no runtime args: its operands are compile-time constants.
     // Mt and Nt are 1 here, and the writer takes its shape from problem.hpp, so the output
     // address is the only runtime argument it needs.
-    tt_metal::SetRuntimeArgs(program, writer_id, core, {dst_dram_buffer->address()});
+    std::vector<uint32_t> writer_args{dst_dram_buffer->address()};
+    if (aggregator != nullptr) {
+        writer_args.push_back(aggregator->core.x);
+        writer_args.push_back(aggregator->core.y);
+        writer_args.push_back(aggregator->scratch_addr);
+        writer_args.push_back(aggregator->semaphore_id);
+    }
+    tt_metal::SetRuntimeArgs(program, writer_id, core, writer_args);
+}
+
+// One variant on one core, run to completion, with the output tile read back.
+void run_single_core_matmul(
+    std::vector<float>& output_tiled,
+    uint32_t m,
+    uint32_t n,
+    uint32_t k,
+    bool fp32_dest_acc_en,
+    const std::shared_ptr<distributed::MeshDevice>& mesh_device,
+    KernelVariant variant = KernelVariant::LlkInaccurate,
+    uint32_t useful_per_sop = 1,
+    problem::Layout layout = problem::Layout::Packed) {
+    distributed::MeshCommandQueue& cq = mesh_device->mesh_command_queue();
+    distributed::MeshWorkload workload;
+    distributed::MeshCoordinateRange device_range(mesh_device->shape());
+    Program program{};
+    CoreCoord core({0, 0});
+
+    const uint32_t output_tile_size = sizeof(float) * TILE_HEIGHT * TILE_WIDTH;
+    distributed::DeviceLocalBufferConfig dram_output_config{
+        .page_size = output_tile_size,
+        .buffer_type = tt_metal::BufferType::DRAM,
+    };
+    distributed::ReplicatedBufferConfig buffer_config_c{
+        .size = static_cast<uint32_t>(sizeof(float) * output_tiled.size())};
+    auto dst_dram_buffer = distributed::MeshBuffer::create(buffer_config_c, dram_output_config, mesh_device.get());
+
+    place_variant(program, core, dst_dram_buffer, m, n, k, fp32_dest_acc_en, variant, useful_per_sop, layout);
 
     workload.add_program(device_range, std::move(program));
     distributed::EnqueueMeshWorkload(cq, workload, false);
