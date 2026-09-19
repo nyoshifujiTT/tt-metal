@@ -58,6 +58,41 @@ from the constant expressions in `problem.hpp` rather than from anything the hos
 0:0-0:BR: device_check layout=0 worst_index=162 expected=5.7143146004527807 actual=5.707550048828125 bound=1.0899210929229183e-05 err_over_bound=620.64599617158967 within=12/1024
 ```
 
+With `TT_METAL_DPRINT_CORES=all` it also prints the nine-variant table described below, which
+needs the aggregator core as well.
+
+## All nine variants at once
+
+`USEFUL_PER_SOP` 1 through 8 and the LLK matmul run at the same time, one per core, each
+forwarding its output tile to an aggregator core that reports on all of them. The table comes
+from a single run under one set of conditions, rather than from nine launches the reader would
+have to take on trust, and the aggregator can compare two variants against each other, which no
+single launch can do.
+
+Measured on Blackhole p150b, on the `packed` layout:
+
+```
+variant=useful_per_sop=1 passes=8 mvmuls_per_tile=512 err_over_bound=0.45486000796485393 within=1024/1024
+variant=useful_per_sop=2 passes=4 mvmuls_per_tile=256 err_over_bound=197.35316667277633  within=252/1024
+variant=useful_per_sop=3 passes=3 mvmuls_per_tile=192 err_over_bound=359.54992618992725  within=38/1024
+variant=useful_per_sop=4 passes=2 mvmuls_per_tile=128 err_over_bound=429.72232546641089  within=9/1024
+variant=useful_per_sop=5 passes=2 mvmuls_per_tile=128 err_over_bound=594.92117527914115  within=7/1024
+variant=useful_per_sop=6 passes=2 mvmuls_per_tile=128 err_over_bound=617.14602053996396  within=6/1024
+variant=useful_per_sop=7 passes=2 mvmuls_per_tile=128 err_over_bound=620.29599860842711  within=10/1024
+variant=useful_per_sop=8 passes=1 mvmuls_per_tile=64  err_over_bound=620.64599617158967  within=12/1024
+variant=llk                      mvmuls_per_tile=64  err_over_bound=620.64599617158967  within=12/1024
+check=s8_vs_llk_order_only expected=1 actual=0.031197124296817688 differing=213/1024 within_order_bound=1
+```
+
+`S=1` satisfies the FP32 bound on every element at 8x the LLK's MVMULs; `S=8` matches the LLK's
+error exactly at the same MVMUL count.
+
+The last line is what ties the two ends together. `S=8` and the LLK reduce the same 32 products
+with the same intra-group truncation, so they should differ only in the order the partial sums
+reach Dst. Summing `n` terms in two orders can separate the results by at most `2 * gamma_n *
+sum|a_k b_k|`, and the measured difference is 3.1% of that. The 213 elements that differ do so
+legitimately: the two are the same computation, reassociated.
+
 ## Timing
 
 Requires a Tracy-enabled build (`ENABLE_TRACY=ON`). `MM_ZONE_PER_K_TILE` adds a device-profiler

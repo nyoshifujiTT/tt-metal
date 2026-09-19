@@ -48,7 +48,6 @@ enum class KernelVariant { LlkInaccurate, Fp32Accurate };
 struct AggregatorTarget {
     CoreCoord core;
     uint32_t slot = 0;
-    uint32_t scratch_addr = 0;
     uint32_t semaphore_id = 0;
 };
 
@@ -101,12 +100,15 @@ void place_variant(
 
     // Scratch for the writer to drain the output into before checking it. A circular buffer is
     // just a convenient way to have the framework place an L1 region; the writer addresses it
-    // directly rather than going through the CB protocol.
-    constexpr uint32_t scratch_cb_index = CBIndex::c_24;
-    CircularBufferConfig cb_scratch_config =
-        CircularBufferConfig(output_tile_size, {{scratch_cb_index, cb_output_format}})
-            .set_page_size(scratch_cb_index, output_tile_size);
-    tt_metal::CreateCircularBuffer(program, core, cb_scratch_config);
+    // directly rather than going through the CB protocol. When several variants share an
+    // aggregator the caller places this buffer across all the cores at once, so skip it here.
+    if (aggregator == nullptr) {
+        constexpr uint32_t scratch_cb_index = CBIndex::c_24;
+        CircularBufferConfig cb_scratch_config =
+            CircularBufferConfig(output_tile_size, {{scratch_cb_index, cb_output_format}})
+                .set_page_size(scratch_cb_index, output_tile_size);
+        tt_metal::CreateCircularBuffer(program, core, cb_scratch_config);
+    }
 
     tt_metal::CreateKernel(
         program,
@@ -123,6 +125,14 @@ void place_variant(
     std::vector<uint32_t> writer_compile_time_args;
     TensorAccessorArgs(*dst_dram_buffer).append_to(writer_compile_time_args);
 
+    std::map<std::string, std::string> writer_defines{
+        // The writer reaches its own verdict from the same constant expressions the reader uses,
+        // so it needs to know which layout is being run.
+        {"LAYOUT_ID", std::to_string(static_cast<uint32_t>(layout))}};
+    if (aggregator != nullptr) {
+        writer_defines["AGGREGATOR_SLOT"] = std::to_string(aggregator->slot);
+    }
+
     const auto writer_id = tt_metal::CreateKernel(
         program,
         OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/dataflow/writer_check_mm.cpp",
@@ -131,9 +141,7 @@ void place_variant(
             .processor = DataMovementProcessor::RISCV_0,
             .noc = NOC::RISCV_0_default,
             .compile_args = writer_compile_time_args,
-            // The writer reaches its own verdict from the same constant expressions the reader
-            // uses, so it needs to know which layout is being run.
-            .defines = {{"LAYOUT_ID", std::to_string(static_cast<uint32_t>(layout))}},
+            .defines = writer_defines,
         });
 
     std::vector<uint32_t> compute_compile_time_args = {mt, kt, nt};
@@ -177,7 +185,6 @@ void place_variant(
     if (aggregator != nullptr) {
         writer_args.push_back(aggregator->core.x);
         writer_args.push_back(aggregator->core.y);
-        writer_args.push_back(aggregator->scratch_addr);
         writer_args.push_back(aggregator->semaphore_id);
     }
     tt_metal::SetRuntimeArgs(program, writer_id, core, writer_args);
@@ -214,6 +221,91 @@ void run_single_core_matmul(
     workload.add_program(device_range, std::move(program));
     distributed::EnqueueMeshWorkload(cq, workload, false);
     distributed::EnqueueReadMeshBuffer(cq, output_tiled, dst_dram_buffer, true);
+}
+
+// All nine variants at once: USEFUL_PER_SOP 1 through 8, plus the LLK matmul, each on its own
+// core, all forwarding their output tile to an aggregator core that reports on the lot.
+//
+// Running them together is the point. A table assembled from nine separate launches would leave
+// the reader to take on trust that the conditions were the same each time; here they are the same
+// by construction, and the aggregator can also compare two variants against each other, which no
+// single launch can do.
+void run_all_variants(
+    uint32_t m,
+    uint32_t n,
+    uint32_t k,
+    const std::shared_ptr<distributed::MeshDevice>& mesh_device,
+    problem::Layout layout) {
+    constexpr uint32_t kVariants = 9;  // USEFUL_PER_SOP 1..8, then the LLK matmul
+
+    distributed::MeshCommandQueue& cq = mesh_device->mesh_command_queue();
+    distributed::MeshWorkload workload;
+    distributed::MeshCoordinateRange device_range(mesh_device->shape());
+    Program program{};
+
+    const CoreCoord aggregator_core({0, 1});
+    const CoreRange variant_cores(CoreCoord{0, 0}, CoreCoord{kVariants - 1, 0});
+    const CoreRangeSet all_cores(std::vector<CoreRange>{variant_cores, CoreRange(aggregator_core)});
+
+    const uint32_t output_tile_size = sizeof(float) * TILE_HEIGHT * TILE_WIDTH;
+    distributed::DeviceLocalBufferConfig dram_output_config{
+        .page_size = output_tile_size,
+        .buffer_type = tt_metal::BufferType::DRAM,
+    };
+    distributed::ReplicatedBufferConfig buffer_config_c{.size = output_tile_size};
+    auto dst_dram_buffer = distributed::MeshBuffer::create(buffer_config_c, dram_output_config, mesh_device.get());
+
+    // Scratch for the output tiles, one slot per variant. Declared identically on every core, and
+    // on all of them at once, so the framework places it at the same L1 address everywhere: that
+    // is what lets a writer compute the aggregator's slot address from its own scratch pointer.
+    // The variant cores use only their own slot; the aggregator reads all of them.
+    constexpr uint32_t scratch_cb_index = CBIndex::c_24;
+    CircularBufferConfig cb_scratch_config =
+        CircularBufferConfig(kVariants * output_tile_size, {{scratch_cb_index, tt::DataFormat::Float32}})
+            .set_page_size(scratch_cb_index, output_tile_size);
+    tt_metal::CreateCircularBuffer(program, all_cores, cb_scratch_config);
+
+    const uint32_t agg_semaphore = tt_metal::CreateSemaphore(program, all_cores, 0);
+
+    AggregatorTarget target;
+    // The writers address the aggregator over the NoC, which uses physical coordinates rather
+    // than the logical ones the program is written in.
+    target.core = mesh_device->worker_core_from_logical_core(aggregator_core);
+    target.semaphore_id = agg_semaphore;
+
+    for (uint32_t i = 0; i < kVariants; ++i) {
+        const bool is_llk = (i == kVariants - 1);
+        target.slot = i;
+        place_variant(
+            program,
+            CoreCoord{i, 0},
+            dst_dram_buffer,
+            m,
+            n,
+            k,
+            true,
+            is_llk ? KernelVariant::LlkInaccurate : KernelVariant::Fp32Accurate,
+            is_llk ? 1 : (i + 1),
+            layout,
+            &target);
+    }
+
+    const auto aggregator_id = tt_metal::CreateKernel(
+        program,
+        OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/dataflow/aggregator.cpp",
+        aggregator_core,
+        tt_metal::DataMovementConfig{
+            .processor = DataMovementProcessor::RISCV_0,
+            .noc = NOC::RISCV_0_default,
+            .defines =
+                {{"LAYOUT_ID", std::to_string(static_cast<uint32_t>(layout))},
+                 {"NUM_SLOTS", std::to_string(kVariants)}},
+        });
+    tt_metal::SetRuntimeArgs(program, aggregator_id, aggregator_core, {agg_semaphore});
+
+    workload.add_program(device_range, std::move(program));
+    distributed::EnqueueMeshWorkload(cq, workload, false);
+    distributed::Finish(cq);
 }
 
 const char* okng(bool ok) { return ok ? "OK" : "NG"; }
@@ -327,6 +419,12 @@ int main() {
         const RunResult uniform_r = run(problem::Layout::Uniform, true);
 
         print_terms(problem::Layout::Packed);
+
+        // All nine variants at once, each on its own core, reported by an aggregator core. The
+        // table it prints is the example's headline result; the host-side checks below cover the
+        // same ground from the other side. Only visible with TT_METAL_DPRINT_CORES set, and only
+        // on silicon, since ttsim has no device print buffer.
+        run_all_variants(M, N, problem::k_dim(problem::Layout::Packed), mesh_device, problem::Layout::Packed);
         fmt::print(
             "note gamma_32={} gamma_256={} checked_elements={}\n", problem::gamma_n(32), problem::gamma_n(256), M * N);
 

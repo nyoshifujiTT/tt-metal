@@ -47,8 +47,7 @@ void kernel_main() {
 #ifdef AGGREGATOR_SLOT
     const uint32_t agg_x = get_arg_val<uint32_t>(1);
     const uint32_t agg_y = get_arg_val<uint32_t>(2);
-    const uint32_t agg_scratch_addr = get_arg_val<uint32_t>(3);
-    const uint32_t agg_semaphore = get_semaphore(get_arg_val<uint32_t>(4));
+    const uint32_t agg_semaphore = get_semaphore(get_arg_val<uint32_t>(3));
 #endif
 
     constexpr uint32_t cb_id_out0 = 16;
@@ -76,7 +75,12 @@ void kernel_main() {
 
 #ifdef AGGREGATOR_SLOT
         // Send this run's tile to the aggregator, then tell it one more slot is filled.
+        //
+        // The aggregator's scratch is at the same circular buffer index on every core, and
+        // circular buffers are placed at the same L1 address across a program, so this core's own
+        // scratch address is also the aggregator's. Only the slot within it differs.
         const uint32_t bytes = kTileDatums * sizeof(float);
+        const uint32_t agg_scratch_addr = get_write_ptr(cb_id_scratch);
         const uint64_t slot_addr = get_noc_addr(agg_x, agg_y, agg_scratch_addr + AGGREGATOR_SLOT * bytes);
         noc_async_write(l1_read_addr, slot_addr, bytes);
         noc_async_write_barrier();

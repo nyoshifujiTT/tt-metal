@@ -142,11 +142,13 @@ void kernel_main() {
 
         DPRINT(
             "check=s8_vs_llk_order_only expected=1 actual={:.17g} differing={}/{} worst_index={} "
-            "result={}\n",
+            "within_order_bound={}\n",
             worst_ratio,
             differing,
             kOutDatums,
             worst_index,
-            worst_ratio <= 1.0 ? "OK" : "NG");
+            // DPRINT has no string or char type, so the verdict is a number: 1 means the two
+            // differ by no more than reordering an FP32 sum permits.
+            worst_ratio <= 1.0 ? 1u : 0u);
     }
 }
