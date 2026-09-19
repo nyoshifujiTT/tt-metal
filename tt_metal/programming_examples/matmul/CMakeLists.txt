@@ -4,6 +4,7 @@ project(metal_example_matmul)
 add_subdirectory(matmul_common)
 
 add_subdirectory(matmul_single_core)
+add_subdirectory(matmul_fp32_acc_check)
 add_subdirectory(matmul_multi_core)
 add_subdirectory(matmul_multicore_reuse)
 add_subdirectory(matmul_multicore_reuse_mcast)
