@@ -46,6 +46,19 @@ unset TT_METAL_SIMULATOR
 ./build_Release/programming_examples/metal_example_matmul_fp32_acc_check
 ```
 
+## Timing
+
+Requires a Tracy-enabled build (`ENABLE_TRACY=ON`). `MM_ZONE_PER_K_TILE` adds a device-profiler
+zone around one K iteration of the B1 and C compute kernels; without it the kernels are built
+unchanged, so the accuracy runs are never affected.
+
+```bash
+MM_ZONE_PER_K_TILE=1 TT_METAL_DEVICE_PROFILER=1 \
+  ./build_Release/programming_examples/metal_example_matmul_fp32_acc_check
+# zone durations land in generated/profiler/.logs/profile_log_device.csv, one START/END pair per
+# K iteration per TRISC
+```
+
 ## Inputs and pass criterion
 
 Both operands vary along every axis, so a transposed or face-swapped operand cannot slip through
@@ -182,6 +195,13 @@ detail b3_n_innermost packed  err_over_bound=620.646  elements_within=12/1024
 - `check=custom_kernel_bitexact_*`: number of elements where the B1 kernel differs from the
   compute-API kernel; must be 0
 - `note ... mvmul_instruction_ratio=`: instruction-count cost of the spread layout
+- `detail sweep useful_per_sop=`: one line per `S`, with the pass count, the MVMULs per tile and
+  the resulting error
+- `check=sweep_s1_within_fp32_bound`: one useful value per group must satisfy the bound
+- `check=sweep_s8_back_to_baseline_regime`: eight must not, i.e. `S` really does span from
+  FP32-class back to the ordinary matmul
+- `check=sweep_accuracy_monotone_in_useful_per_sop`: the error must not improve as more values
+  share a group
 
 Measured on Blackhole p150b silicon:
 
@@ -221,6 +241,61 @@ detail zero_inject_vs_baseline packed_ratio=620.6459961715897 zero_inject_ratio=
 ```
 
 620.6 to 0.455, on all 1024 elements. Only the SrcA occupancy differs.
+
+### Useful values per SOP group
+
+`ZI_USEFUL_PER_SOP`, a compile-time constant in the kernel and settable per run from the host,
+chooses how many of a group's 8 lanes carry a useful value, 1 to 8. It need not divide 8. With
+`S` per group one MVMUL consumes up to `2*S` useful K-elements instead of 2, so a tile takes
+`ceil(8/S)` passes and `64*ceil(8/S)` MVMULs, and each pass writes up to `2*S` SrcA rows per face.
+
+Pass `l` owns the contiguous lane run starting at `l*S`, with only the final pass narrower when
+`S` does not divide 8.
+
+Measured, identical on ttsim and on Blackhole p150b silicon, on the same `packed` input:
+
+```
+S   passes  MVMULs/tile  err_over_bound   elements_within
+1     8         512          0.455           1024/1024
+2     4         256        197.353            252/1024
+3     3         192        359.550             38/1024
+4     2         128        429.722              9/1024
+5     2         128        594.921              7/1024
+6     2         128        617.146              6/1024
+7     2         128        620.296             10/1024
+8     1          64        620.646             12/1024
+```
+
+So the knob spans the whole range: `S=1` is FP32-class on every element, and `S=8` returns
+exactly the 620.646 that B1, B2 and B3 produce, i.e. the accuracy of the ordinary matmul. The
+example checks that the error is monotone in `S`, that `S=1` is within the bound, and that `S=8`
+is back over it.
+
+Only `ceil(8/S)` changes the cost, so the settings worth using are 1, 2, 3, 4 and 8. `S=5,6,7`
+cost the same 128 MVMULs as `S=4` and only lose accuracy; they are measured above to show that,
+not because they are useful.
+
+A strided lane assignment (`l, l+passes, l+2*passes, ...`) was tried first and is wrong: it
+depends only on the pass count, so `S=4,5,6,7` all collapse onto the same two passes `[0,2,4,6]`
+and `[1,3,5,7]` and every `S` above 4 silently behaves as 4. That showed up as a non-monotone
+sweep - `S=3` measuring *better* than `S=2` - because with the strided split the groups' exponent
+spreads no longer follow `S`. Contiguous runs make the occupancy actually be `S`.
+
+`S=8` is *not* bit-identical to B3, though it issues the same 16 MVMULs per fidelity phase over
+the same fully populated SrcA and walks `k, i, j` in the same order: measured, 213 of 1024
+elements differ. The remaining difference is where the fidelity phase sits. B3 has `f` outermost
+and this kernel has it innermost, so with `k` being the reduction dimension the four phases and
+the two `k` values reach a given Dst element in a different order:
+
+```
+B3 : f0k0, f0k1, f1k0, f1k1, f2k0, f2k1, f3k0, f3k1
+C  : k0f0, k0f1, k0f2, k0f3, k1f0, k1f1, k1f2, k1f3
+```
+
+FP addition is not associative, so the accumulation differs in the last bits. The error bound is
+unaffected, which is why the two agree to the digit on `err_over_bound`. `f` stays innermost here
+because that is what `S<8` needs: hoisting it above `l` would put `l` inside it and take the SrcA
+rewrites from 8 to 32.
 
 ### Only SrcA is zeroed
 
@@ -327,9 +402,27 @@ with its `cr` marker, not by adding the complement.
 
 ### Cost
 
-Per tile: 512 MVMULs against B1's 64, the 8x the analysis predicted; 8 SrcA rewrites of 8 rows
-each; 1 SrcB fetch, as in B1. Total bytes moved into SrcA are unchanged - the same rows, split
-across 64 UNPACRs of one row each instead of 1 of a whole tile - plus one bank-clear per `l`.
+Per tile at `S=1`: 512 MVMULs against B1's 64, the 8x the analysis predicted; 8 SrcA rewrites of
+8 rows each; 1 SrcB fetch, as in B1. Total bytes moved into SrcA are unchanged - the same rows,
+split across 64 UNPACRs of one row each instead of 1 of a whole tile - plus one bank-clear per
+`l`. In general it is `64*ceil(8/S)` MVMULs and `ceil(8/S)` rewrites, so the MVMUL cost falls back
+to B1's at `S=8`.
+
+Measured on silicon with a device-profiler zone around one K iteration (`MM_ZONE_PER_K_TILE=1`,
+`TT_METAL_DEVICE_PROFILER=1`), at `S=1`, Blackhole p150b at 1350 MHz, cycles:
+
+```
+TRISC          B1 (median of 10)   C (S=1)   ratio
+TRISC_0 UNPACK       1168            3519     3.01x
+TRISC_1 MATH         1167            3980     3.41x
+TRISC_2 PACK           21              33     1.57x
+```
+
+MATH is 3.4x, not the 8x the MVMUL count suggests, because B1's math thread is not MVMUL-bound:
+1167 cycles for 64 MVMULs is 18 cycles each, against 7.8 for C's 512. C fills in stalls that B1
+spent waiting on the unpacker. With MATH at 3980 against UNPACK's 3519, C has moved the
+bottleneck onto the math thread. The TRISC numbering is from
+`tt_metal/llrt/hal/tt-1xx/hal_1xx_common.cpp`.
 
 ### Verifying changes to this kernel
 

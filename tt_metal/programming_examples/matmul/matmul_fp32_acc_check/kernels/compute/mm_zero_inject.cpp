@@ -20,22 +20,24 @@
 // padding and no reordering.
 //
 // Loop order, l, k, i, j, f. B1/B2/B3 consume a whole 16-wide K window per MVMUL, so K=32 is
-// exhausted by k alone. Here 2 of the 16 lanes are used, so the window is subdivided further by
-// l (0..7), selecting the K pair (l, l+8) - 8 apart so the two land in different SOP groups.
-// K = k * l * 2 = 32.
+// exhausted by k alone. Here only up to 2*kUsefulPerSop of the 16 lanes are used, so the window
+// is subdivided further by l (0..kLPerTile-1), which selects this pass's lanes in each of the two
+// 8-lane SOP groups. The passes partition the 8 lanes, so K = 32 for every kUsefulPerSop.
 //
 // l is outermost and f innermost, and in both cases the reason is the number of SrcA rewrites.
 // SrcB carries the useful values of all four faces after one UNPACR, so i (M half) and k (K half)
 // are reached by moving its row counter and cost no refetch. SrcA can hold only 2 useful rows per
-// face, so advancing l means rewriting it; with l outermost that is 8 times per tile, and each
+// face, so advancing l means rewriting it; with l outermost that is kLPerTile times per tile,
+// and each
 // rewrite fills all four faces at once because SrcA's face index is 2k+j. A fidelity phase only
 // selects which mantissa bits are read out of Src, not which rows or their contents, so the four
 // phases belong at one (l, k, i, j) position; hoisting f above l would take the rewrites to 32.
 // k, i and j are free, as B2 and B3 established, and are ordered as in B3.
 //
-// Cost. 512 MVMULs against B1's 64, the 8x the analysis predicts, plus 8 SrcA rewrites and one
-// bank clear per tile-row instead of a single whole-tile unpack. The bytes written into SrcA are
-// the same, only split.
+// Cost. 64 * kLPerTile MVMULs against B1's 64, i.e. 8x at kUsefulPerSop=1 down to 1x at 8, plus
+// one SrcA rewrite and one bank clear per pass instead of a single whole-tile unpack. The bytes
+// written into SrcA are the same in all cases, only split differently. Only ceil(8/S) moves the
+// cost, so S=5,6,7 cost as much as S=4 and only lose accuracy.
 
 #include <cstdint>
 
@@ -45,10 +47,43 @@
 #include "api/dataflow/circular_buffer.h"
 #include "hostdevcommon/kernel_structs.h"
 
+#ifdef ZONE_PER_K_TILE
+#include "tools/profiler/kernel_profiler.hpp"
+#endif
+
 using std::uint32_t;
 
-// A 32x32 tile holds 32 K-elements. One l covers a pair (l, l+8) of each 16-wide K window.
-constexpr uint32_t kLPerTile = 8;
+// Number of useful values placed in each 8-lane SOP group, 1 to 8. Compile-time constant.
+//
+// 1 is the maximum-accuracy case: a lone non-zero term is the group maximum, so nothing is
+// shifted away and no bits are lost to intra-group alignment. Raising it trades accuracy for
+// MVMULs: with S per group, one MVMUL consumes 2*S useful K-elements instead of 2, so a tile
+// needs 8/S passes instead of 8. At S=8 every lane is useful, which is what B1/B2/B3 already do,
+// so that case issues the same 16 MVMULs per fidelity phase over the same fully populated SrcA.
+#ifndef ZI_USEFUL_PER_SOP
+#define ZI_USEFUL_PER_SOP 1
+#endif
+constexpr uint32_t kUsefulPerSop = ZI_USEFUL_PER_SOP;
+static_assert(kUsefulPerSop >= 1 && kUsefulPerSop <= 8, "ZI_USEFUL_PER_SOP must be 1..8");
+
+// A 32x32 tile holds 32 K-elements, and one MVMUL spans a 16-wide K window cut into two 8-lane
+// SOP groups. One l pass fills at most kUsefulPerSop lanes of each group, so it takes
+// ceil(8 / kUsefulPerSop) passes to cover the window. When kUsefulPerSop does not divide 8 the
+// last pass carries the remainder and is narrower; the guarantee the knob makes is an upper
+// bound - never more than kUsefulPerSop values share a group - which is what sets the worst case.
+constexpr uint32_t kLPerTile = (8 + kUsefulPerSop - 1) / kUsefulPerSop;
+
+// Lanes owned by pass l, as a contiguous run: l*kUsefulPerSop .. min(8, (l+1)*kUsefulPerSop) - 1.
+//
+// A strided assignment (l, l + passes, ...) was tried first and is wrong: it depends only on the
+// pass count, so S=4,5,6,7 all reduce to the same two passes of [0,2,4,6] and [1,3,5,7] and every
+// S above 4 silently behaves as 4. Contiguous runs make the count actually be kUsefulPerSop, with
+// only the final pass narrower when kUsefulPerSop does not divide 8.
+constexpr uint32_t zi_lane_base(uint32_t l) { return l * kUsefulPerSop; }
+constexpr uint32_t zi_lanes_in_pass(uint32_t l) {
+    const uint32_t base = zi_lane_base(l);
+    return (base + kUsefulPerSop <= 8) ? kUsefulPerSop : (8 - base);
+}
 
 #ifdef TRISC_MATH
 namespace {
@@ -125,9 +160,9 @@ inline void zi_configure_addrmod() {
 
 // The 16 (k, i, j) positions at one l, each repeated over the fidelity phases.
 //
-// SrcA holds useful values only in rows l and l+8 of each face, so each MVMUL consumes exactly 2
-// useful K-elements, one per SOP group. SrcB holds the whole in0 tile and is not moved between
-// l values.
+// SrcA holds useful values only in this pass's lanes of each face, so each MVMUL consumes exactly
+// 2 * kUsefulPerSop useful K-elements, kUsefulPerSop per SOP group. SrcB holds the whole in0 tile
+// and is not moved between l values.
 inline void zi_matmul_one_l() {
     constexpr bool high_fidelity = (MATH_FIDELITY != ckernel::MathFidelity::LoFi);
     constexpr uint32_t phases = high_fidelity ? static_cast<uint32_t>(MATH_FIDELITY) : 1;
@@ -244,13 +279,26 @@ inline void zi_unpack_srca_rows(uint32_t cb_id_in1, uint32_t l) {
     // every row of this bank is zero.
     TTI_UNPACR_NOP(SrcA, 0, 0, 0 /* no dvalid */, 0, 0, 0, 0, p_unpacr_nop::UNP_ZEROSRC);
 
-    // Eight rows: (l, l+8) of each face. dvalid on the last one only, so the math thread sees a
-    // complete SrcA.
+    // The useful lanes of both SOP groups, in each of the four faces. dvalid on the very last row
+    // only, so the math thread sees a complete SrcA.
+    //
+    // Pass l owns the contiguous lane run starting at zi_lane_base(l) in the low group (SrcA rows
+    // 0..7 of the face) and the same lanes of the high group (rows 8..15). The count is
+    // kUsefulPerSop except in the final pass when kUsefulPerSop does not divide 8.
+    //
+    // At kUsefulPerSop == 8 there is a single pass owning all eight lanes of both groups, i.e.
+    // the whole tile, which is exactly the SrcA contents B1/B2/B3 unpack in one go.
+    const uint32_t lanes = zi_lanes_in_pass(l);
+    const uint32_t lane_base = zi_lane_base(l);
     for (uint32_t face = 0; face < 4; ++face) {
         const uint32_t face_base = base_in1 + face * kFaceUnits;
         const uint32_t srca_face = face * 16;
-        zi_unpack_srca_row(face_base + l * kRowUnits, srca_face + l, 0);
-        zi_unpack_srca_row(face_base + (l + 8) * kRowUnits, srca_face + l + 8, face == 3 ? 1 : 0);
+        for (uint32_t s = 0; s < lanes; ++s) {
+            const uint32_t lane = lane_base + s;  // lane within the 8-lane SOP group
+            const bool last = (face == 3) && (s == lanes - 1);
+            zi_unpack_srca_row(face_base + lane * kRowUnits, srca_face + lane, 0);
+            zi_unpack_srca_row(face_base + (lane + 8) * kRowUnits, srca_face + lane + 8, last ? 1 : 0);
+        }
     }
 
     ckernel::t6_semaphore_get(ckernel::semaphore::UNPACK_SYNC);
@@ -280,6 +328,9 @@ void kernel_main() {
         for (uint32_t nt = 0; nt < Nt; ++nt) {
             tile_regs_acquire();
             for (uint32_t kt = 0; kt < Kt; kt++) {
+#ifdef ZONE_PER_K_TILE
+                DeviceZoneScopedN("MM-K-TILE");
+#endif
                 cb_wait_front(cb_in0, 1);
                 cb_wait_front(cb_in1, 1);
 

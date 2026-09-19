@@ -26,6 +26,10 @@
 #include "api/dataflow/circular_buffer.h"
 #include "hostdevcommon/kernel_structs.h"
 
+#ifdef ZONE_PER_K_TILE
+#include "tools/profiler/kernel_profiler.hpp"
+#endif
+
 using std::uint32_t;
 
 #ifdef TRISC_MATH
@@ -194,6 +198,9 @@ void kernel_main() {
         for (uint32_t nt = 0; nt < Nt; ++nt) {
             tile_regs_acquire();
             for (uint32_t kt = 0; kt < Kt; kt++) {
+#ifdef ZONE_PER_K_TILE
+                DeviceZoneScopedN("MM-K-TILE");
+#endif
                 cb_wait_front(cb_in0, 1);
                 cb_wait_front(cb_in1, 1);
 

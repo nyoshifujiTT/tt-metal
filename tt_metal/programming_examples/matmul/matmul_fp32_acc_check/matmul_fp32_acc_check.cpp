@@ -4,6 +4,9 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <map>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -71,7 +74,9 @@ void run_single_core_matmul(
     uint32_t k,
     bool fp32_dest_acc_en,
     const std::shared_ptr<distributed::MeshDevice>& mesh_device,
-    KernelVariant variant = KernelVariant::ComputeApi) {
+    KernelVariant variant = KernelVariant::ComputeApi,
+    // Useful values per 8-lane SOP group for the ZeroInject kernel, 1 to 8. Ignored otherwise.
+    uint32_t useful_per_sop = 1) {
     distributed::MeshCommandQueue& cq = mesh_device->mesh_command_queue();
     distributed::MeshWorkload workload;
     distributed::MeshCoordinateRange device_range(mesh_device->shape());
@@ -175,6 +180,17 @@ void run_single_core_matmul(
             compute_kernel = OVERRIDE_KERNEL_PREFIX "matmul/matmul_fp32_acc_check/kernels/compute/mm_zero_inject.cpp";
             break;
     }
+
+    std::map<std::string, std::string> compute_defines;
+    // Opt-in device-profiler zone around one K iteration, for the timing comparison in the
+    // README. Off by default so the accuracy runs are unaffected.
+    if (std::getenv("MM_ZONE_PER_K_TILE") != nullptr) {
+        compute_defines["ZONE_PER_K_TILE"] = "1";
+    }
+    if (variant == KernelVariant::ZeroInject) {
+        compute_defines["ZI_USEFUL_PER_SOP"] = std::to_string(useful_per_sop);
+    }
+
     tt_metal::CreateKernel(
         program,
         compute_kernel,
@@ -184,6 +200,7 @@ void run_single_core_matmul(
             .fp32_dest_acc_en = fp32_dest_acc_en,
             .math_approx_mode = false,
             .compile_args = compute_compile_time_args,
+            .defines = compute_defines,
         });
 
     tt_metal::SetRuntimeArgs(
@@ -281,20 +298,25 @@ int main() {
         };
 
         // Raw device output for one layout, so the two compute kernels can be compared directly.
-        auto run_raw = [&](const std::vector<float>& terms, bool fp32_dest_acc_en, KernelVariant variant) {
+        auto run_raw = [&](const std::vector<float>& terms,
+                           bool fp32_dest_acc_en,
+                           KernelVariant variant,
+                           uint32_t useful_per_sop = 1) {
             const uint32_t k = static_cast<uint32_t>(terms.size());
             auto a = build_input_a(M, k, terms);
             auto b = build_input_b(k, N);
             auto a_tiled = tilize_nfaces(a, M, k);
             auto b_tiled = tilize_nfaces(b, k, N);
             std::vector<float> out_tiled(M * N, 0.0f);
-            run_single_core_matmul(a_tiled, b_tiled, out_tiled, M, N, k, fp32_dest_acc_en, mesh_device, variant);
+            run_single_core_matmul(
+                a_tiled, b_tiled, out_tiled, M, N, k, fp32_dest_acc_en, mesh_device, variant, useful_per_sop);
             return untilize_nfaces(out_tiled, M, N);
         };
 
         auto run = [&](const std::vector<float>& terms,
                        bool fp32_dest_acc_en,
-                       KernelVariant variant = KernelVariant::ComputeApi) {
+                       KernelVariant variant = KernelVariant::ComputeApi,
+                       uint32_t useful_per_sop = 1) {
             const uint32_t k = static_cast<uint32_t>(terms.size());
             auto a = build_input_a(M, k, terms);
             auto b = build_input_b(k, N);
@@ -322,7 +344,8 @@ int main() {
             auto a_tiled = tilize_nfaces(a, M, k);
             auto b_tiled = tilize_nfaces(b, k, N);
             std::vector<float> out_tiled(M * N, 0.0f);
-            run_single_core_matmul(a_tiled, b_tiled, out_tiled, M, N, k, fp32_dest_acc_en, mesh_device, variant);
+            run_single_core_matmul(
+                a_tiled, b_tiled, out_tiled, M, N, k, fp32_dest_acc_en, mesh_device, variant, useful_per_sop);
             auto out = untilize_nfaces(out_tiled, M, N);
 
             // The bound scales with the number of accumulated products, which is K.
@@ -466,8 +489,87 @@ int main() {
             packed_r.worst_ratio,
             zi_r.worst_ratio);
 
+        // The same kernel with 1, 2, 4 and 8 useful values per SOP group. This is the accuracy
+        // knob: with S per group, one MVMUL takes 2*S useful K-elements, so the tile needs 8/S
+        // passes and 64*8/S MVMULs. S=1 leaves no intra-group alignment at all; raising S widens
+        // the alignment window again and the error grows back towards the baseline.
+        //
+        // S=8 fills every lane, so SrcA holds what B1/B2/B3 unpack in one go and the same 16
+        // MVMULs per fidelity phase are issued over it. B3 is the one to compare against: it
+        // walks k, i, j in the same order, whereas B1 splits M around N. The remaining difference
+        // is where the fidelity phase sits - B3 has it outermost, this kernel innermost - so the
+        // four phases and the two k values reach each Dst element in a different order, which FP
+        // addition does not have to be indifferent to. Whether that shows up is measured here
+        // rather than assumed.
+        bool sweep_ok = true;
+        const auto b3_ref = run_raw(packed, true, KernelVariant::CustomB3);
+        double prev_ratio = -1.0;
+        for (uint32_t s = 1; s <= 8; ++s) {
+            const RunResult r = run(packed, true, KernelVariant::ZeroInject, s);
+            // S need not divide 8: the passes that absorb the remainder are narrower, and the
+            // knob's guarantee is an upper bound on how many values share a group. The cost only
+            // changes when ceil(8/S) does, so S=5,6,7 cost the same as S=4 and only lose
+            // accuracy - included here to show that, not because they are useful settings.
+            const uint32_t passes = (8 + s - 1) / s;
+            const uint32_t mvmuls = 64 * passes;
+            fmt::print(
+                "detail sweep useful_per_sop={} passes={} mvmuls_per_tile={} err_over_bound={} "
+                "elements_within={}/{}\n",
+                s,
+                passes,
+                mvmuls,
+                r.worst_ratio,
+                r.within_bound,
+                M * N);
+
+            // Accuracy must degrade monotonically as more values share a group.
+            const bool monotone = r.worst_ratio >= prev_ratio;
+            if (!monotone) {
+                fmt::print(
+                    "detail sweep_non_monotone at useful_per_sop={} previous={} current={}\n",
+                    s,
+                    prev_ratio,
+                    r.worst_ratio);
+            }
+            sweep_ok = sweep_ok && monotone;
+            prev_ratio = r.worst_ratio;
+
+            if (s == 1) {
+                const bool ok = r.worst_ratio <= 1.0;
+                sweep_ok = sweep_ok && ok;
+                fmt::print(
+                    "check=sweep_s1_within_fp32_bound expected=1 actual={} result={}\n",
+                    r.worst_ratio,
+                    okng(ok));
+            }
+            if (s == 8) {
+                const auto full = run_raw(packed, true, KernelVariant::ZeroInject, 8);
+                uint32_t mismatches = 0;
+                for (uint32_t i = 0; i < M * N; ++i) {
+                    if (full[i] != b3_ref[i]) {
+                        ++mismatches;
+                    }
+                }
+                fmt::print(
+                    "detail sweep_s8_vs_b3 differing_elements={}/{}\n", mismatches, M * N);
+                // S=8 must at least land in the same regime as the ordinary matmul: every lane
+                // useful again, so the intra-group alignment is back and the packed layout must
+                // exceed the FP32 bound just as B1/B2/B3 do.
+                const bool ok = r.worst_ratio > 1.0;
+                sweep_ok = sweep_ok && ok;
+                fmt::print(
+                    "check=sweep_s8_back_to_baseline_regime expected=over_bound actual={} result={}\n",
+                    r.worst_ratio > 1.0 ? "over_bound" : "within_bound",
+                    okng(ok));
+            }
+        }
+        fmt::print(
+            "check=sweep_accuracy_monotone_in_useful_per_sop expected=monotone actual={} result={}\n",
+            sweep_ok ? "monotone" : "not_monotone",
+            okng(sweep_ok));
+
         pass = spread_within_bound && uniform_within_bound && packed_exceeds_bound && custom_matches &&
-               reorder_ok && zi_within_bound;
+               reorder_ok && zi_within_bound && sweep_ok;
         if (!mesh_device->close()) {
             pass = false;
         }
