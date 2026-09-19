@@ -115,6 +115,36 @@ def test_forward_passes_the_device_request_through_to_the_base(monkeypatch, requ
     # Still the pre-pooling stage either way; only the transfer differs.
     assert model.forward_kwargs["return_full_hidden_states"] is True
 
+
+def test_the_pooler_is_given_the_wrapper_not_the_unbuilt_model(monkeypatch):
+    """The transformer does not exist yet when the Pooler is constructed.
+
+    The wrapper builds it lazily on the first forward, while the Pooler is built
+    during model construction -- the only window where vLLM's current-config
+    context is set. Handing the Pooler ``self.model`` therefore captures None
+    forever, and the device pooling path dies at request time with "asked to
+    pool before the model was built". Handing it the wrapper lets it resolve the
+    model when it is actually used.
+    """
+    cls = _load_adapter_with_stub_base(monkeypatch)
+    model = cls()
+
+    # Precondition: this is the state the Pooler is built in.
+    assert getattr(model, "model", None) is None
+
+    # The serving path always has a resolved PoolerConfig; supply one so the
+    # build gets as far as constructing the Pooler.
+    model.vllm_config = types.SimpleNamespace(
+        model_config=types.SimpleNamespace(pooler_config=types.SimpleNamespace(normalize=True))
+    )
+
+    pooler = model._build_pooler()
+
+    assert pooler._owner is model, (
+        "the Pooler was handed the not-yet-built transformer instead of the "
+        "wrapper, so it can never resolve the model"
+    )
+
 def test_forward_accepts_the_runners_explicit_request_for_full_hidden(monkeypatch):
     cls = _load_adapter_with_stub_base(monkeypatch)
     model = cls()

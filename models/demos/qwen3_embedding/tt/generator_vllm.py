@@ -77,7 +77,11 @@ class Qwen3EmbeddingForTTvLLM(Qwen3ForEmbedding):
     def _build_pooler(self):
         from models.demos.qwen3_embedding.tt.pooler import Qwen3EmbeddingDevicePooler
 
-        return Qwen3EmbeddingDevicePooler(self.model, self._resolve_pooler_config())
+        # The wrapper, not ``self.model``: the transformer is built lazily on the
+        # first forward, which is after the Pooler is constructed, so passing
+        # ``self.model`` here captures None for good. The Pooler resolves the
+        # model through the wrapper when it is actually used.
+        return Qwen3EmbeddingDevicePooler(self, self._resolve_pooler_config())
 
     @property
     def pooler(self):
