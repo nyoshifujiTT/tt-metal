@@ -278,7 +278,9 @@ void kernel_main() {
     [[maybe_unused]] constexpr uint32_t brisc_token_end = tokens;
     constexpr ReplicateGroup axis = ReplicateGroup(cluster_axis);
     constexpr uint32_t dispatch_devices = axis == ReplicateGroup::COLS ? mesh_rows : mesh_cols;
-    constexpr uint32_t tokens_per_device = tokens / dispatch_devices;
+    // Fewer tokens than dispatching devices (a single decode row) still come from one device each, so the
+    // group size floors at one token; at or above the device count this is the plain quotient.
+    constexpr uint32_t tokens_per_device = tokens >= dispatch_devices ? tokens / dispatch_devices : 1;
 
     // Compute width tile offset for this core
     uint32_t global_tile_offset = global_subtoken_offset / tile_width_bytes;

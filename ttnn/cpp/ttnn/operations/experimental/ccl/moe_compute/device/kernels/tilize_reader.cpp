@@ -458,7 +458,9 @@ void kernel_main() {
     constexpr uint32_t dispatch_devices = axis == ReplicateGroup::COLS ? mesh_rows : mesh_cols;
     [[maybe_unused]] constexpr uint32_t dispatch_index =
         axis == ReplicateGroup::COLS ? linearized_mesh_coord / mesh_cols : linearized_mesh_coord % mesh_cols;
-    constexpr uint32_t tokens_per_device = tokens / dispatch_devices;
+    // Fewer tokens than dispatching devices (a single decode row) still come from one device each, so the
+    // group size floors at one token; at or above the device count this is the plain quotient.
+    constexpr uint32_t tokens_per_device = tokens >= dispatch_devices ? tokens / dispatch_devices : 1;
 
     // Aligned row size for expert_activation buffer (in bytes)
     constexpr uint32_t aligned_activation_row_bytes =
