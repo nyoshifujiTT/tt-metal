@@ -293,6 +293,9 @@ ADAPTER_PATHS = {
     "minimax_m3": "models.demos.minimax_m3.tt.runners.adapters.minimax_m3:MiniMaxM3PrefillAdapter",
     # GPT-OSS-120B: GQA (not MLA) + attention sinks + sliding/full alternation + EP MoE.
     "gpt_oss_d_p": "models.demos.gpt_oss_d_p.tt.runners.adapters.gpt_oss:GptOssPrefillAdapter",
+    # Qwen3.8-Flash-Next: GDN linear attention + sparse full attention; single rank only, since
+    # its builder constructs a fixed 48-layer target.
+    "qwen38_flash_next": "models.demos.blackhole.qwen38_flash_next.prefill.adapter:Qwen38FlashNextPrefillAdapter",
 }
 
 _ADAPTER_INSTANCES: dict = {}
