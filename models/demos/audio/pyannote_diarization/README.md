@@ -93,6 +93,28 @@ python models/demos/audio/pyannote_diarization/benchmarks/corpus_der.py \
 
 This is what produces the number comparable to pyannote's published DER (measured: 0.1113 against a published 0.112 on the VoxConverse test split). See `benchmarks/README.md`.
 
+### Serve it with tt-model-manager
+
+`tt-model.yaml` packages this port behind tt-inference-server's media server as a [tt-model-manager](https://github.com/tenstorrent/tt-model-manager) v5.1 container (`kind: http-server`). The API is the media server's, unchanged: the pyannoteAI-compatible `POST /v1/diarize` + `GET /v1/jobs/{jobId}` and `POST /v1/media/input`, documented in `tt-media-server/README.md` of tt-inference-server. That server is shipped into the image from tt-inference-server (`source.extra_code`) rather than re-implemented here.
+
+```sh
+tt-model package --container models/demos/audio/pyannote_diarization/tt-model.yaml --out build
+HF_TOKEN=hf_... tt-model serve build/speaker-diarization-community-1/tt_kernel_manifest.json
+```
+
+or `tt-model serve <namespace>/<name>` for a pushed package. `HF_TOKEN` is needed because the weights are gated.
+
+`media://` input needs an S3-compatible store running beside the server, started separately as for a `run.py` deployment (`tt-media-server/README.md` has a RustFS recipe). Its endpoint and keys belong to whoever serves the package, so the manifest lists only their names under `serve.passthrough_env`; export them before `tt-model serve` and it forwards each one that is set, by name, the way it forwards `HF_TOKEN`:
+
+```sh
+export MEDIA_STORAGE_ENDPOINT=http://<host address>:9000 MEDIA_STORAGE_BUCKET=media
+export MEDIA_STORAGE_ACCESS_KEY=... MEDIA_STORAGE_SECRET_KEY=... API_KEY=...
+```
+
+Without them `POST /v1/media/input` answers 501 and audio goes inline as base64 or by `http(s)://` url. Verified on a p150: `serve` reports ready after the ~70 s warmup, every input route and error path answers as under `run.py`, and tt-inference-server's `run.py --workflow evals` / `benchmarks` pointed at the served port give DER 0.05203 (PASS) and RTR 5.36.
+
+`requirements.lock` is the Python environment of that verified build, frozen by `tt-model package`.
+
 ## Details
 
 ### Structure
@@ -108,6 +130,7 @@ This is what produces the number comparable to pyannote's published DER (measure
 - `tests/` — the parity tests listed above, plus `synthetic_audio.py` and its guard.
 - `benchmarks/corpus_der.py` — corpus-scale DER, run by hand.
 - `demo/demo.py` — the runnable demo.
+- `tt-model.yaml`, `requirements.lock` — the tt-model-manager container package and its frozen environment.
 
 ### What runs on device
 
