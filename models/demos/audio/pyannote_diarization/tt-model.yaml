@@ -22,11 +22,18 @@ kind: http-server
 arch: blackhole
 
 source:
-  tt_metal: /home/ubuntu/diar/tt-metal
+  # The port's code at the commit it was verified on. Pinned to a sha rather than this
+  # branch: the manifest lives in that branch, so it cannot name the commit that adds it.
+  # To package a local checkout instead (uncommitted work included), put its path here.
+  tt_metal:
+    repo: https://github.com/nyoshifujiTT/tt-metal.git
+    ref: f003b9c606a7216142c56d68414b0e3553d9ebea
   code:
     - models/demos/audio/pyannote_diarization
   extra_code:
-    - root: /home/ubuntu/diar/tt-inference-server
+    - root:
+        repo: https://github.com/nyoshifujiTT/tt-inference-server.git
+        ref: 2ab8c27329400b996640b9352287435dda24b64a
       paths:
         - tt-media-server
   ubuntu: "22.04"
