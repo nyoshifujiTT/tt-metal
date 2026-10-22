@@ -1,0 +1,158 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
+#
+# tt-model-manager v5.1 container package for pyannote/speaker-diarization-community-1.
+#   tt-model package --container models/demos/audio/pyannote_diarization/tt-model.yaml
+#   tt-model serve nyoshifujiTT/speaker-diarization-community-1-blackhole
+#
+# The served API is tt-inference-server's tt-media-server, unchanged: the
+# pyannoteAI-compatible POST /v1/diarize + GET /v1/jobs/{jobId} and
+# POST /v1/media/input. It is shipped from that repository through
+# source.extra_code rather than re-implemented here, so there is one server.
+schema: "5.1"
+repo: nyoshifujiTT/speaker-diarization-community-1-blackhole
+name: speaker-diarization-community-1
+weights:
+  repo: pyannote/speaker-diarization-community-1
+  revision: 3533c8cf8e369892e6b79ff1bf80f7b0286a54ee   # gated: the consumer's HF_TOKEN is forwarded
+# The media server is its own HTTP app with its own launch recipe; it is neither a
+# vLLM arrangement nor a diffusion ASGI app with an "Application startup complete"
+# readiness (uvicorn logs that before the device warmup, which takes ~70 s).
+kind: http-server
+arch: blackhole
+
+source:
+  # The port's code at the commit it was verified on. Pinned to a sha rather than this
+  # branch: the manifest lives in that branch, so it cannot name the commit that adds it.
+  # To package a local checkout instead (uncommitted work included), put its path here.
+  tt_metal:
+    repo: https://github.com/nyoshifujiTT/tt-metal.git
+    ref: f003b9c606a7216142c56d68414b0e3553d9ebea
+  code:
+    - models/demos/audio/pyannote_diarization
+  extra_code:
+    - root:
+        repo: https://github.com/nyoshifujiTT/tt-inference-server.git
+        ref: 2ab8c27329400b996640b9352287435dda24b64a
+      paths:
+        - tt-media-server
+  ubuntu: "22.04"
+  python: "3.12"
+
+runtime:
+  command: [bash, tt-media-server/run_uvicorn_in_place.sh, --host, "{host}", --port, "{port}"]
+  # logged once the scheduler has every worker warm, i.e. both nets compiled
+  ready_line: "All workers ready"
+  # Frozen from the build that was served and verified on a p150 (python 3.12, the
+  # torch tt-metal pins). With a lock present the build installs exactly that and
+  # resolves nothing; `packages` below is what the lock was resolved from -- delete
+  # the lock line to re-resolve, then freeze again.
+  lock: requirements.lock
+  packages:
+    - aiohttp
+    - av==17.0.1
+    - colorama
+    - fastapi
+    - faster_fifo
+    - httpx
+    - huggingface_hub
+    - imageio-ffmpeg
+    - loguru
+    - prometheus-client
+    - prometheus-fastapi-instrumentator
+    - psutil
+    - pydantic-settings
+    - pytest
+    - python-multipart
+    - requests
+    - tqdm
+    - uvicorn
+    - "pyannote.audio>=4.0,<5"
+    - soundfile
+    - boto3
+    # not a diarization dependency: main.py imports every service's router, and the
+    # chat router imports transformers at module level
+    - transformers
+
+serve:
+  port: 8000
+  env:
+    # what tt-inference-server's run.py hands the container; the media server resolves
+    # the runner, device shape and weights from these
+    MODEL: speaker-diarization-community-1
+    DEVICE: p150
+  # Values that belong to whoever runs the server, forwarded by name when set:
+  # the S3-compatible store behind POST /v1/media/input, and the API key.
+  passthrough_env:
+    - MEDIA_STORAGE_ENDPOINT
+    - MEDIA_STORAGE_BUCKET
+    - MEDIA_STORAGE_ACCESS_KEY
+    - MEDIA_STORAGE_SECRET_KEY
+    - MEDIA_STORAGE_REGION
+    - MEDIA_STORAGE_PRESIGN_EXPIRY_SECONDS
+    - MEDIA_URL_ALLOWED_DOMAINS
+    - API_KEY
+  hardware: p150
+  mesh_device: P150
+
+verify:
+  - "import models.demos.audio.pyannote_diarization.tt.ttnn_wespeaker_resident"
+  - "import pyannote.audio, boto3, soundfile"
+
+card:
+  attribution: >
+    Serves [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
+    by pyannoteAI, unmodified; its two neural nets (PyanNet segmentation, WeSpeaker
+    ResNet34 embedding) are ported to ttnn.
+  description: >
+    Speaker diarization ("who spoke when") for recordings of any length: returns speaker
+    turns, not a transcript. The embedding net runs on the Tenstorrent device, pyannote's
+    clustering on the host; the API is tt-inference-server's media server, which follows the
+    pyannoteAI cloud diarization API (https://docs.pyannote.ai/openapi.json).
+  intended_use: >
+    Self-hosted diarization behind a pyannoteAI-shaped job API, e.g. to attribute an ASR
+    transcript to speakers.
+  prerequisites: |
+    - Accept the terms of the gated weights and export `HF_TOKEN` before `tt-model serve`.
+    - For `media://` input: an S3-compatible store reachable from the container (RustFS
+      recipe in tt-inference-server's `tt-media-server/README.md`), its settings exported as
+      `MEDIA_STORAGE_ENDPOINT`, `MEDIA_STORAGE_BUCKET`, `MEDIA_STORAGE_ACCESS_KEY`,
+      `MEDIA_STORAGE_SECRET_KEY`. Without them, send audio inline (base64) or by `http(s)://` url.
+  usage: |
+    Not an OpenAI chat API. Create a job and poll it, as with the pyannoteAI cloud API:
+
+    ```bash
+    JOB=$(curl -s -X POST localhost:<port>/v1/diarize -H 'Authorization: Bearer <API_KEY>' \
+      -H 'Content-Type: application/json' \
+      -d "{\"url\":\"$(base64 -w0 audio.wav)\",\"exclusive\":true}" | jq -r .jobId)
+    curl -s localhost:<port>/v1/jobs/$JOB -H 'Authorization: Bearer <API_KEY>'
+    ```
+
+    The inline base64 form is this server's non-standard extension; the official API takes
+    a url only (`http(s)://`, or `media://<key>` after `POST /v1/media/input` and a PUT to the
+    returned pre-signed url). `API_KEY` defaults to `your-secret-key` when not exported.
+  performance: |
+    | eval | this package | reference | data |
+    | --- | --- | --- | --- |
+    | DER vs the shipped annotation | 0.052 | 0.052 (all-CPU pipeline) | pyannote sample.wav, 30 s, 2 speakers |
+    | DER, VoxConverse test | 0.1113 | 0.112 (published) | 232 recordings (tt-metal benchmark) |
+
+    | profile | audio | requests | latency | real-time ratio |
+    | --- | --- | --- | --- | --- |
+    | p150 | 30 s, 2 speakers | 3 sequential | 5.6 s | 5.36x |
+
+    Measured on a p150 through `tt-model serve` with tt-inference-server's `run.py --workflow
+    evals` / `benchmarks` pointed at the served port. Warmup (both nets compiled) ~70 s.
+  limitations: |
+    - community-1 only: the paid models' options (`confidence`, `transcription`,
+      `vadSensitivity`, the probability curves, ...) are refused with 400.
+    - Requests are serialized (one pipeline); a long recording holds the queue for its run.
+    - Inputs are capped at 1 GiB (the official limit); at ~5-18x real time a request cannot
+      cover the official 24 h of audio within the 1000 s request deadline.
+    - Only the p150 (one chip) profile is validated.
+  licensing: >
+    The weights are under the terms on their model page (CC-BY-4.0, gated). The ttnn port
+    and the media server are Apache-2.0.
+  license:
+    id: cc-by-4.0
+  pipeline_tag: automatic-speech-recognition
