@@ -11,7 +11,7 @@ decode の 1 step は「全層の重みと、ユーザごとの状態（GDN の�
 | 軸 | 何を分けるか | 重みの読み | 払うもの（1 層あたり） | agg への効き | tsu への効き |
 |---|---|---|---|---|---|
 | DP（data） | ユーザ集合を複製モデルに分ける | 複製ごとに全部（DRAM 容量を複製分食う） | 無し（複製間通信ゼロ） | 複製数に線形 | 不変 |
-| PP（pipeline） | 層を段に分け、段ごとに別の micro-batch を同時処理 | 段の重みだけ、micro-batch ごとに読み直す | 段間 hop 1 回（活性 rows×H） | 全段が常に忙しければ TP と同じ償却 | 1 token が全段を巡るので T_tok = Σ段 + PP×hop（≈ 1/PP） |
+| PP（pipeline） | 層を段に分け、段ごとに別の micro-batch を同時処理 | 段の重みだけ、micro-batch ごとに読み直す | 段間 hop 1 回（活性 rows×H） | 全段が常に忙しければ TP と同じ償却 | 1 token が全段を巡るので T_tok = PP × (最遅段 + hop)（tsu は ≈ 1/PP） |
 | TP（tensor） | 1 層の行列を TP 枚に分け全員で 1 行列を解く | 互いに素な 1/TP ずつ 1 回 | all-reduce（= reduce-scatter + all-gather）×ブロック数: 2(TP−1)/TP·M/BW + hop×α | 重みを TP 枚で分担（1 step が短くなる） | 大きく効くが α×hop が床になる |
 | EP（expert） | routed expert を所有グループに分ける | expert は 1 回だけ（複製しない） | DP_a>1 のとき dispatch+combine の all-to-all（rows×k×H） | distinct expert の償却が instance 全体で効く | router 後にしか読めない露出が残る |
 | CP（context） | 1 ユーザの KV を系列方向に分ける | 無関係（KV 読みを CP で割る） | 部分 attention の merge（o, lse） | 長文脈で KV 読みが支配する時に効く | 同左 |
@@ -31,12 +31,12 @@ decode の 1 step は「全層の重みと、ユーザごとの状態（GDN の�
 ## 3. 応用: TT デバイス（BH Galaxy）で 5 軸はどう変わるか
 
 - **トポロジ**: 32 chip は 8×4 の 2D torus（`single_bh_galaxy_torus_xy_graph_descriptor.textproto`: dims [8,4] RING/RING、channels 2）。実機 cluster descriptor では「8 chip のリング 4 本、各リングが 4 chip の線 2 本」、全 chip の ETH 次数 4。1 方向 2 link × 25.0 GB/s（`ccl_common.cpp lookup_fabric_link_bw`: 400 Gbps=50 GB/s の半分に制限中）、4 方向で egress 200 GB/s/chip。1 hop 片道 515 ns（1D fabric）/ 619 ns（2D）、p150_x4 実測（`ccl_common.cpp lookup_fabric_hop_latency_ns`）。
-- **collective の算法が二通り**: 今日の ttnn Ring/Linear CCL は 1 次元リング（hop = N−1、1 方向 2 link）。torus を使う算法（hop = 直径 = ⌊r/2⌋+⌊c/2⌋、4 方向 8 link）は未実装。両方をシナリオに置く。TP16 の直径 2+1 = 3 hop に対しリングは 15 hop。
+- **collective の算法が二通り**: 今日の ttnn Ring/Linear CCL は 1 次元リング（hop = N−1、1 方向 2 link）。torus を使う算法（hop = 直径 = ⌊r/2⌋+⌊c/2⌋、4 方向 8 link）は未実装。両方をシナリオに置く。TP16（4×4 submesh）の直径 4 hop に対しリングは 15 hop。
 - **パケット固定費**: fabric gather の実測（山口 job132、`gr_fold.gather_line`）は 1 パケット 4 KiB あたり 0.64〜0.95 µs、= 線上時間の 2〜4 倍。TP の全 all-reduce がこの固定費を払うので「+0.8 µs/packet」をシナリオ C 以降に入れる。
-- **DRAM は読み書き和 512 GB/s/chip**（GDDR6 8 ch）。GDN の fp32 状態（36 層 × [48,128,128]、1 ユーザ 0.231 GB/pass 読み+書き）は dense 重みと同じ DRAM ストリームの一部で、ユーザ数に比例して増える → **agg の漸近は重みではなくユーザ状態の往復**（32 × 512 GB/s ÷ 0.2358 GB/user/pass = 69,480 pass/s）。
+- **DRAM は読み書き和 512 GB/s/chip**（GDDR6 8 ch）。GDN の fp32 状態（36 層 × [48,128,128]、1 ユーザ 0.231 GB/pass 読み+書き）は dense 重みと同じ DRAM ストリームの一部で、ユーザ数に比例して増える → **agg の漸近は重みではなくユーザ状態の往復**（32 × 512 GB/s ÷ (0.2309 GB 状態 + 0.0049 GB KV) = 69,480 pass/s）。
 - **routed expert のストリーム帯域は spec の 46%**（job128: MoECompute 2.35 ms/pass ÷ 201 experts → 236 GB/s、ring-8 の各 core が 1 bank に紐付く 36 GB/s×8）。spec 512 と校正 236 を並記。
 - **1 行タイル 32 行**: decode の行列積は M=32 行の tile 1 行で、B × (k+1) ≤ 32 が今日の lanes 形の上限。gemma-4-31B は 32 users、本件は 16 lanes × k=1。tile を超える行は複数 tile で扱えば限界性能上は制約でない（本モデルは b を 1024 まで振る）。
-- **GDN 状態の TP 分割は通信不要**: 48 value head を TP_a で分け、head 内で閉じる（TP_a ≤ 48、16 を超えると 48/TP_a が整数でなくなり padding）。QSA は 24 query head、2 kv head（TP_a > 2 で kv head は複製、CP はその複製内で KV を分ける）。TP_a > 8 で query head、> 16 で value head の端数 padding をバイトに加算。
+- **GDN 状態の TP 分割は通信不要**: 48 value head を TP_a で分け、head 内で閉じる（TP_a > 16 で 48/TP_a が整数でなくなり、最繁忙 chip が ⌈48/TP_a⌉ head を読む）。QSA は 24 query head、2 kv head（TP_a > 2 で kv head は複製、CP はその複製内で KV を分ける）。TP_a > 8 で query head、> 16 で value head の端数（最繁忙 chip の head 数 ÷ 平均）をバイトに掛ける。
 - **EP > 1 と DP_a**: expert を所有グループに分けると、dense 側の TP_a グループより expert が広い（DP_a > 1）時に dispatch/combine の all-to-all が要る。今日の runtime は EP = TP_a（1×TP 線で expert を TP chip に分配）だけで、EP×TP の 2D は moe_compute の collective combine 未実装（commit f6165e058a）。
 - **MTP**: verify 行 k+1 を 1 ユーザが出すので rows = b×(k+1)、採択 R_eff tokens/pass（k=1 で 1.376 実測、k=3 で 2.46、k=4 で 3.02 は 4×p150 の自然文記録 = 仮定）。agg と tsu の両方に R_eff が掛かる。
 
@@ -45,14 +45,14 @@ decode の 1 step は「全層の重みと、ユーザごとの状態（GDN の�
 - chip: N = 32 = DP × PP × S、S = TP_a × DP_a = EP × TP_x、CP | max(1, TP_a/2)。
 - ユーザ: 1 pipeline に PP micro-batch × b ユーザ、rows = b × (k+1)、R_eff tokens/pass。
 - 層 l の chip あたりバイト: dense_l/TP_a + (b/DP_a)·state_l/TP_a + (rows/DP_a)·kv_l(ctx)·h_chip/2/CP + X_l（最繁忙 EP group の distinct expert 数 × 2.7648 MB × pad/TP_x）。
-- 層時間: t_l = max(bytes_l/BW_dram, FLOP_l/peak_HiFi2, FLOP_state/peak_SFPU, τ) ∨ (D/BW + λ + X_exposed/BW_x) + 2·AR(TP_a, rows/DP_a×H×2B) + 2·AR(TP_a, hc 統計) + [DP_a>1] 2·A2A(S, rows×k×H×2B/S) + [CP>1, QSA] merge(CP)。
-  - AR(n, M) = 2·hop(n)·α + packets·α_pkt + 2(n−1)/n·M/(links·25 GB/s)、torus: hop = 直径, links = 8；ring1d: hop = n−1, links = 2。
+- 層時間: t_l = max(bytes_l/BW_dram（校正時は X_l を BW_x で）, FLOP_l/peak_HiFi2, FLOP_state/peak_SFPU, τ, D_l/BW_dram + λ + X_exposed/BW_x, τ + λ + X_exposed/BW_x) + 2·AR(TP_a, rows/DP_a×H×2B) + 2·AR(TP_a, hc 統計) + [DP_a>1] 2·A2A(S, rows×k×H×2B/S) + [CP>1, QSA] merge(CP)。
+  - AR(n, M)（all-reduce = reduce-scatter + all-gather）= 2·hop(n)·α + ⌈2(n−1)/n·M/4096/links⌉·α_pkt + 2(n−1)/n·M/(links·25 GB/s)、torus: hop = 直径, links = 8；ring1d: hop = n−1, links = 2。A2A(S, M_chip) = 直径(S)·α + packets·α_pkt + M_chip/(links·25 GB/s)。
   - X_exposed: 全ヒット 0 / 全ミス X_l / 実測 = census の pred1 miss 集合。λ = router → 読み発行 5 µs（仮定）。
-- 段: 48 層 + tail（final mixer, lm_head 0.675 GB bf8, MTP 層）を最大段最小で連続分割。t_slot = max_s t_stage + hop、agg = DP × b × R_eff / t_slot、T_tok = PP × t_slot（PP=1 なら t_stage）、tsu = R_eff / T_tok。
-- dataflow-first（A°, D°）: 段時間 = max(DRAM 車線の和, 依存車線の和)。
+- 段: 48 層 + tail（final mixer, lm_head 0.675 GB bf8, MTP 層）を最大段最小で連続分割。t_slot = max_s t_stage + hop（PP>1）、agg = DP × b × R_eff / t_slot、T_tok = PP × t_slot（PP=1 なら t_stage）、tsu = R_eff / T_tok。
+- dataflow-first（A°, D°）: 段時間 = max(DRAM 車線の和, 依存車線の和)、依存車線 = 演算/τ + router 後に露出する expert 読み + collective。
 - 容量: experts 69.4 GB/(PP×EP×TP_x) + dense 5.38 GB/(PP×TP_a) + b/DP_a × (状態 0.1155 GB + KV) ≤ 0.9 × 31.9 GiB（この場合には runtime・trace・CB に 10% を残す）。
 - 定数: H 2560, L 48 (36 GDN + 12 QSA), E 512 top-10, expert 640, GDN 48×128 fp32 状態, QSA 24 head×256 / 2 kv head, indexer budget 2048 compress 4, vocab 248,320, hc 4×2560 low-rank 320, dense bf8（hc mixer bf16）, expert BF4 2,764,800 B（staged cache 実測 2,764,804 B と一致）, Tensix 130 core × 4096 FLOP/cycle/phase × 1.35 GHz（HiFi2 359 TF/s, LoFi 719, fp32 SFPU 11.2）。
-- routing の分子: census（34 item、decode 8,192 位置、CPU oracle、bf16 expert、greedy 連鎖）から rows ∈ {1,2,4,8,16,32,64,128,256} と MTP 2 行 {1..128}×2 の最繁忙 group を取る。rows > 256 は「fitted」（未使用 expert 数が rows 倍増ごとに census の 128→256 比 0.591 で減衰、偏り 1+0.6/√mean、miss 率 = census B=256 の 0.058）と明記。
+- routing の分子: census（34 item、うち decode 位置を持つ 32 item × 256 = 8,192 位置、CPU oracle、bf16 expert、greedy 連鎖）から rows ∈ {1,2,4,8,16,32,64,128,256} と MTP 2 行 {1..128}×2 の最繁忙 group を取る。rows > 256 は「fitted」（未使用 expert 数が rows 倍増ごとに census の 128→256 比 0.591 で減衰、偏り 1+0.6/√mean、miss 率 = census B=256 の 0.058）と明記。
 
 routing census の要点（分子の実測値）: h1（前 token の top-10 再利用）= 0.356；1 ブロック早い投機 routing（層 l の router を層 l−1 の出力に適用）のヒット率 B=1 0.775 / B=16×2 行 0.845 / B=256 0.942；実 distinct expert/層 B=16 124.2（一様 138.6）、B=32 198.9（239.6）、B=256 426.2（508.7）；最繁忙 4 group の expert 数 B=16×2: 51.3（平均の 1.12 倍）。
 
@@ -74,16 +74,16 @@ routing census の要点（分子の実測値）: h1（前 token の top-10 再�
 
 ### 6.1 一行の答え
 
-- **agg tps 最大（この場合には A°: spec 物理値・torus 算法・DRAM を止めない実行形・MTP k=1）**: **71,688 t/s** = `DP4xPP1x(TP8xDPa1|EP2xTPx4)xCP4 b=1024`（4096 users、t_step 78.6 ms、tsu 17.5）。k=0 では 53,433（`DP4xPP1x(TP8xDPa1|EP2xTPx4)xCP4 b=1024`）、k=4（R_eff 3.02 仮定）では 150,324。漸近（ユーザ状態の往復だけ）は 69,480 pass/s × R_eff = k=1 で 95,600 t/s、A° はその 75%。
-- **tsu 最大（同 A°, k=1）**: **749 t/s/u** = `DP2xPP1x(TP16xDPa1|EP2xTPx8)xCP1 b=1`（T_tok 1.837 ms、agg 1,498）。k=0 では 592、k=4 では 1335。TP32（`DP1xPP1x(TP32xDPa1|EP32xTPx1)xCP1 b=1`）は 540 で TP16 に負ける（query head 24 の padding と直径）。
-- **PP32**（1 chip 1.5 層、`DP1xPP32x(TP1xDPa1|EP1xTPx1)xCP1 b=1`）: tsu 26.3、agg 840（lm_head 0.675 GB を持つ段 1.32 ms が slot を決め 32 hop）；b=32 で agg 10,683、tsu 10.4。PP は collective ゼロで agg を取る形だが、本モデルの Pareto 前線には乗らない（容量上 DP を取れず、段配置で slot が決まる）。F（τ 620 µs）でだけ PP2〜4 が agg 最大に乗る（τ を段数で分散できるため）。
-- **EP32（expert を 32 chip に 1 回だけ置き dense を TP4×DP_a8）**: `DP1xPP1x(TP4xDPa8|EP32xTPx1)xCP1 b=256` agg 32,326 / tsu 126.3。agg 最大構成（EP2×TP_x4）より低いのは all-to-all（直径 5 hop × 2）を 48 層で払うため。
+- **agg tps 最大（この場合には A°: spec 物理値・torus 算法・DRAM を止めない実行形・MTP k=1）**: **71,688 t/s** = `DP4xPP1x(TP8xDPa1|EP2xTPx4)xCP4 b=1024`（4096 users、t_step 78.6 ms、tsu 17.5）。k=0 では 53,433（`DP4xPP1x(TP8xDPa1|EP2xTPx4)xCP4 b=1024`）、k=4（R_eff 3.02 仮定）では 150,324。漸近（ユーザ状態の往復だけ）は 69,480 pass/s × R_eff = k=1 で 95,605 t/s、A° はその 75%。
+- **tsu 最大（同 A°, k=1）**: **749 t/s/u** = `DP2xPP1x(TP16xDPa1|EP2xTPx8)xCP1 b=1`（T_tok 1.837 ms、agg 1,498）。k=0 では 592、k=4 では 1335。TP32（`DP1xPP1x(TP32xDPa1|EP32xTPx1)xCP1 b=1`）は 540 で TP16 に負ける（24 query head は 32 chip に割れず最繁忙 chip が 1 head = 平均の 1.33 倍を読む、直径 6 hop）。
+- **PP32**（48 層 + tail を 32 段、`DP1xPP32x(TP1xDPa1|EP1xTPx1)xCP1 b=1`）: tsu 26.3、agg 840（tail 段 = final mixer + lm_head 0.675 GB + MTP 層が slot 1.64 ms を決め、1 token は 32 slot）；b=32 で agg 10,683、tsu 10.4。PP は collective ゼロで agg を取る形だが、本モデルの Pareto 前線には乗らない（容量上 DP を取れず、段配置で slot が決まる）。F（τ 620 µs）でだけ PP2〜4 が agg 最大に乗る（τ を段数で分散できるため）。
+- **EP32（expert を 32 chip に 1 回だけ置き dense を TP4×DP_a8）**: `DP1xPP1x(TP4xDPa8|EP32xTPx1)xCP1 b=256` agg 32,326 / tsu 126.3。agg 最大構成（EP2×TP_x4）より低いのは all-to-all（32 chip の直径 6 hop × dispatch/combine 2 回）を 48 層で払うため。
 - **今日の実装拘束内（PP1, TP∈{4,8}, EP=TP, DP_a=1, CP1, lanes×(k+1) ≤ 32）, A°, k=1**: agg 9,630（`DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16`）、tsu 510（`DP4xPP1x(TP8xDPa1|EP8xTPx1)xCP1 b=1`）。現行形 `DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16` は A° で 9,630 / 75.2、F（校正）で 2,780 / 21.7；**実測 1,186.9 t/s は F の 43%、A° の 12%**（F との差 = stall 1.14 倍・admission・ignore_eos 以外の pass 内オーバーヘッド）。
 
 ### 6.2 構造的な読み
 
 1. agg はユーザ状態（GDN fp32 0.231 GB/user/pass の読み+書き）の DRAM 往復が漸近で、重みは EP×TP_x で 1 回読めば償却できる。DP で複製すると容量を失い b が伸びない → agg 最大は DP4 以下、TP8〜16 × EP2〜8 × CP4〜8、b ≥ 512。
-2. tsu は collective のレイテンシ（hop × α × 層数 × 回数）と expert の直列露出で決まる。TP16（直径 3 hop）が TP32（直径 6 hop + padding）に勝ち、ring1d（15 hop）だと TP8 が最適に落ちる（B: `DP4xPP1x(TP8xDPa1|EP2xTPx4)xCP1 b=1` 353）。
+2. tsu は collective のレイテンシ（hop × α × 層数 × 回数）と expert の直列露出で決まる。TP16（直径 4 hop）が TP32（直径 6 hop + head の端数）に勝ち、ring1d（15 hop）だと TP8 が最適に落ちる（B: `DP4xPP1x(TP8xDPa1|EP2xTPx4)xCP1 b=1` 353）。
 3. 先読み（全ヒット）の価値は τ が小さい時だけ: A vs A' は tsu 566 → 628、agg は変わらない。τ=200 µs（E）では tsu が 1/5 に落ち、先読み（E'）で 129、実測ヒット率（E''）で 122。
 4. expert ストリーム 236 GB/s（D）は agg を A の 62% に落とす最大の単独因子。bank あたり 36→64 GB/s（2 reader/bank か bank 跨ぎレイアウト）が先。
 5. CP は ctx 192 でも Pareto 前線に乗る（KV 4.9 MB/row の分割）が寄与は小さい。ctx 32k（KV 75.5 MB/row）では CP8〜16 が必須になる（別表、`limit_perf_5d.py routing/stats.json 32768`）。
@@ -259,7 +259,7 @@ routing census の要点（分子の実測値）: h1（前 token の top-10 再�
 
 1. τ（層あたり 620 µs の非 DRAM 時間、pass の約半分）を削る。device profiler で router→moe_compute、collective、dispatch を同一 run で分解する（§9.3-14）。
 2. expert ストリームを 236 → 512 GB/s へ（bank あたり 2 reader、または bank 跨ぎレイアウト）。
-3. collective を ring1d から torus 直径算法へ（TP16 で 15 hop → 3 hop）。
+3. collective を ring1d から torus 直径算法へ（TP16 で 15 hop → 4 hop）。
 4. EP×TP_x の 2D（moe_compute の collective combine）と、32 行を超える rows（複数 tile）の lanes。
 5. 先読み（1 ブロック早い投機 routing、ヒット 0.78〜0.94）は 1〜3 の後。
 6. CP は長文脈（≥ 32k）で。

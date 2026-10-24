@@ -280,11 +280,11 @@ per link x 2 links x 4 directions, 515/619 ns per hop, Tensix 359 TFLOP/s HiFi2)
 runtime enters as separately labelled calibration scenarios.  The routing numerator is measured (a CPU-oracle census of
 34 prompts, 8,192 decode positions: per-layer top-10 experts, distinct experts per batch, busiest expert group, and the
 hit rate of a one-block-early speculative router).  Headline, scenario A° (spec physics, torus collectives, the DRAM
-stream never stops, MTP k=1, ctx 192): aggregate 71,688 tok/s at `DP4 x PP1 x (TP8 | EP2 x TPx4) x CP4, b=1024` (4,096
-users) and 749 tok/s/user at `DP2 x PP1 x (TP16 | EP2 x TPx8), b=1`; inside today's implementation constraints (TP 4 or 8,
-EP = TP, 32 verify rows) 9,630 tok/s and 510 tok/s/user; the served DP8 x TP4 x 16 lanes measured 1,186.9 tok/s against
-2,780 for the same shape in the scenario calibrated to its pass period.  The generator, the census tools and the full
-tables are in the shared directory named in the document; the worklog it was derived from is
+stream never stops, MTP k=1, ctx 192): aggregate 71,688 tok/s at `DP4xPP1x(TP8xDPa1|EP2xTPx4)xCP4 b=1024` (4,096 users) and
+749 tok/s/user at `DP2xPP1x(TP16xDPa1|EP2xTPx8)xCP1 b=1`; inside today's implementation constraints (TP 4 or 8, EP = TP, 32 verify
+rows) 9,630 tok/s and 510 tok/s/user; the served DP8 x TP4 x 16 lanes measured 1,186.9 tok/s against
+2,780 for the same shape in the scenario calibrated to its pass period.  The generator, the census tools and the
+full tables are in the shared directory named in the document; the worklog it was derived from is
 `BH-GLX_Qwen3.8-Flash-Next_SC1_handoff_worklog_20261023.md` §10.
 
 ## More
