@@ -283,11 +283,11 @@ one-block-early speculative router, read after the router, every expert every st
 busiest-group skew against the tile padding of column splitting, and the per-user fp32 GDN state round trip.  The dense
 weights (5.38 GB) split 32 ways fit the chips' L1 and stay resident; the experts, state and KV stream from DRAM.
 Context parallelism splits the sequence inside a kv-head replication group (orthogonal to the head split of TP).
-Headline at ctx 192, MTP k=1, routed prefetched: aggregate 81,326 tok/s at `DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048` and 1,836 tok/s/user at
-`DP1xPP2x(TP16xDPa1|EP2xTPx8)xCP2 b=1` (PP1xTP32 1,701 / PP2xTP16 1,836 / PP4xTP8 1,798 / PP8xTP4 1,089: the 6 collectives per layer set the floor
-and the ranking turns on the hop design value: at 2x it is PP4xTP8); read after the router (today's form) 81,326 and 1,330;
-inside today's implementation constraints 9,865 / 624; the served DP8 x TP4 x 16 lanes measured 1,186.9 tok/s against
-9,865 for its own form (12.0 %).  Generator, census and worklog §10 in the shared directory named in the document.
+Headline at ctx 192, MTP k=1, routed prefetched: aggregate 81,281 tok/s at `DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048` and 1,870 tok/s/user at
+`DP1xPP4x(TP8xDPa1|EP2xTPx4)xCP4 b=1` (PP1xTP32 1,695 / PP2xTP16 1,848 / PP4xTP8 1,870 / PP8xTP4 1,118: the 6 collectives per layer set the floor
+and the ranking turns on the hop design value: at 2x it is PP4xTP8); read after the router (today's form) 81,281 and 1,326;
+inside today's implementation constraints 9,848 / 614; the served DP8 x TP4 x 16 lanes measured 1,186.9 tok/s against
+9,848 for its own form (12.1 %).  Generator, census and worklog §10 in the shared directory named in the document.
 
 ## More
 
