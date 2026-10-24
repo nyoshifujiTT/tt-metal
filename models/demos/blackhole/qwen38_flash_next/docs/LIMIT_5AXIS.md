@@ -18,7 +18,7 @@ TP と CP は切る方向が直交する: TP は head（GDN の value head 48、
 
 1. 分母は物理値（DRAM 512 GB/s/chip 読み書き和、chip 間 link 25 GB/s × 2/方向 × 4 方向、1 hop 280 ns + 蓄積転送 2 KiB/(96 B/cycle) = 16 ns、中継 NoC 92 cycle + 32 flit、Tensix 130 core × 1.35 GHz: 行列積 33 cycle/32×32 tile-MAC（HiFi2）、要素演算 16 cycle/tile、gated delta rule 400 cycle/(value head, user, S の 32 列) + 1,100/層、op 固定 300 cycle × 層 20 単品、L1 1,536 KiB/core、DRAM 31.9 GiB/chip の 90%）と HF 定義（H 2560、48 層 = 36 GDN + 12 QSA、512 expert top-10 × 640、GDN 48 value head × 128 の fp32 状態、QSA 24 query head × 256 / 2 kv head、indexer budget 2048 compress 4、vocab 248,320、hc 4 枝 low-rank 320、MTP 1 層；dense bf8、hc mixer/router/norm bf16、expert BF4 2,764,800 B）だけ。
 2. 分子はバイト: dense 5.378 GB、expert 全体 69.36 GB、GDN 状態 1 ユーザ 1 pass 読み+書き 0.231 GB、QSA KV 1 行 ctx 192 で 4.9 MB。routed は census の実 distinct（B=1 10、B=16×2 行 183、B=256 426）と最繁忙 group（EP 分割時）で、一様仮定は使わない。
-3. 層時間 = max(DRAM 車線, 演算 + 隠れない通信 + router 後に露出する routed 読み)。通信は tile ごとに流し、各 all-reduce は演算の半分までに隠れる（隠れない分 = link − 隠れた分 + 最後の tile のレイテンシ）。段 = 48 層 + tail（final mixer, lm_head, MTP 層）をバイト均等で連続分割、slot = 最遅段 + 受け渡し、T_tok = PP × slot、agg = DP × b × R_eff / slot、tsu = R_eff / T_tok。R_eff = 1（k=0）/ 1.376（k=1、本件プロンプト集合の採択率）。
+3. 層時間 = max(DRAM 車線, 演算 + 隠れない通信 + router 後に露出する routed 読み)。通信は tile ごとに流し、層の通信の link 時間の合計はその層の演算の半分までに隠れる（隠れない分 = link の合計 − 隠れた分 + 最後の tile のレイテンシの合計）。段 = 48 層 + tail（final mixer, lm_head, MTP 層）をバイト均等で連続分割、slot = 最遅段 + 受け渡し、T_tok = PP × slot、agg = DP × b × R_eff / slot、tsu = R_eff / T_tok。R_eff = 1（k=0）/ 1.376（k=1、本件プロンプト集合の採択率）。
 4. 容量: 各 chip の expert 分 + dense 分 + ユーザの状態/KV ≤ 0.9 × 31.9 GiB（この場合には runtime・trace・CB に 10% 残す）。
 5. MoE の router 依存は 4 ケースを並列列挙（§4）。
 6. 実装拘束（TP ∈ {4,8}、EP = TP、PP = CP = 1、lanes×(k+1) ≤ 32）は別枠。
@@ -155,5 +155,5 @@ hop 280 ns を 1 / 2 / 4 倍にしたときの tsu（各 TP の最良構成）: 
 - rows > 256 の routing は census 外で fitted（distinct の減衰則と偏り則）。b=512 の agg はこの外挿に依存。
 - k=1 の R_eff 1.376 は本件プロンプト集合（ISL128）の採択率。
 - 投機 routing のヒット率は CPU oracle（bf16 expert）の greedy 連鎖。device の BF4 連鎖では未測（queue 済）。
-- op 固定 300 cycle × 20 単品/層は 27B の単品分割を借りた（演算の 1% 未満、順位に影響しない）。
+- op 固定 300 cycle × 20 単品/層は 27B の単品分割を借りた（1 token で 0.002 ms = b=1 TP32 の演算 0.077 ms の 2.1%、b≥16 では 0.1% 以下）。
 - CP の局所 top-k（各 chip が budget/CP を自分の範囲から選ぶ）は全体 top-k と選択が異なりうる（数値の差、時間には影響しない）。
