@@ -272,6 +272,20 @@ length 3.25 tokens per step over 672 of the 880 prompts (math, humanities and ST
 math 4.18, RAG 3.63, multilingual 3.49, reasoning 3.48, STEM 3.17, summarization 3.02, QA 2.97, writing 2.81, humanities 2.76,
 roleplay 2.24.  The paper's rows, the throughput split and the plain-decode arm: `docs/NUMERICS.md`.
 
+## 11. Decode limit on one Blackhole Galaxy: the round model (the 27B README method) and the five parallel axes
+
+`docs/LIMIT_ROUND.md` applies the method of `models/demos/blackhole/qwen35_27b_glx/README.md` (every chip's DRAM streams
+its frame without stopping; the round time is the equalised frame window / 512 GB/s; compute and communication must fit
+the window) to this MoE + GDN model, from physical values and the HF shapes only.  The MoE terms are the routed experts
+readable only after each layer's router (four cases: read after the router, a one-block-early speculative router at the
+census hit rate, prefetched, every expert every step), column-sliced over the stage's chips (no skew), and the per-user
+fp32 GDN state round trip.  Result at ctx 192: TP8 x PP4 is the only stage shape whose compute keeps up with the DRAM
+(the compute / DRAM ratio is 3.0-4.8 at every batch), communication hides under it; with the routed read finished before
+the router the token time equals the DRAM rounds: 2,861 tok/s/user at b=1 (k=1) and 34,325 tok/s at
+b=256x1 rows; at the census hit rate 2,327 and 33,424; read after the router (today's form) the chain is
+2.5-6x the DRAM time.  The served DP8 x TP4 x 16 lanes measured 1,186.9 tok/s against 2,966 for its own form and
+10,590 for the prefetched limit at the same batch.  Generator, census and worklog §10.R in the shared directory named in the document.
+
 ## More
 
 - `docs/PROOFS.md`: the fresh-clone release proof of 2026-09-06 on the QuietBox (build, checkpoint, first start,
@@ -283,3 +297,4 @@ roleplay 2.24.  The paper's rows, the throughput split and the plain-decode arm:
 - `docs/TESTING.md`: the no-device tests, the reference corpus Q38-REF-v1 and its scorer, the regression harness
   (`tools/ci/q38_ci.py`), how to run the acceptance gate.
 - `docs/PREFILL.md`: the prefill chunk bodies and the 2048-row slab (`--prefill-slab`): what runs as one matmul, its numerics class, the expert forms, the served rates.
+- `docs/LIMIT_ROUND.md`: the round model (the 27B README method) applied to this model: the DRAM column, rounds and the equalised window, the chips per stage that keep up, communication under the window, the four routed-read cases, and the tsu/agg limits per batch (section 11).
