@@ -275,17 +275,18 @@ roleplay 2.24.  The paper's rows, the throughput split and the plain-decode arm:
 ## 11. Decode limit on one Blackhole Galaxy: the five-dimensional parallel model (DP x PP x TP x EP x CP)
 
 `docs/LIMIT_5D.md` is the desk-study limit of decode on a 32-chip BH Galaxy as a function of the five parallel degrees,
-in the style of `models/demos/blackhole/qwen35_27b_glx/README.md`: physical values (DRAM 512 GB/s per chip, ETH 25 GB/s
-per link x 2 links x 4 directions, 515/619 ns per hop, Tensix 359 TFLOP/s HiFi2) and the HF shapes only; the served
-runtime enters as separately labelled calibration scenarios.  The routing numerator is measured (a CPU-oracle census of
-34 prompts, 8,192 decode positions: per-layer top-10 experts, distinct experts per batch, busiest expert group, and the
-hit rate of a one-block-early speculative router).  Headline, scenario A° (spec physics, torus collectives, the DRAM
-stream never stops, MTP k=1, ctx 192): aggregate 71,688 tok/s at `DP4xPP1x(TP8xDPa1|EP2xTPx4)xCP4 b=1024` (4,096 users) and
-749 tok/s/user at `DP2xPP1x(TP16xDPa1|EP2xTPx8)xCP1 b=1`; inside today's implementation constraints (TP 4 or 8, EP = TP, 32 verify
-rows) 9,630 tok/s and 510 tok/s/user; the served DP8 x TP4 x 16 lanes measured 1,186.9 tok/s against
-2,780 for the same shape in the scenario calibrated to its pass period.  The generator, the census tools and the
-full tables are in the shared directory named in the document; the worklog it was derived from is
-`BH-GLX_Qwen3.8-Flash-Next_SC1_handoff_worklog_20261023.md` §10.
+in the style of `models/demos/blackhole/qwen35_27b_glx/README.md`: physical values only (DRAM 512 GB/s per chip, ETH
+25 GB/s per link x 2 links x 4 directions, 280 ns per hop with store-and-forward packets, the Tensix cycle costs of the
+27B README section 3) and the HF shapes; no served-runtime measurement enters the limit.  The routing numerator is the
+model's own property, measured by a CPU-oracle census (34 prompts, 8,192 decode positions: per-layer top-10 experts,
+distinct experts per batch, busiest expert group, the hit rate of a one-block-early speculative router).  Headline,
+scenario P1 (torus collectives, no expert prefetch, MTP k=1, ctx 192): aggregate 71,688 tok/s at `DP4xPP1x(TP8xDPa1|EP2xTPx4)xCP4 b=1024`
+(4,096 users; the same under every collective algorithm, the DRAM stream dominates) and 831 tok/s/user at
+`DP1xPP1x(TP32xDPa1|EP8xTPx4)xCP1 b=1` (best at TP16 796, TP8 620, TP4 348; the order hangs on the 280 ns hop design value: at 2x it is TP8, at 4x TP8, section 6.2);
+inside today's implementation constraints (TP 4 or 8, EP = TP, 32 verify rows) 9,630 tok/s and 510 tok/s/user;
+the served DP8 x TP4 x 16 lanes measured 1,186.9 tok/s against a limit of 9,630 for that shape (12.3 %).
+The generator, the census tools and the full tables are in the shared directory named in the document; the worklog it was
+derived from is `BH-GLX_Qwen3.8-Flash-Next_SC1_handoff_worklog_20261023.md` §10.
 
 ## More
 
