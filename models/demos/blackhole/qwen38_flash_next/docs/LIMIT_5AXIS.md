@@ -48,7 +48,7 @@ TP と CP は切る方向が直交する: TP は head（GDN の value head 48、
 
 - **agg tps 最大（この場合には全ヒット、k=1）**: **81,281 t/s** = `DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048`（router split、4096 users、T_pass 69.3 ms = 段の DRAM/pass（演算 19.9 + 通信 16.6 は窓の中）、常駐 80/392 MB、tsu 19.8）。重みを償却しきった漸近 95,605 の 85%。census 80,707、全ミス 81,281、全 expert 読み 81,281（agg はどのケースも DRAM 支配で差が小さい）。k=0 全ヒット 60,413。
 - **tsu 最大（全ヒット、k=1）**: **1,748 t/s/u** = `DP1xPP4x(TP8xDPa1|EP1xTPx8)xCP1 b=1`（router split、T_tok 0.787 ms = Σ段の占有: 演算 0.393 + 通信 0.360 + 受け渡し; 段の DRAM/pass 0.218 ms は空き時間に収まる、常駐 169/199 MB）。PP × TP の梯子（§5.2）で PP1×TP32 1,513 / PP2×TP16 1,603 / PP4×TP8 1,748 / PP8×TP4 1,118: 上位 2 段は tsu 最大の 92% 以内で、順位は hop の設計値で入れ替わる（×2 で PP4×TP8、×4 で PP8×TP4）。census 1,481（`DP1xPP4x(TP8xDPa1|EP1xTPx8)xCP1 b=1`）、全ミス 1,212（`DP1xPP1x(TP32xDPa1|EP1xTPx32)xCP1 b=1`）、全 expert 読み 313（`DP1xPP1x(TP32xDPa1|EP8xTPx4)xCP16 b=1`、1 users）。k=0 全ヒット 1,498。
-- **5 軸の答え**: agg 側は **`DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048`**。tsu 側は **`DP1xPP4x(TP8xDPa1|EP1xTPx8)xCP1 b=1`**。中間の users 数ごとの最良は §5.5 の Pareto 前線（PP>1 は 4 点、EP>1 は 11 点、CP>1 は 11 点、全 13 点）。
+- **5 軸の答え**: agg 側は **`DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048`**。tsu 側は **`DP1xPP4x(TP8xDPa1|EP1xTPx8)xCP1 b=1`**。中間の users 数ごとの最良は §5.6 の Pareto 前線（PP>1 は 4 点、EP>1 は 11 点、CP>1 は 11 点、全 13 点）。
 - **今日の実装拘束内（TP∈{4,8}, EP=TP, PP=CP=1, lanes×(k+1) ≤ 32）**: 全ヒット agg 9,848（`DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16`）、tsu 614（`DP4xPP1x(TP8xDPa1|EP8xTPx1)xCP1 b=1`）；全ミス agg 9,848、tsu 614。現行形 `DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16` は全ミスで 9,848（T_pass 17.88 ms: 段 DRAM/pass 17.88、演算 3.20 + 通信 0.23 + routed 露出 13.31）、全ヒットで 9,848；**実測 1,186.9 t/s は全ミス机上値の 12.1%**。
 
 ### 5.2 PP × TP の梯子（b=1、全ヒット、k=1）と hop 設計値への感度
