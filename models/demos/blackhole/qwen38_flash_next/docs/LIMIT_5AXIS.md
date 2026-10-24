@@ -9,7 +9,7 @@
 | DP | ユーザ集合を複製モデルに | 複製ごとに全部（DRAM 容量を複製分食う） | 無し | 複製数に線形 | 不変 |
 | PP | 層（＋lm_head）をバイト均等の段に; b 人を PP 個の micro-batch に分けて段を順に通す | 段の dense 部は段が空いている間に L1 へ先読み（L1 177 MiB/chip に入る分）、入らない分と routed は占有窓の中で流し読み | 段間受け渡し（残差 [rows, 4H]/TP） | 段の周期 = max(段の占有 × micro-batch 数, 段の DRAM/pass) | 1 token = 段の周期（Σ占有 ≤ 周期） |
 | TP | 1 層の行列を head/列で TP 枚に（同じ token を全員で） | 互いに素な 1/TP | all-reduce（RS → 残差 → AG）× 2 本 | 1 step が短い | 大きく効くが「最後の tile のレイテンシ × 本数 × 層数」が床 |
-| EP | routed expert を群に丸ごと（群内は列分割 TPx） | expert は 1 回 | EP>1 で dispatch + combine の all-to-all; 最繁忙 group が時間を決め他は寝る | 偏り分だけ損 | 列分割の tile padding を避けられる |
+| EP | routed expert を群に丸ごと（群内は列分割 TPx） | expert は 1 回 | expert 群が行を持たない chip に跨る（DP_a > 1）ときだけ dispatch + combine の all-to-all（同じ TP 群の中なら行は all-gather 済みで combine は MLP の all-reduce に畳める）; 最繁忙 group が時間を決め他は寝る | 偏り分だけ損 | 列分割の tile padding を避けられる |
 | CP | 1 ユーザの**系列**を kv-head 複製群の中で分割（index ブロックと K/V を 1/CP ずつ、局所 top-k、部分 (o, lse) を merge） | 無関係 | merge 1 本（QSA 層のみ） | 長文脈で KV 読みが支配する時に効く | 同左 |
 
 TP と CP は切る方向が直交する: TP は head（GDN の value head 48、QSA の query head 24）を分け、CP は 1 つの kv head の系列（時間軸）を分ける。本件の QSA は kv head が 2 本なので TP_a > 2 では TP_a/2 chip が同じ kv head を複製しており、CP はその複製群の中で系列を分ける。GDN の状態は系列長に依らない（O(1)）ので CP の対象外。
