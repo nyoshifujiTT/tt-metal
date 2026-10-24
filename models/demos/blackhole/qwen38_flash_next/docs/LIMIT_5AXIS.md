@@ -155,8 +155,8 @@ hop 280 ns を 1 / 2 / 4 倍にしたときの tsu（各 TP の最良構成）: 
 ## 6. 未確定（決着方法）
 
 - hop 280 ns は EthernetSsDesignSpec Table 16（AI clk 1.5 GHz）の設計値、本機 1.35 GHz では最大 311 ns、ケーブル伝搬は仕様値無し: §5.2 の感度の範囲。
-- rows > 256 の routing は census 外で fitted（distinct の減衰則と偏り則）。b=512 の agg はこの外挿に依存。
+- rows > 256 の routing は census 外で fitted（distinct の減衰則と偏り則）。b ≥ 256 の agg（agg 最大点 `DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048` を含む）はこの外挿に依存。
 - k=1 の R_eff 1.376 は本件プロンプト集合（ISL128）の採択率。
 - 投機 routing のヒット率は CPU oracle（bf16 expert）の greedy 連鎖。device の BF4 連鎖では未測（queue 済）。
-- op 固定 300 cycle × 20 単品/層は 27B の単品分割を借りた（1 token で 0.002 ms = b=1 TP32 の演算 0.077 ms の 2.1%、b≥16 では 0.1% 以下）。
+- op 固定 300 cycle × 20 単品/層は 27B の単品分割を借りた（1 token で 0.002 ms = tsu 最大点 `DP1xPP4x(TP8xDPa1|EP2xTPx4)xCP4 b=1` の演算 0.213 ms の 0.8%、b=16 の最良点では 0.5%）。
 - CP の局所 top-k（各 chip が budget/CP を自分の範囲から選ぶ）は全体 top-k と選択が異なりうる（数値の差、時間には影響しない）。
