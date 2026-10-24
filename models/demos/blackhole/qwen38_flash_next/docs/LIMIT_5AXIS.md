@@ -48,7 +48,7 @@ TP と CP は切る方向が直交する: TP は head（GDN の value head 48、
 - **agg tps 最大（この場合には全ヒット、k=1）**: **81,024 t/s** = `DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048`（4096 users、T_pass 69.6 ms = 段の占有 × micro-batch（演算 13.7 + 通信 14.5 + 流し読み）、段 DRAM/pass 61.1 ms、tsu 19.8）。重みを償却しきった漸近 95,605 の 85%。census 80,454、全ミス 81,024、全 expert 読み 80,819（agg はどのケースも DRAM 支配で差が小さい）。k=0 全ヒット 60,140。
 - **tsu 最大（全ヒット、k=1）**: **1,722 t/s/u** = `DP1xPP4x(TP8xDPa1|EP2xTPx4)xCP4 b=1`（T_tok 0.799 ms = Σ段の占有: 演算 0.213 + 通信 0.428 + L1 に入らない重みと routed の流し読み; 段の DRAM/pass 0.453 ms は空き時間に収まる）。TP32×PP1 b=1 は 1,457（通信 0.858 ms が床）。census 1,492（`DP1xPP2x(TP16xDPa1|EP2xTPx8)xCP1 b=1`）、全ミス 1,184、全 expert 読み 224（`DP1xPP1x(TP32xDPa1|EP8xTPx4)xCP16 b=16`、16 users）。k=0 全ヒット 1,651。
 - **5 軸の答え**: agg 側は **`DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048`**。tsu 側は **`DP1xPP4x(TP8xDPa1|EP2xTPx4)xCP4 b=1`**。中間の users 数ごとの最良は §5.5 の Pareto 前線（PP>1 は 1 点、EP>1 は 12 点、CP>1 は 13 点、全 13 点）。
-- **今日の実装拘束内（TP∈{4,8}, EP=TP, PP=CP=1, lanes×(k+1) ≤ 32）**: 全ヒット agg 9,621（`DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16`）、tsu 504（`DP4xPP1x(TP8xDPa1|EP8xTPx1)xCP1 b=1`）；全ミス agg 6,531、tsu 504。現行形 `DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16` は全ミスで 6,531（T_pass 26.97 ms: 段 DRAM/pass 4.72、演算 2.47 + 通信 0.26 + routed 露出 13.31）、全ヒットで 9,621；**実測 1,186.9 t/s は全ミス机上値の 18.2%**。
+- **今日の実装拘束内（TP∈{4,8}, EP=TP, PP=CP=1, lanes×(k+1) ≤ 32）**: 全ヒット agg 9,621（`DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16`）、tsu 504（`DP4xPP1x(TP8xDPa1|EP8xTPx1)xCP1 b=1`）；全ミス agg 9,621、tsu 504。現行形 `DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16` は全ミスで 9,621（T_pass 18.31 ms: 段 DRAM/pass 4.72、演算 2.47 + 通信 0.26 + routed 露出 13.31）、全ヒットで 9,621；**実測 1,186.9 t/s は全ミス机上値の 12.3%**。
 
 ### 5.2 各 TP の tsu 最良（b=1、全ヒット、k=1）と hop 設計値への感度
 
@@ -130,11 +130,11 @@ hop 280 ns を 1 / 2 / 4 倍にしたときの tsu（各 TP の最良構成）: 
 | 69,998 | 68.4 | 1024 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=1024` | 20.129 | 15.896 | 3.079 | 6.146 | 4.147 | 64.0 | fitted |
 | 55,929 | 109.2 | 512 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=512` | 12.597 | 8.363 | 1.887 | 3.374 | 4.147 | 64.0 | fitted |
 | 40,434 | 157.9 | 256 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=256` | 8.712 | 4.596 | 1.272 | 1.997 | 4.031 | 62.2 | fitted |
-| 23,676 | 185.0 | 128 | `DP1xPP1x(TP8xDPa4|EP8xTPx4)xCP4 b=128` | 7.439 | 3.423 | 0.881 | 0.814 | 3.657 | 56.4 | census |
-| 13,538 | 211.5 | 64 | `DP1xPP1x(TP8xDPa4|EP8xTPx4)xCP4 b=64` | 6.505 | 2.482 | 0.671 | 0.653 | 3.204 | 49.4 | census |
-| 8,526 | 266.4 | 32 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=32` | 5.165 | 1.301 | 0.502 | 0.949 | 2.545 | 39.3 | census |
-| 5,924 | 370.2 | 16 | `DP1xPP1x(TP32xDPa1|EP8xTPx4)xCP8 b=16` | 3.717 | 0.921 | 0.357 | 0.884 | 1.832 | 28.3 | census |
-| 4,550 | 568.7 | 8 | `DP1xPP1x(TP32xDPa1|EP8xTPx4)xCP4 b=8` | 2.419 | 0.770 | 0.245 | 0.874 | 1.191 | 18.4 | census |
+| 27,320 | 213.4 | 128 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=128` | 6.447 | 2.713 | 0.911 | 1.336 | 3.657 | 56.4 | census |
+| 17,464 | 272.9 | 64 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=64` | 5.043 | 1.772 | 0.686 | 1.027 | 3.204 | 49.4 | census |
+| 10,885 | 340.2 | 32 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP1 b=32` | 4.045 | 1.434 | 0.502 | 0.923 | 2.545 | 39.3 | census |
+| 7,101 | 443.8 | 16 | `DP1xPP1x(TP32xDPa1|EP8xTPx4)xCP1 b=16` | 3.100 | 1.054 | 0.357 | 0.858 | 1.832 | 28.3 | census |
+| 4,905 | 613.1 | 8 | `DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP1 b=4` | 2.244 | 0.981 | 0.269 | 0.709 | 1.224 | 18.9 | census |
 | 3,411 | 852.8 | 4 | `DP2xPP1x(TP16xDPa1|EP2xTPx8)xCP2 b=2` | 1.613 | 0.896 | 0.167 | 0.716 | 0.702 | 18.0 | census |
 | 2,200 | 1100.0 | 2 | `DP2xPP1x(TP16xDPa1|EP2xTPx8)xCP4 b=1` | 1.251 | 0.861 | 0.118 | 0.725 | 0.382 | 9.8 | census |
 | 1,184 | 1183.9 | 1 | `DP1xPP1x(TP32xDPa1|EP1xTPx32)xCP1 b=1` | 1.162 | 0.629 | 0.077 | 0.858 | 0.213 | 16.5 | census |
@@ -148,7 +148,7 @@ hop 280 ns を 1 / 2 / 4 倍にしたときの tsu（各 TP の最良構成）: 
 | census | 0 | 1,924 (240 tsu) | `DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=1` | 395 (1,582 agg) | `DP4xPP1x(TP8xDPa1|EP8xTPx1)xCP1 b=1` |
 | census | 1 | 8,632 (67 tsu) | `DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16` | 465 (1,860 agg) | `DP4xPP1x(TP8xDPa1|EP8xTPx1)xCP1 b=1` |
 | miss | 0 | 2,043 (255 tsu) | `DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=1` | 425 (1,699 agg) | `DP4xPP1x(TP8xDPa1|EP8xTPx1)xCP1 b=1` |
-| miss | 1 | 6,531 (51 tsu) | `DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16` | 504 (2,018 agg) | `DP4xPP1x(TP8xDPa1|EP8xTPx1)xCP1 b=1` |
+| miss | 1 | 9,621 (75 tsu) | `DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16` | 504 (2,018 agg) | `DP4xPP1x(TP8xDPa1|EP8xTPx1)xCP1 b=1` |
 | all | 0 | 137 (17 tsu) | `DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=1` | 24 (97 agg) | `DP4xPP1x(TP8xDPa1|EP8xTPx1)xCP1 b=1` |
 | all | 1 | 4,128 (32 tsu) | `DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16` | 59 (3,749 agg) | `DP4xPP1x(TP8xDPa1|EP8xTPx1)xCP1 b=16` |
 

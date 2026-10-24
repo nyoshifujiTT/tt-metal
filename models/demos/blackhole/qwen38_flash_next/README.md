@@ -286,7 +286,7 @@ and stream the rest and the routed experts inside their window.  Headline at ctx
 81,024 tok/s at `DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048` and 1,722 tok/s/user at `DP1xPP4x(TP8xDPa1|EP2xTPx4)xCP4 b=1` (TP32 x PP1 reaches 1,457: its all-reduce
 latency is the floor; at 2x the hop design value the best TP becomes TP8); read after the router
 (today's form) 81,024 and 1,184; inside today's implementation constraints 9,621 / 504; the served
-DP8 x TP4 x 16 lanes measured 1,186.9 tok/s against 6,531 for its own form (18.2 %).  Generator, census and
+DP8 x TP4 x 16 lanes measured 1,186.9 tok/s against 9,621 for its own form (12.3 %).  Generator, census and
 worklog §10 in the shared directory named in the document.
 
 ## More
