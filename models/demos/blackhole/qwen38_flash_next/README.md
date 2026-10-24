@@ -274,18 +274,19 @@ roleplay 2.24.  The paper's rows, the throughput split and the plain-decode arm:
 
 ## 11. Decode limit on one Blackhole Galaxy: the unconstrained five-axis model (DP, PP, TP, EP, CP)
 
-`docs/LIMIT_5AXIS.md` enumerates every DP x PP x TP x EP x CP decomposition of the 32-chip BH Galaxy (3220 shapes x
-batch) and gives each one's token time and aggregate rate from physical values and the HF shapes only (DRAM 512 GB/s,
+`docs/LIMIT_5AXIS.md` enumerates every DP x PP x TP x EP x CP decomposition of the 32-chip BH Galaxy (3841 shapes,
+batch 1-2048) and gives each one's token time and aggregate rate from physical values and the HF shapes only (DRAM 512 GB/s,
 ETH 25 GB/s x 2 links x 4 directions, 280 ns per hop with store-and-forward packets, the Tensix cycle costs); no design
 principle is imposed and no served measurement enters.  The MoE terms: the routed experts read after each layer's
 router (four cases: prefetched, the census hit rate of a one-block-early speculative router, read after the router,
 every expert every step), expert parallelism with the census' busiest-group skew against the tile padding of column
 splitting, and the per-user fp32 GDN state round trip.  Context parallelism splits the sequence inside a kv-head
-replication group (orthogonal to the head split of TP).  Headline at ctx 192, MTP k=1, routed prefetched: aggregate
-58,385 tok/s at `DP4xPP1x(TP8xDPa1|EP2xTPx4)xCP4 b=512` and 1,393 tok/s/user at `DP1xPP1x(TP32xDPa1|EP1xTPx32)xCP1 b=1` (the DRAM lane and the
-all-reduce latency floor coincide; at 2x the hop design value the best TP becomes TP32); read after the router
-(today's form) 56,129 and 1,146; inside today's implementation constraints 9,621 / 504; the served
-DP8 x TP4 x 16 lanes measured 1,186.9 tok/s against 9,621 for its own form (12.3 %).  Generator, census and
+replication group (orthogonal to the head split of TP); pipeline stages prefetch their dense weights into L1 while idle
+and stream the rest and the routed experts inside their window.  Headline at ctx 192, MTP k=1, routed prefetched: aggregate
+81,024 tok/s at `DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048` and 1,722 tok/s/user at `DP1xPP4x(TP8xDPa1|EP2xTPx4)xCP4 b=1` (TP32 x PP1 reaches 1,457: its all-reduce
+latency is the floor; at 2x the hop design value the best TP becomes TP8); read after the router
+(today's form) 81,024 and 1,184; inside today's implementation constraints 9,621 / 504; the served
+DP8 x TP4 x 16 lanes measured 1,186.9 tok/s against 6,531 for its own form (18.2 %).  Generator, census and
 worklog §10 in the shared directory named in the document.
 
 ## More
@@ -300,3 +301,4 @@ worklog §10 in the shared directory named in the document.
   (`tools/ci/q38_ci.py`), how to run the acceptance gate.
 - `docs/PREFILL.md`: the prefill chunk bodies and the 2048-row slab (`--prefill-slab`): what runs as one matmul, its numerics class, the expert forms, the served rates.
 - `docs/LIMIT_5AXIS.md`: the unconstrained five-axis (DP, PP, TP, EP, CP) decode limit on one BH Galaxy from physical values: the formulas, the four routed-read cases, the per-TP optima and their sensitivity to the hop latency, the Pareto fronts, and the census behind them (section 11).
+- `docs/LIMIT_5AXIS.md`: the five-axis (DP, PP, TP, EP, CP) decode limit on one BH Galaxy from physical values: the formulas (pipeline stages prefetching their dense weights into L1 while idle, the routed experts read inside the window), the four routed-read cases, the per-TP optima and their sensitivity to the hop latency, the Pareto fronts, and the census behind them (section 11).
