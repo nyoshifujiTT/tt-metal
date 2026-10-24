@@ -50,25 +50,25 @@ TP と CP は切る方向が直交する: TP は head（GDN の value head 48、
 - **5 軸の答え**: agg 側は **`DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048`**。tsu 側は **`DP1xPP4x(TP8xDPa1|EP2xTPx4)xCP4 b=1`**。中間の users 数ごとの最良は §5.5 の Pareto 前線（PP>1 は 1 点、EP>1 は 12 点、CP>1 は 13 点、全 13 点）。
 - **今日の実装拘束内（TP∈{4,8}, EP=TP, PP=CP=1, lanes×(k+1) ≤ 32）**: 全ヒット agg 9,621（`DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16`）、tsu 504（`DP4xPP1x(TP8xDPa1|EP8xTPx1)xCP1 b=1`）；全ミス agg 6,531、tsu 504。現行形 `DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16` は全ミスで 6,531（T_pass 26.97 ms: 段 DRAM/pass 4.72、演算 2.47 + 通信 0.26 + routed 露出 13.31）、全ヒットで 9,621；**実測 1,186.9 t/s は全ミス机上値の 18.2%**。
 
-### 5.2 各 TP の最良（b=1、全ヒット、k=1）と hop 設計値への感度
+### 5.2 各 TP の tsu 最良（b=1、全ヒット、k=1）と hop 設計値への感度
 
-| TP_a | PP1, EP1×TPx=TP（列等分）tsu | agg | 最良の構成（PP/EP/CP 自由） | tsu | agg | T_tok [ms]; 段 DRAM/pass / 演算 / 通信 |
+| TP_a | PP1, EP1×TPx=TP（列等分）tsu | agg (users) | tsu 最良の構成（PP/EP/CP 自由） | tsu | agg (users) | T_tok [ms]; 段 DRAM/pass / 演算 / 通信 |
 |---|---|---|---|---|---|---|
-| 4 | 346 | 2,767 | `DP1xPP8x(TP4xDPa1|EP1xTPx4)xCP1 b=1` | 1232 | 1,232 | 1.117; 0.387 / 0.368 / 0.262 |
-| 8 | 609 | 2,434 | `DP1xPP4x(TP8xDPa1|EP2xTPx4)xCP4 b=1` | 1722 | 1,722 | 0.799; 0.453 / 0.213 / 0.428 |
-| 16 | 1056 | 2,111 | `DP1xPP2x(TP16xDPa1|EP2xTPx8)xCP1 b=1` | 1635 | 1,635 | 0.841; 0.448 / 0.118 / 0.709 |
-| 32 | 1457 | 1,457 | `DP1xPP1x(TP32xDPa1|EP2xTPx16)xCP1 b=1` | 1457 | 1,457 | 0.944; 0.629 / 0.077 / 0.858 |
+| 4 | 346 | 2,767 (8) | `DP1xPP8x(TP4xDPa1|EP1xTPx4)xCP1 b=1` | 1232 | 1,232 (1) | 1.117; 0.387 / 0.368 / 0.262 |
+| 8 | 609 | 2,434 (4) | `DP1xPP4x(TP8xDPa1|EP2xTPx4)xCP4 b=1` | 1722 | 1,722 (1) | 0.799; 0.453 / 0.213 / 0.428 |
+| 16 | 1056 | 2,111 (2) | `DP1xPP2x(TP16xDPa1|EP2xTPx8)xCP1 b=1` | 1635 | 1,635 (1) | 0.841; 0.448 / 0.118 / 0.709 |
+| 32 | 1457 | 1,457 (1) | `DP1xPP1x(TP32xDPa1|EP2xTPx16)xCP1 b=1` | 1457 | 1,457 (1) | 0.944; 0.629 / 0.077 / 0.858 |
 
 hop 280 ns を 1 / 2 / 4 倍にしたときの tsu（各 TP の最良構成）: TP4 1232 / 1230 / 1034、TP8 1722 / 1353 / 819、TP16 1635 / 995 / 558、TP32 1457 / 864 / 476 → 最良は 1 倍で TP8、2 倍で TP8、4 倍で TP4。「TP8 が tsu 最大」は hop が設計値（280 ns、Table 16）に近い場合に限る。
 
-### 5.3 各 TP の最良（b=16、全ヒット、k=1）
+### 5.3 各 TP の tsu 最良（b=16、全ヒット、k=1; DP が違うと users が違うので agg は同列に比べない）
 
-| TP_a | PP1, EP1×TPx=TP（列等分）tsu | agg | 最良の構成（PP/EP/CP 自由） | tsu | agg | T_tok [ms]; 段 DRAM/pass / 演算 / 通信 |
+| TP_a | PP1, EP1×TPx=TP（列等分）tsu | agg (users) | tsu 最良の構成（PP/EP/CP 自由） | tsu | agg (users) | T_tok [ms]; 段 DRAM/pass / 演算 / 通信 |
 |---|---|---|---|---|---|---|
-| 4 | 82 | 10,454 | `DP1xPP8x(TP4xDPa1|EP1xTPx4)xCP2 b=16` | 278 | 4,443 | 4.955; 3.925 / 0.538 / 0.270 |
-| 8 | 139 | 8,921 | `DP1xPP4x(TP8xDPa1|EP2xTPx4)xCP4 b=16` | 341 | 5,452 | 4.038; 2.070 / 0.471 / 0.428 |
-| 16 | 219 | 7,007 | `DP1xPP2x(TP16xDPa1|EP4xTPx4)xCP8 b=16` | 431 | 6,896 | 3.193; 1.113 / 0.416 / 0.735 |
-| 32 | 396 | 6,328 | `DP1xPP1x(TP32xDPa1|EP8xTPx4)xCP16 b=16` | 495 | 7,917 | 2.781; 0.911 / 0.357 / 0.902 |
+| 4 | 82 | 10,454 (128) | `DP1xPP8x(TP4xDPa1|EP1xTPx4)xCP2 b=16` | 278 | 4,443 (16) | 4.955; 3.925 / 0.538 / 0.270 |
+| 8 | 139 | 8,921 (64) | `DP1xPP4x(TP8xDPa1|EP2xTPx4)xCP4 b=16` | 341 | 5,452 (16) | 4.038; 2.070 / 0.471 / 0.428 |
+| 16 | 219 | 7,007 (32) | `DP1xPP2x(TP16xDPa1|EP4xTPx4)xCP8 b=16` | 431 | 6,896 (16) | 3.193; 1.113 / 0.416 / 0.735 |
+| 32 | 396 | 6,328 (16) | `DP1xPP1x(TP32xDPa1|EP8xTPx4)xCP16 b=16` | 495 | 7,917 (16) | 2.781; 0.911 / 0.357 / 0.902 |
 
 ### 5.4 ケース × k の最大
 
