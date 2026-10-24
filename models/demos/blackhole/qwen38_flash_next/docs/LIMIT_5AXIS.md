@@ -26,8 +26,8 @@ TP と CP は切る方向が直交する: TP は head（GDN の value head 48、
 ## 3. 応用: TT デバイス（BH Galaxy）で効いた物理
 
 - **通信の床**: 1 行 [1,2560] bf16 の all-reduce（RS+AG を 1 本）の最後の tile のレイテンシは TP4 1.37 µs、TP8 2.14、TP16 3.69、TP32 4.47（submesh の直径: 1×4 で 2、2×4 で 3、4×4 で 5、8×4 で 6 hop）。層 2 本 + hc 統計 2 本 × 48 層で TP32 は 0.86 ms/token の床。link 時間は B=1 で無視できる。
-- **tile padding（32 列）**: expert の中間 640 列を TPx 分割すると 1 chip 640/TPx 列で、TPx=32 で 20 列 → 32 に padding = 1.6 倍のバイト。同様に shared 640（TP_a=32 で 1.6 倍）、hc low-rank 320（3.2 倍）。**EP は expert を丸ごと置くのでこの padding が無く、偏り（census: 8 group で最繁忙/平均 B=16×2 1.23 倍）と引き換えになる** — TP32 では EP8×TPx4 が EP1×TPx32 に勝つ理由。
-- **GDN 状態**: fp32 [48,128,128] × 36 層 = 1 ユーザ 0.115 GB 常駐、毎 pass 読み+書き 0.231 GB。B に比例して DRAM の列に乗り、B ≥ 64 で dense + routed を超える → agg の漸近は 32 × 512 GB/s ÷ 0.2309 GB = 70,952 pass/s。
+- **tile padding（32 列）**: expert の中間 640 列を TPx 分割すると 1 chip 640/TPx 列で、TPx=32 で 20 列 → 32 に padding = 1.6 倍のバイト。同様に shared 640（TP_a=32 で 1.6 倍）、hc low-rank 320（3.2 倍）。**EP は expert を丸ごと置くのでこの padding が無く、偏り（census: 8 group で最繁忙/平均 B=16×2 1.23 倍）と引き換えになる** — TP32 で b≥4 から EP8×TPx4 が EP1×TPx32 に勝つ理由（b=1 では EP1: 1393 vs 1134; b=16 では EP8: 471 vs 396）。
+- **GDN 状態**: fp32 [48,128,128] × 36 層 = 1 ユーザ 0.115 GB 常駐、毎 pass 読み+書き 0.231 GB。B に比例して DRAM の列に乗り（b=128×2 行で 29.6 GB、dense + routed 62.1 GB の 48%）→ 重みを償却しきった agg の漸近は 32 × 512 GB/s ÷ 0.2309 GB = 70,952 pass/s。
 - **routed は router の後**: dense は先読みできるが、層 l の top-10 は router まで分からない。先読みの当たり方で 4 ケース。
 - **1 行タイル 32 行**: B × (k+1) ≤ 32 が今日の lanes 形の上限。限界性能は tile を複数並べる形で b を 512 まで振る。
 
