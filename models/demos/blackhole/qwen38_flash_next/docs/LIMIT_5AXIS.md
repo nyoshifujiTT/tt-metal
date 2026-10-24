@@ -49,7 +49,7 @@ TP と CP は切る方向が直交する: TP は head（GDN の value head 48、
 - **agg tps 最大（この場合には全ヒット、k=1）**: **81,281 t/s** = `DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048`（router split、4096 users、T_pass 69.3 ms = 段の DRAM/pass（演算 19.9 + 通信 16.6 は窓の中）、常駐 80/392 MB、tsu 19.8）。重みを償却しきった漸近 95,605 の 85%。census 80,707、全ミス 81,281、全 expert 読み 81,281（agg はどのケースも DRAM 支配で差が小さい）。k=0 全ヒット 60,413。
 - **tsu 最大（全ヒット、k=1）**: **1,748 t/s/u** = `DP1xPP4x(TP8xDPa1|EP1xTPx8)xCP1 b=1`（router split、T_tok 0.787 ms = Σ段の占有: 演算 0.393 + 通信 0.360 + 受け渡し; 段の DRAM/pass 0.218 ms は空き時間に収まる、常駐 169/199 MB）。PP × TP の梯子（§5.2）で PP1×TP32 1,513 / PP2×TP16 1,603 / PP4×TP8 1,748 / PP8×TP4 1,118: 上位 2 段は tsu 最大の 92% 以内で、順位は hop の設計値で入れ替わる（×2 で PP4×TP8、×4 で PP8×TP4）。census 1,481（`DP1xPP4x(TP8xDPa1|EP1xTPx8)xCP1 b=1`）、全ミス 1,212（`DP1xPP1x(TP32xDPa1|EP1xTPx32)xCP1 b=1`）、全 expert 読み 313（`DP1xPP1x(TP32xDPa1|EP8xTPx4)xCP16 b=1`、1 users）。k=0 全ヒット 1,498。
 - **5 軸の答え**: agg 側は **`DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048`**。tsu 側は **`DP1xPP4x(TP8xDPa1|EP1xTPx8)xCP1 b=1`**。中間の users 数ごとの最良は §5.6 の Pareto 前線（PP>1 は 4 点、EP>1 は 11 点、CP>1 は 11 点、全 13 点）。
-- **今日の実装拘束内（TP∈{4,8}, EP=TP, PP=CP=1, lanes×(k+1) ≤ 32）**: 全ヒット agg 9,848（`DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16`）、tsu 614（`DP4xPP1x(TP8xDPa1|EP8xTPx1)xCP1 b=1`）；全ミス agg 9,848、tsu 614。現行形 `DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16` は全ミスで 9,848（T_pass 17.88 ms: 段 DRAM/pass 17.88、演算 3.20 + 通信 0.23 + routed 露出 13.31）、全ヒットで 9,848；**実測 1,186.9 t/s は全ミス机上値の 12.1%**。
+- **今日の実装拘束内（TP∈{4,8}, EP=TP, PP=CP=1, lanes×(k+1) ≤ 32）**: 全ヒット agg 9,848（`DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16`）、tsu 614（`DP4xPP1x(TP8xDPa1|EP8xTPx1)xCP1 b=1`）；全ミス agg 9,848、tsu 614。現行形 `DP8xPP1x(TP4xDPa1|EP4xTPx1)xCP1 b=16` は全ミスで 9,848（T_pass 17.88 ms: 段 DRAM/pass 17.88、演算 3.20 + 通信 0.23 + routed 露出 13.59）、全ヒットで 9,848；**実測 1,186.9 t/s は全ミス机上値の 12.1%**。
 
 ### 5.2 PP × TP の梯子（b=1、全ヒット、k=1）と hop 設計値への感度
 
@@ -119,37 +119,37 @@ hop 280 ns を 1 / 2 / 4 倍にしたときの最良は PP4×TP8 / PP4×TP8 / PP
 
 | agg [t/s] | tsu | users | 構成 | router | T_pass [ms] | 段 DRAM/pass | 演算 | 隠れない通信 | routed 露出 | 常駐/段の dense [MB] | 最繁忙 expert/層 | routing |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 80,707 | 19.7 | 4096 | `DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048` | split | 69.834 | 69.834 | 19.896 | 16.646 | 0.483 | 80/392 | 128.0 | fitted |
-| 80,207 | 39.2 | 2048 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=2048` | split | 35.135 | 35.135 | 9.384 | 20.504 | 0.241 | 124/392 | 64.0 | fitted |
-| 70,362 | 68.7 | 1024 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=1024` | split | 20.025 | 20.025 | 4.737 | 10.742 | 0.241 | 147/392 | 64.0 | fitted |
-| 56,493 | 110.3 | 512 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=512` | split | 12.471 | 12.471 | 2.825 | 5.655 | 0.241 | 158/392 | 64.0 | fitted |
-| 41,111 | 160.6 | 256 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=256` | split | 8.568 | 8.568 | 1.866 | 3.113 | 0.235 | 163/392 | 62.2 | fitted |
-| 28,026 | 219.0 | 128 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=128` | split | 6.284 | 6.284 | 1.353 | 1.859 | 0.222 | 166/392 | 56.4 | census |
-| 17,813 | 278.3 | 64 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=64` | split | 4.944 | 4.944 | 1.071 | 1.245 | 0.287 | 168/392 | 49.4 | census |
-| 11,958 | 373.7 | 32 | `DP1xPP1x(TP32xDPa1|EP8xTPx4)xCP16 b=32` | split | 3.682 | 3.682 | 0.869 | 1.000 | 0.310 | 168/242 | 39.3 | census |
-| 8,424 | 526.5 | 16 | `DP1xPP1x(TP32xDPa1|EP8xTPx4)xCP16 b=16` | split | 2.613 | 2.613 | 0.631 | 0.987 | 0.283 | 168/242 | 28.3 | census |
-| 6,719 | 839.9 | 8 | `DP1xPP4x(TP8xDPa1|EP2xTPx4)xCP4 b=8 mb=4` | split | 1.638 | 1.638 | 0.493 | 0.368 | 0.837 | 169/213 | 18.0 | census |
-| 5,402 | 1350.5 | 4 | `DP1xPP4x(TP8xDPa1|EP2xTPx4)xCP4 b=4 mb=4` | split | 1.019 | 1.019 | 0.407 | 0.368 | 0.493 | 169/213 | 9.8 | census |
-| 2,895 | 1447.3 | 2 | `DP1xPP4x(TP8xDPa1|EP1xTPx8)xCP1 b=2 mb=2` | split | 0.951 | 0.516 | 0.393 | 0.360 | 0.256 | 169/213 | 16.5 | census |
-| 1,481 | 1480.8 | 1 | `DP1xPP4x(TP8xDPa1|EP1xTPx8)xCP1 b=1` | split | 0.929 | 0.256 | 0.393 | 0.360 | 0.132 | 169/199 | 16.5 | census |
+| 80,707 | 19.7 | 4096 | `DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048` | split | 69.834 | 69.834 | 19.896 | 16.646 | 0.501 | 80/392 | 128.0 | fitted |
+| 80,207 | 39.2 | 2048 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=2048` | split | 35.135 | 35.135 | 9.384 | 20.504 | 0.254 | 124/392 | 64.0 | fitted |
+| 70,362 | 68.7 | 1024 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=1024` | split | 20.025 | 20.025 | 4.737 | 10.742 | 0.254 | 147/392 | 64.0 | fitted |
+| 56,493 | 110.3 | 512 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=512` | split | 12.471 | 12.471 | 2.825 | 5.655 | 0.254 | 158/392 | 64.0 | fitted |
+| 41,111 | 160.6 | 256 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=256` | split | 8.568 | 8.568 | 1.866 | 3.113 | 0.247 | 163/392 | 62.2 | fitted |
+| 28,026 | 219.0 | 128 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=128` | split | 6.284 | 6.284 | 1.353 | 1.859 | 0.234 | 166/392 | 56.4 | census |
+| 17,813 | 278.3 | 64 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=64` | split | 4.944 | 4.944 | 1.071 | 1.245 | 0.301 | 168/392 | 49.4 | census |
+| 11,958 | 373.7 | 32 | `DP1xPP1x(TP32xDPa1|EP8xTPx4)xCP16 b=32` | split | 3.682 | 3.682 | 0.869 | 1.000 | 0.325 | 168/242 | 39.3 | census |
+| 8,424 | 526.5 | 16 | `DP1xPP1x(TP32xDPa1|EP8xTPx4)xCP16 b=16` | split | 2.613 | 2.613 | 0.631 | 0.987 | 0.297 | 168/242 | 28.3 | census |
+| 6,719 | 839.9 | 8 | `DP1xPP4x(TP8xDPa1|EP2xTPx4)xCP4 b=8 mb=4` | split | 1.638 | 1.638 | 0.493 | 0.368 | 0.886 | 169/213 | 18.0 | census |
+| 5,402 | 1350.5 | 4 | `DP1xPP4x(TP8xDPa1|EP2xTPx4)xCP4 b=4 mb=4` | split | 1.019 | 1.019 | 0.407 | 0.368 | 0.535 | 169/213 | 9.8 | census |
+| 2,895 | 1447.3 | 2 | `DP1xPP4x(TP8xDPa1|EP1xTPx8)xCP1 b=2 mb=2` | split | 0.951 | 0.516 | 0.393 | 0.360 | 0.277 | 169/213 | 16.5 | census |
+| 1,481 | 1480.8 | 1 | `DP1xPP4x(TP8xDPa1|EP1xTPx8)xCP1 b=1` | split | 0.929 | 0.256 | 0.393 | 0.360 | 0.143 | 169/199 | 16.5 | census |
 
 ### 5.8 Pareto 前線（全ミス = 今の形、k=1）
 
 | agg [t/s] | tsu | users | 構成 | router | T_pass [ms] | 段 DRAM/pass | 演算 | 隠れない通信 | routed 露出 | 常駐/段の dense [MB] | 最繁忙 expert/層 | routing |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 81,281 | 19.8 | 4096 | `DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048` | split | 69.341 | 69.341 | 19.896 | 16.646 | 8.294 | 80/392 | 128.0 | fitted |
-| 80,773 | 39.4 | 2048 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=2048` | split | 34.888 | 34.888 | 9.384 | 20.504 | 4.147 | 124/392 | 64.0 | fitted |
-| 71,239 | 69.6 | 1024 | `DP1xPP1x(TP16xDPa2|EP16xTPx2)xCP8 b=1024` | split | 19.779 | 19.779 | 4.916 | 8.652 | 4.147 | 147/392 | 32.0 | fitted |
-| 57,632 | 112.6 | 512 | `DP1xPP1x(TP16xDPa2|EP16xTPx2)xCP8 b=512` | split | 12.224 | 12.224 | 3.005 | 4.565 | 4.147 | 158/392 | 32.0 | fitted |
-| 40,595 | 158.6 | 256 | `DP1xPP1x(TP16xDPa2|EP32xTPx1)xCP8 b=256` | replicated | 8.677 | 8.677 | 2.474 | 1.756 | 4.147 | 163/510 | 16.0 | fitted |
-| 26,193 | 204.6 | 128 | `DP1xPP1x(TP8xDPa4|EP8xTPx4)xCP4 b=128` | split | 6.724 | 6.673 | 1.356 | 1.561 | 3.657 | 168/709 | 56.4 | census |
-| 16,619 | 259.7 | 64 | `DP1xPP1x(TP8xDPa4|EP8xTPx4)xCP4 b=64` | split | 5.299 | 5.268 | 1.020 | 0.952 | 3.204 | 168/709 | 49.4 | census |
-| 10,676 | 333.6 | 32 | `DP1xPP1x(TP8xDPa4|EP8xTPx4)xCP4 b=32` | split | 4.125 | 4.125 | 0.808 | 0.638 | 2.545 | 169/709 | 39.3 | census |
-| 6,966 | 435.4 | 16 | `DP1xPP1x(TP8xDPa4|EP8xTPx4)xCP4 b=16` | split | 3.160 | 3.160 | 0.615 | 0.583 | 1.832 | 169/709 | 28.3 | census |
-| 5,258 | 657.2 | 8 | `DP1xPP8x(TP4xDPa1|EP1xTPx4)xCP1 b=8 mb=8` | replicated | 2.094 | 1.834 | 0.522 | 0.197 | 8.538 | 169/250 | 16.5 | census |
-| 3,795 | 948.8 | 4 | `DP1xPP4x(TP8xDPa1|EP1xTPx8)xCP1 b=4 mb=4` | replicated | 1.450 | 1.259 | 0.378 | 0.308 | 2.562 | 169/248 | 16.5 | census |
-| 2,183 | 1091.6 | 2 | `DP2xPP1x(TP16xDPa1|EP2xTPx8)xCP1 b=1` | replicated | 1.261 | 1.094 | 0.305 | 0.532 | 0.382 | 169/510 | 9.8 | census |
-| 1,212 | 1212.1 | 1 | `DP1xPP1x(TP32xDPa1|EP1xTPx32)xCP1 b=1` | replicated | 1.135 | 0.619 | 0.243 | 0.643 | 0.213 | 169/360 | 16.5 | census |
+| 81,281 | 19.8 | 4096 | `DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048` | split | 69.341 | 69.341 | 19.896 | 16.646 | 8.475 | 80/392 | 128.0 | fitted |
+| 80,773 | 39.4 | 2048 | `DP1xPP1x(TP16xDPa2|EP8xTPx4)xCP8 b=2048` | split | 34.888 | 34.888 | 9.384 | 20.504 | 4.241 | 124/392 | 64.0 | fitted |
+| 71,239 | 69.6 | 1024 | `DP1xPP1x(TP16xDPa2|EP16xTPx2)xCP8 b=1024` | split | 19.779 | 19.779 | 4.916 | 8.652 | 4.241 | 147/392 | 32.0 | fitted |
+| 57,632 | 112.6 | 512 | `DP1xPP1x(TP16xDPa2|EP16xTPx2)xCP8 b=512` | split | 12.224 | 12.224 | 3.005 | 4.565 | 4.241 | 158/392 | 32.0 | fitted |
+| 40,595 | 158.6 | 256 | `DP1xPP1x(TP16xDPa2|EP32xTPx1)xCP8 b=256` | replicated | 8.677 | 8.677 | 2.474 | 1.756 | 4.241 | 163/510 | 16.0 | fitted |
+| 26,193 | 204.6 | 128 | `DP1xPP1x(TP8xDPa4|EP8xTPx4)xCP4 b=128` | split | 6.724 | 6.673 | 1.356 | 1.561 | 3.741 | 168/709 | 56.4 | census |
+| 16,619 | 259.7 | 64 | `DP1xPP1x(TP8xDPa4|EP8xTPx4)xCP4 b=64` | split | 5.299 | 5.268 | 1.020 | 0.952 | 3.279 | 168/709 | 49.4 | census |
+| 10,676 | 333.6 | 32 | `DP1xPP1x(TP8xDPa4|EP8xTPx4)xCP4 b=32` | split | 4.125 | 4.125 | 0.808 | 0.638 | 2.606 | 169/709 | 39.3 | census |
+| 6,966 | 435.4 | 16 | `DP1xPP1x(TP8xDPa4|EP8xTPx4)xCP4 b=16` | split | 3.160 | 3.160 | 0.615 | 0.583 | 1.878 | 169/709 | 28.3 | census |
+| 5,258 | 657.2 | 8 | `DP1xPP8x(TP4xDPa1|EP1xTPx4)xCP1 b=8 mb=8` | replicated | 2.094 | 1.834 | 0.522 | 0.197 | 8.779 | 169/250 | 16.5 | census |
+| 3,795 | 948.8 | 4 | `DP1xPP4x(TP8xDPa1|EP1xTPx8)xCP1 b=4 mb=4` | replicated | 1.450 | 1.259 | 0.378 | 0.308 | 2.646 | 169/248 | 16.5 | census |
+| 2,183 | 1091.6 | 2 | `DP2xPP1x(TP16xDPa1|EP2xTPx8)xCP1 b=1` | replicated | 1.261 | 1.094 | 0.305 | 0.532 | 0.398 | 169/510 | 9.8 | census |
+| 1,212 | 1212.1 | 1 | `DP1xPP1x(TP32xDPa1|EP1xTPx32)xCP1 b=1` | replicated | 1.135 | 0.619 | 0.243 | 0.643 | 0.226 | 169/360 | 16.5 | census |
 
 ### 5.9 今日の実装拘束内の最大
 
