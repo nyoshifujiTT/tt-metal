@@ -275,7 +275,7 @@ roleplay 2.24.  The paper's rows, the throughput split and the plain-decode arm:
 ## 11. Decode limit on one Blackhole Galaxy: the unconstrained five-axis model (DP, PP, TP, EP, DCP)
 
 `docs/LIMIT_5AXIS.md` (revision 3) enumerates every DP x PP x TP x EP x DCP decomposition of the 32-chip BH Galaxy (6510 shapes
-x 2 router placements x 2 expert column splits x 4 L1 splits, batch 1-2048) and gives each one's token time and aggregate rate from physical values and the
+x 2 router placements x 2 expert column splits x 4 L1 splits x 3 round counts, batch 1-2048) and gives each one's token time and aggregate rate from physical values and the
 HF shapes only (DRAM 512 GB/s, ETH 25 GB/s x 2 links x 4 directions, 280 ns per hop with store-and-forward packets, the
 Tensix cycle costs of the 27B README, L1 1,536 KiB per core); no design principle is imposed and no served measurement
 enters.  The MoE terms: the routed experts read after each layer's router (four cases: prefetched, the census hit rate of a
@@ -286,9 +286,9 @@ of the stage's dense weights as is left (the 32-way dense split, 160 MiB, does n
 stream from DRAM.
 DCP is vLLM's decode context parallelism: the sequence split inside a kv-head replication group of the TP ranks, adding no chips
 (orthogonal to the head split of TP); the chip-adding context parallelism of prefill/training is not enumerated.
-Headline at ctx 192, MTP k=1, routed prefetched: aggregate 81,253 tok/s at `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` and 1,619 tok/s/user at
-`DP1 x PP4 x 8chip[TP8 | EP1 x TPx8 | DCP2/kv-group] b=1` (PP1xTP32 1,514 / PP2xTP16 1,610 / PP4xTP8 1,619 / PP8xTP4 865: 0.363 ms of collective latency
-against 0.391 ms of compute at the best point; the ranking turns on the hop design value: at 2x it is PP4xTP8); read after the router (today's form) 81,253 and 1,470;
+Headline at ctx 192, MTP k=1, routed prefetched: aggregate 81,253 tok/s at `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` and 1,913 tok/s/user at
+`DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` (R = rounds of the 27B pipeline form; PP1xTP32 1,514 R1 / PP2xTP16 1,610 R1 / PP4xTP8 1,913 R2 / PP8xTP4 1,040 R2: 0.308 ms of collective latency
+against 0.376 ms of compute at the best point; the ranking turns on the hop design value: at 2x it is PP4xTP8); read after the router (today's form) 81,253 and 1,470;
 inside today's implementation constraints 9,824 / 604; the served DP8 x TP4 x 16 lanes measured 1,186.9 tok/s against
 9,824 for its own form (12.1 %).  Generator, census and worklog §10 in the shared directory named in the document.
 
