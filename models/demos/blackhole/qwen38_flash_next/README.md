@@ -285,9 +285,9 @@ busiest-group skew against the tile padding of column splitting, and the per-use
 of the stage's dense weights as is left (the 32-way dense split, 160 MiB, does not fit whole); the experts, state and KV
 stream from DRAM.
 Context parallelism splits the sequence inside a kv-head replication group (orthogonal to the head split of TP).
-Headline at ctx 192, MTP k=1, routed prefetched: aggregate 81,253 tok/s at `DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048` and 1,592 tok/s/user at
-`DP1xPP2x(TP16xDPa1|EP2xTPx8)xCP1 b=1` (PP1xTP32 1,513 / PP2xTP16 1,592 / PP4xTP8 1,506 / PP8xTP4 865: 0.532 ms of collective latency
-against 0.305 ms of compute at the best point; the ranking turns on the hop design value: at 2x it is PP4xTP8); read after the router (today's form) 81,253 and 1,408;
+Headline at ctx 192, MTP k=1, routed prefetched: aggregate 81,253 tok/s at `DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048` and 1,619 tok/s/user at
+`DP1xPP4x(TP8xDPa1|EP1xTPx8)xCP2 b=1` (PP1xTP32 1,514 / PP2xTP16 1,610 / PP4xTP8 1,619 / PP8xTP4 865: 0.363 ms of collective latency
+against 0.391 ms of compute at the best point; the ranking turns on the hop design value: at 2x it is PP4xTP8); read after the router (today's form) 81,253 and 1,470;
 inside today's implementation constraints 9,824 / 604; the served DP8 x TP4 x 16 lanes measured 1,186.9 tok/s against
 9,824 for its own form (12.1 %).  Generator, census and worklog §10 in the shared directory named in the document.
 
