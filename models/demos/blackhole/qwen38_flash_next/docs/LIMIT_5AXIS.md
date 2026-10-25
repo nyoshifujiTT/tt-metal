@@ -200,3 +200,5 @@ hop 280 ns を 1 / 2 / 4 倍にしたときの最良は PP4×TP8 / PP4×TP8 / PP
 - 活性の L1 占有は micro-batch の 4 × [rows, H] bf16 + 残差 [rows, 4H]/TP_a を設計値として置いた（27B §7 の枠の入出力 3〜10 MiB に準ずる）。agg 最大点 `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` では 80 MiB で常駐 dense を 68 MB に削る。
 - 空いている段の chip が隣の段の routed を自分の DRAM から読んで ETH で渡す形（1 chip の入口 8 link × 25 GB/s = 200 GB/s、DRAM 512 GB/s の 39%）は列挙していない。
 - DCP の局所 top-k（各 chip が budget/DCP を自分の範囲から選ぶ）は全体 top-k と選択が異なりうる（数値の差、時間には影響しない）。
+- 系列長の掃引（§5.0）は k=1 の 4 ケースのみ（k=0 は ctx 192 だけ）。長文脈の prefill（chunked prefill の時間、KV の書き込み）は decode の限界の外。262k の index block 走査は 1 行 1 QSA 層で 24 µs（DCP1、1 chip）の演算で、DCP で分けた分だけ縮む。
+- 枠の chip 群への割付は f mod PP の固定 round-robin（27B は chip ごとの総量を揃えて切る）: 群間の量の差が残る近似。
