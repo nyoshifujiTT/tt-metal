@@ -275,7 +275,7 @@ roleplay 2.24.  The paper's rows, the throughput split and the plain-decode arm:
 ## 11. Decode limit on one Blackhole Galaxy: the unconstrained five-axis model (DP, PP, TP, EP, CP)
 
 `docs/LIMIT_5AXIS.md` (revision 3) enumerates every DP x PP x TP x EP x CP decomposition of the 32-chip BH Galaxy (6510 shapes
-x 2 router placements, batch 1-2048) and gives each one's token time and aggregate rate from physical values and the
+x 2 router placements x 2 expert column splits x 4 L1 splits, batch 1-2048) and gives each one's token time and aggregate rate from physical values and the
 HF shapes only (DRAM 512 GB/s, ETH 25 GB/s x 2 links x 4 directions, 280 ns per hop with store-and-forward packets, the
 Tensix cycle costs of the 27B README, L1 1,536 KiB per core); no design principle is imposed and no served measurement
 enters.  The MoE terms: the routed experts read after each layer's router (four cases: prefetched, the census hit rate of a
