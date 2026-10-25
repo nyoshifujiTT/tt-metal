@@ -1,6 +1,6 @@
 # Qwen3.8-Flash-Next decode on one Blackhole Galaxy: the five-axis limit (DP, PP, TP, EP, DCP), revision 3
 
-この文書は、32 chip の BH Galaxy で decode を回すときの DP・PP・TP・EP・DCP の全組合せ（系列長 ctx ∈ {1, 8,192, 32,768, 262,144} と現行計測条件の 192; 6510 構成 × router の置き方 2 形 × expert の列分割 2 形 × L1 の分け方 4 通り × 周 R ∈ {1,2,4} × 段の切り方・形、batch 1〜2048）について、1 token の時間と機械全体の tokens/s を**物理値と HF 定義だけ**から出し、agg tps と tsu（1 ユーザの tokens/s）それぞれの最大とその構成を示す現在の確定状態である。設計原則（DRAM を止めない等）は課さない: 構成は時間だけで比べ、寝ている chip があっても速ければ採る。実装の実測値は入れない（効率の判定にだけ使う）。経緯・議論は作業記録 `/opt/codex/shared-with-lxd-containers/BH-GLX_Qwen3.8-Flash-Next_SC1_handoff_worklog_20261023.md` §10（追記専用。revision 2 からの修正は §10.H7〜H13）、生成器は `BH-GLX_Qwen3.8-Flash-Next_free5d_v3_20261024.py`（全式と出典を docstring に持つ）、routing の分子は `..._routing_census_20261023.py` → `..._routing_stats_20261023.py`（`..._routing_stats_full_20261023.json`; tile 配置の最繁忙 chip を加えた再集計、既存の値は不変）。この文書は `render_free5d_v3.py` が同じ入力から決定的に生成する。仮定は「この場合には」で断り、代表仮定が置けない所（routed の先読みの当たり方、hop の設計値）は並列列挙する。
+この文書は、32 chip の BH Galaxy で decode を回すときの DP・PP・TP・EP・DCP の全組合せ（系列長 ctx ∈ {1, 128, 8,192, 32,768, 262,144 (native), 1,000,000 (YaRN)} と現行計測条件の 192; 6510 構成 × router の置き方 2 形 × expert の列分割 2 形 × L1 の分け方 4 通り × 周 R ∈ {1,2,4} × 段の切り方・形、batch 1〜2048）について、1 token の時間と機械全体の tokens/s を**物理値と HF 定義だけ**から出し、agg tps と tsu（1 ユーザの tokens/s）それぞれの最大とその構成を示す現在の確定状態である。設計原則（DRAM を止めない等）は課さない: 構成は時間だけで比べ、寝ている chip があっても速ければ採る。実装の実測値は入れない（効率の判定にだけ使う）。経緯・議論は作業記録 `/opt/codex/shared-with-lxd-containers/BH-GLX_Qwen3.8-Flash-Next_SC1_handoff_worklog_20261023.md` §10（追記専用。revision 2 からの修正は §10.H7〜H13）、生成器は `BH-GLX_Qwen3.8-Flash-Next_free5d_v3_20261024.py`（全式と出典を docstring に持つ）、routing の分子は `..._routing_census_20261023.py` → `..._routing_stats_20261023.py`（`..._routing_stats_full_20261023.json`; tile 配置の最繁忙 chip を加えた再集計、既存の値は不変）。この文書は `render_free5d_v3.py` が同じ入力から決定的に生成する。仮定は「この場合には」で断り、代表仮定が置けない所（routed の先読みの当たり方、hop の設計値）は並列列挙する。
 
 ## 1. 一般論: 5 つの軸は何を分け、何を払うか
 
@@ -46,27 +46,31 @@ TP と DCP は切る方向が直交する: TP は head（GDN の value head 48�
 
 ## 5. 結果（分子は census 全数）
 
-### 5.0 系列長の掃引（k=1; ctx 1 = KV を無視した短文、8,192、32,768、262,144 = `max_position_embeddings`）
+### 5.0 系列長の掃引（k=1; ctx 1 = KV を無視した短文、128、8,192、32,768、262,144 = `max_position_embeddings`（native）、1,000,000 = YaRN（factor 4）の最大長）
 
-192（§5.1 以降）は現行配備の計測条件（ISL 128 + decode）で、限界の設計条件ではない。系列長で変わるのは QSA 12 層の KV（1 行 1 層: 選択 K/V min(ctx, 2048) 行 + index block ctx/4 の走査; 1 user 1 pass で ctx 1: 0、8k: 57 MB、32k: 75、262k: 252）と常駐 KV（ctx 262k で 1 user 6.6 GB → 容量が b を縛る）。GDN 状態は系列長に依らない。
+192（§5.1 以降）は現行配備の計測条件（ISL 128 + decode）で、限界の設計条件ではない。系列長で変わるのは QSA 12 層の KV（1 行 1 層: 選択 K/V min(ctx, 2048) 行 + index block ctx/4 の走査; 1 user 1 pass で ctx 1: 0、128: 3.2 MB、8k: 57、32k: 75、262k: 252、1M: 818）と常駐 KV（1 user で ctx 262k 6.6 GB、1M 25.3 GB = 1 chip の DRAM 30.8 GB の 82% → DCP が容量のためにも要る）。YaRN は RoPE の周波数を変えるだけで decode のバイト・演算は変えない。GDN 状態は系列長に依らない。
 
-| ctx | tsu 最大（全ヒット） | 構成 | T_tok [ms]; DRAM/pass / 演算 / 通信 | tsu 最大（全ミス） | agg 最大（全ヒット） | 構成 | users | DP1 で容量に入る最大 b |
-|---|---|---|---|---|---|---|---|---|
-| 1 | 1,913 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` | 0.719; 0.589 / 0.376 / 0.308 | 1,470 | 84,191 | `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` | 4096 | 2,048 |
-| 8,192 | 1,902 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP2/kv-group] b=1` | 0.723; 0.607 / 0.376 / 0.312 | 1,469 | 58,892 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=2048` | 2048 | 2,048 |
-| 32,768 | 1,889 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group] b=1` | 0.728; 0.601 / 0.376 / 0.317 | 1,468 | 42,281 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=512` | 512 | 512 |
-| 262,144 | 1,784 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group] b=1` | 0.771; 0.630 / 0.377 / 0.317 | 1,460 | 18,037 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group] b=128` | 128 | 128 |
+| ctx | tsu 最大（全ヒット） | 構成 | T_tok [ms]; DRAM/pass / 演算 / 通信 | tsu 最大（census / 全ミス） | agg 最大（全ヒット） | 構成 | users | T_pass [ms] | agg 最大（census / 全ミス） | DP1 で容量に入る最大 b |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 1,913 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` | 0.719; 0.589 / 0.376 / 0.308 | 1,783 / 1,470 | 84,191 | `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` | 4096 | 66.9 | 83,576 / 84,191 | 2,048 |
+| 128 | 1,913 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` | 0.719; 0.591 / 0.376 / 0.308 | 1,779 / 1,470 | 82,215 | `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` | 4096 | 68.6 | 81,628 / 82,215 | 2,048 |
+| 8,192 | 1,902 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP2/kv-group] b=1` | 0.723; 0.607 / 0.376 / 0.312 | 1,726 / 1,469 | 58,892 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=2048` | 2048 | 47.9 | 58,590 / 58,892 | 2,048 |
+| 32,768 | 1,889 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group] b=1` | 0.728; 0.601 / 0.376 / 0.317 | 1,708 / 1,468 | 42,281 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=512` | 512 | 16.7 | 41,665 / 42,281 | 512 |
+| 262,144 | 1,784 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group] b=1` | 0.771; 0.630 / 0.377 / 0.317 | 1,582 / 1,460 | 18,037 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group] b=128` | 128 | 9.8 | 17,647 / 18,037 | 128 |
+| 1,000,000 | 1,579 | `DP1 x PP2(R2) x 16chip[TP16 | EP1 x TPx16 | DCP8/kv-group] b=1` | 0.872; 0.769 / 0.299 / 0.545 | 1,565 / 1,444 | 6,960 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group] b=32` | 32 | 6.3 | 6,657 / 6,960 | 32 |
 
 b ごとの tsu 最良（全ヒット、k=1）:
 
 | ctx \ b | 1 | 4 | 16 | 64 | 256 | 1024 |
 |---|---|---|---|---|---|---|
 | 1 | 1,913 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8]` | 1,518 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group]` | 645 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]` | 307 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group]` | 168 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group]` | 72 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group]` |
+| 128 | 1,913 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8]` | 1,514 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group]` | 643 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]` | 305 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group]` | 166 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group]` | 70 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group]` |
 | 8,192 | 1,902 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP2/kv-group]` | 1,458 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group]` | 613 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]` | 283 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group]` | 138 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group]` | 52 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group]` |
 | 32,768 | 1,889 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group]` | 1,440 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group]` | 603 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]` | 274 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group]` | 130 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group]` | 容量超過 |
 | 262,144 | 1,784 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group]` | 1,336 `DP1 x PP2 x 16chip[TP16 | EP1 x TPx16 | DCP8/kv-group]` | 524 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]` | 215 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group]` | 容量超過 | 容量超過 |
+| 1,000,000 | 1,579 `DP1 x PP2(R2) x 16chip[TP16 | EP1 x TPx16 | DCP8/kv-group]` | 1,140 `DP1 x PP2(R2) x 16chip[TP16 | EP1 x TPx16 | DCP8/kv-group]` | 372 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]` | 容量超過 | 容量超過 | 容量超過 |
 
-DCP は ctx ≥ 8k で b=1 から効く（index block の走査が DCP で分かれる）: PP4(R2)×TP8 の b=1 は ctx 1 で DCP1 1,913、262k で DCP4 1,784（DCP1 なら 1,502）。
+DCP は ctx ≥ 8k で b=1 から効く（index block の走査が DCP で分かれる）: b=1 の最良は ctx 1 で DCP1 1,913、262k で DCP4 1,784（DCP1 なら 1,502）、1M で DCP8 1,579（`DP1 x PP2(R2) x 16chip[TP16 | EP1 x TPx16 | DCP8/kv-group] b=1`; DCP1 の形は 710）。
 
 ### 5.1 一行の答え（ctx 192 = 現行配備の計測条件、実測との比較用）
 
@@ -200,5 +204,5 @@ hop 280 ns を 1 / 2 / 4 倍にしたときの最良は PP4×TP8 / PP4×TP8 / PP
 - 活性の L1 占有は micro-batch の 4 × [rows, H] bf16 + 残差 [rows, 4H]/TP_a を設計値として置いた（27B §7 の枠の入出力 3〜10 MiB に準ずる）。agg 最大点 `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` では 80 MiB で常駐 dense を 68 MB に削る。
 - 空いている段の chip が隣の段の routed を自分の DRAM から読んで ETH で渡す形（1 chip の入口 8 link × 25 GB/s = 200 GB/s、DRAM 512 GB/s の 39%）は列挙していない。
 - DCP の局所 top-k（各 chip が budget/DCP を自分の範囲から選ぶ）は全体 top-k と選択が異なりうる（数値の差、時間には影響しない）。
-- 系列長の掃引（§5.0）は k=1 の 4 ケースのみ（k=0 は ctx 192 だけ）。長文脈の prefill（chunked prefill の時間、KV の書き込み）は decode の限界の外。262k の index block 走査は 1 行 1 QSA 層で 24 µs（DCP1、1 chip）の演算で、DCP で分けた分だけ縮む。
+- 系列長の掃引（§5.0）は k=1 の 4 ケースのみ（k=0 は ctx 192 だけ）。長文脈の prefill（chunked prefill の時間、KV の書き込み）は decode の限界の外。index block 走査は 1 行 1 QSA 層で 262k 24 µs、1M 93 µs（DCP1、1 chip）の演算で、DCP で分けた分だけ縮む。1M は YaRN（factor 4）前提で、精度は限界の外。
 - 枠の chip 群への割付は f mod PP の固定 round-robin（27B は chip ごとの総量を揃えて切る）: 群間の量の差が残る近似。
