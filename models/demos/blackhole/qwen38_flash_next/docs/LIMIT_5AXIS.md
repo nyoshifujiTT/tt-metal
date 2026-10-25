@@ -2,6 +2,41 @@
 
 この文書は、32 chip の BH Galaxy で decode を回すときの DP・PP・TP・EP・DCP の全組合せ（系列長 ctx ∈ {1, 128, 8,192, 32,768, 262,144 (native), 1,000,000 (YaRN)} と現行計測条件の 192; 6510 構成 × router の置き方 2 形 × expert の列分割 2 形 × L1 の分け方 4 通り × 周 R ∈ {1,2,4} × 段の切り方・形、batch 1〜2048）について、1 token の時間と機械全体の tokens/s を**物理値と HF 定義だけ**から出し、agg tps と tsu（1 ユーザの tokens/s）それぞれの最大とその構成を示す現在の確定状態である。設計原則（DRAM を止めない等）は課さない: 構成は時間だけで比べ、寝ている chip があっても速ければ採る。実装の実測値は入れない（効率の判定にだけ使う）。経緯・議論は作業記録 `/opt/codex/shared-with-lxd-containers/BH-GLX_Qwen3.8-Flash-Next_SC1_handoff_worklog_20261023.md` §10（追記専用。revision 2 からの修正は §10.H7〜H13）、生成器は `BH-GLX_Qwen3.8-Flash-Next_free5d_v3_20261024.py`（全式と出典を docstring に持つ）、routing の分子は `..._routing_census_20261023.py` → `..._routing_stats_20261023.py`（`..._routing_stats_full_20261023.json`; tile 配置の最繁忙 chip を加えた再集計、既存の値は不変）。この文書は `render_free5d_v3.py` が同じ入力から決定的に生成する。仮定は「この場合には」で断り、代表仮定が置けない所（routed の先読みの当たり方、hop の設計値）は並列列挙する。
 
+## 0. 確定原則（この文書の限界性能の立て方。経緯は作業記録 §9.4.7〜§10.H52: 指摘を受けて確定した規則で、以後の版はこれに照らして自己点検する）
+
+**A. 限界の定義と分母**
+1. 限界性能は物理値（DRAM 512 GB/s/chip、link 25 GB/s × 2 × 4 方向、hop 280 ns + 蓄積転送、NoC、Tensix 130 core × 1.35 GHz の単価）と HF 定義だけから立てる。実装の実測値（collective 時間、expert の実効帯域、fabric の α、packet 固定費、τ）は限界に入れない。実測は効率（= 実測 / 同じ形の限界）の分子にだけ使う。
+2. 単価は出典のあるものだけ: 行列積 HiFi2 32 cycle/tile-MAC、gated delta rule 1 組 4,224 cycle（27B README §9）を 32 列 4 単位に分けて verify 行は再帰で直列、router の top-10 は tile 読み 32 cycle × 10 pass、op 固定費は数えない（27B §9 と同じ）。出典の無い単価（33 cycle、300 cycle/op、400 cycle/GDR 単位、128 cycle/argmax）は撤回した。
+3. 設計原則（「DRAM を止めない」等、27B §1）は条件として課さない。構成は token 時間と agg だけで比べ、寝る chip があっても速ければ採る。27B は dense・32 user 固定の別物で、その設計選択（TP4 × PP8 × 7 周）を本件に写さない — ただしその「形」（周、全 chip の DRAM が常に次の枠を読む）は列挙に入れる。
+4. 仮定は「この場合には」で断り、代表仮定が置けない所は並列列挙する: routed の先読みの当たり方（全ヒット / census ヒット率 / 全ミス / 全 expert 読み）、系列長（1 / 128 / 8k / 32k / 262k / 1M）、hop の設計値（×1 / ×2 / ×4）、L1 のストリームバッファ（×0 / ×1 / ×2）。
+5. 文書の数値・順位は全て生成値（固定文に書かない）。同じ入力から再生成して results・文書・README が byte 一致し `git status` が空になるまで周回し、周回ごとに本文を通読して訂正点ゼロを確認する。
+
+**B. 軸の定義（chip 数 = DP × PP × S、S の内側に TP_a × DP_a = EP × TP_x、DCP、R は chip を増やさない）**
+6. 5 軸は DP / PP / TP / EP / DCP。DCP は vLLM の decode context parallel（`--decode-context-parallel-size`: TP rank の中で同じ kv head を複製している rank の内側で KV を系列方向に分け、world size を増やさない）であり、chip を増やす context parallel（prefill CP / Ring / Ulysses）ではない。ラベルは `DP × PP(R) × S chip[TP_a | EP × TPx | DCP/kv-group] b=…` で chip 数を明示する。
+7. TP と DCP は切る方向が直交する（TP = head / 列、DCP = 1 つの kv head の系列）。「KV を段内で等分 = TP と同じ」は誤り。GDN の状態は系列長に依らないので DCP の対象外。
+8. EP は expert を群に丸ごと置き、時間は census の最繁忙群で決め、他の群は寝る（時間で評価）。dispatch / combine の all-to-all は行を持たない chip に expert の分担があるとき（DP_a > 1）に課し、EP に依らない。expert ごとの op 固定費は課さない。
+9. expert の列分割は 2 形（expert ごとの等分 slice = tile padding あり、20 tile の回し置き tiles = padding なし・census の最繁忙 chip で偏り）を評価して速い方。「寝かす方が速い」に見えたのは slice の padding だった。
+10. PP は段を固定した形（R = 1）と 27B の周の形（PP × R 枠、群が R 回番を持ち、空いている間に次の枠を L1 に読む）の両方を列挙する。「段は別 user を処理するので 1 token に効かない」は誤り: 段の chip は空いている間に自段の dense を先読みし、1 token の DRAM 時間には全 chip の帯域が効く。micro-batch 数 n_mb も 1〜min(PP, b) の自由変数。段の境はバイト均等と鎖均等の速い方、受け渡しの hop 数は段の形（torus の 8×4）から。
+
+**C. MoE 固有**
+11. routed expert は router の後にしか読めない（dense だけ先読み可）。層の時間 = 前段の鎖 + [発行レイテンシ] + max(expert 段の鎖, 先読みできなかった routed/BW)、かつ ≥ 層の routed 全バイト/BW。先読みは L1 の routed バッファの分まで。全ヒットでも「先読みできる」のは micro-batch の hidden に依存するので段の空き時間には読めず、最良でも 1 層前の裏。
+12. routed の分子は census（32 item × 256 位置の実 routing）の distinct と最繁忙 chip で、一様仮定は使わない。rows > 256 は外挿と明記。全 expert 読みは群の 512/EP expert を毎 step 読む形で偏り無し。
+13. 露出した routed 読みを二重に数えない（占有 = max(演算+通信, 先読み分/BW) + 露出分/BW）。
+
+**D. メモリ**
+14. L1 は積み上げで勘定する（固定専有 140 KiB/core、ストリームバッファ 192 KiB/core、活性 4 × [rows, H] + 残差 [rows, 4H]/TP_a、expert 片 2 枚、最終段の logits chunk）。残りを常駐 dense と routed 先読みバッファに分け、分け方は 0 / 1 層分 / 2 層分 / 残り全部の 4 通りを列挙して速い方（同じ時間なら pass あたりの DRAM バイトが少ない方）。dense 5.38 GB の 32 分割 160 MiB は L1 に全部は置けない。
+15. 列挙の候補を「物理的に劣るはず」という理由で外さない（全部バッファの形を外したのは誤り）。条件が違えば勝ち得る形は列挙に残し、選択は時間と DRAM バイトの辞書順だけで決める。
+16. 残差は L1 に入らなければ DRAM に置き、層ごとの往復を DRAM 車線に加える。容量は expert 分 + 段の dense 分 + ユーザの状態/KV ≤ 0.9 × 31.9 GiB/chip（PP > 1 では自段の層分だけ）。
+
+**E. 通信**
+17. 通信は物理式: ring の link 時間 (n−1)/n × T / (paths × 25 GB/s)、最後の tile のレイテンシ = hop × (280 ns + 蓄積転送) + 中継の NoC、tile 流しで演算の半分までに隠す。all-reduce は RS+AG と「部分和の all-gather + 局所 reduce」の速い方。
+18. 層の collective は配備 `read_tp4` の形で 6 本（hc 統計 AR × 2、ブロック入力 AG × 2、ブロック出力 RS × 2）+ router 列分割なら候補 AG 1 本 + DP_a > 1 なら a2a 2 本 + DCP > 1 なら merge 1 本（QSA 層）。形を混ぜない（重みの分割と通信の本数は同じ形から）。
+19. b=1 の演算は「行列積の鎖」で決まる: 出力 tile が core 数より少ないときは K を分けて部分和を NoC の木で足し、同じ入力を読む行列積は並べて走る（27B §9 の「和でなく max」）。
+
+**F. 条件**
+20. 系列長は現行配備の計測条件（192）を限界の設計条件にしない。1（KV 無視）/ 128 / 8k / 32k / 262,144（native）/ 1,000,000（YaRN、モデルカード）を並べ、192 は実測との比較用にだけ残す。
+21. agg は b を漸近（ユーザ状態の往復 95,605 t/s）まで振り、容量で落ちる b を明記する。「EP=1・DCP=1 が最速」のような結論を比較せずに前提から出さない。
+
 ## 1. 一般論: 5 つの軸は何を分け、何を払うか
 
 | 軸 | 分けるもの | 重みの読み | 払うもの（1 層あたり） | agg | tsu |

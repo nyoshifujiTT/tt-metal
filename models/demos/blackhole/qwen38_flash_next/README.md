@@ -287,7 +287,10 @@ stream from DRAM.
 DCP is vLLM's decode context parallelism: the sequence split inside a kv-head replication group of the TP ranks, adding no chips
 (orthogonal to the head split of TP); the chip-adding context parallelism of prefill/training is not enumerated.
 Context length is swept (1, 128, 8k, 32k, 262k native, 1M with YaRN; section 5.0: at 262k the index-block scan makes DCP pay from b=1 and the
-resident KV caps the batch).  Headline at ctx 192 (the served measurement's condition), MTP k=1, routed prefetched: aggregate 81,253 tok/s at `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` and 1,913 tok/s/user at
+resident KV caps the batch).  The document opens with the settled principles (section 0: physical values only, no design principle imposed, every
+candidate form enumerated and the choice made by time, the MoE router dependence and the L1 accounted per buffer, the
+five axes with DCP = vLLM's decode context parallel, the context swept rather than fixed).  Headline at ctx 192 (the
+served measurement's condition), MTP k=1, routed prefetched: aggregate 81,253 tok/s at `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` and 1,913 tok/s/user at
 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` (R = rounds of the 27B pipeline form; PP1xTP32 1,514 R1 / PP2xTP16 1,610 R1 / PP4xTP8 1,913 R2 / PP8xTP4 1,040 R2: 0.308 ms of collective latency
 against 0.376 ms of compute at the best point; the ranking turns on the hop design value: at 2x it is PP4xTP8); read after the router (today's form) 81,253 and 1,470;
 inside today's implementation constraints 9,824 / 604; the served DP8 x TP4 x 16 lanes measured 1,186.9 tok/s against
@@ -304,4 +307,4 @@ inside today's implementation constraints 9,824 / 604; the served DP8 x TP4 x 16
 - `docs/TESTING.md`: the no-device tests, the reference corpus Q38-REF-v1 and its scorer, the regression harness
   (`tools/ci/q38_ci.py`), how to run the acceptance gate.
 - `docs/PREFILL.md`: the prefill chunk bodies and the 2048-row slab (`--prefill-slab`): what runs as one matmul, its numerics class, the expert forms, the served rates.
-- `docs/LIMIT_5AXIS.md`: the five-axis (DP, PP, TP, EP, DCP = vLLM decode context parallel inside the TP ranks) decode limit on one BH Galaxy from physical values: the formulas (the L1 accounted per buffer, the dense weights resident as far as it allows, pipeline stages streaming the rest and the routed experts inside their window), the four routed-read cases, the PP x TP ladder and its sensitivity to the hop latency, the Pareto fronts, and the census behind them (section 11).
+- `docs/LIMIT_5AXIS.md`: the five-axis (DP, PP, TP, EP, DCP = vLLM decode context parallel inside the TP ranks) decode limit on one BH Galaxy from physical values: the settled principles (section 0), the formulas (the L1 accounted per buffer, the dense weights resident as far as it allows, pipeline stages streaming the rest and the routed experts inside their window), the four routed-read cases, the PP x TP ladder and its sensitivity to the hop latency, the Pareto fronts, and the census behind them (section 11).
