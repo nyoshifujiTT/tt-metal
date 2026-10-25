@@ -30,7 +30,7 @@ TP と CP は切る方向が直交する: TP は head（GDN の value head 48、
 - **tile padding（32 列）**: expert の中間 640 列を TPx 分割すると 1 chip 640/TPx 列で、TPx=32 で 20 列 → 32 に padding = 1.6 倍のバイト。同様に shared 640（TP_a=32 で 1.6 倍）、router 512（列分割 TP32 で 2.0 倍）。**EP は expert を丸ごと置くのでこの padding が無く、偏り（census: 8 group で最繁忙/平均 B=16×2 1.23 倍）と引き換えになる** — TP32 で b≥8 から EP8×TPx4 が EP1×TPx32 に勝つ理由（b=1 では EP1: 1513 vs 1484; b=16 では EP8: 545 vs 445）。
 - **GDN 状態**: fp32 [48,128,128] × 36 層 = 1 ユーザ 0.115 GB 常駐、毎 pass 読み+書き 0.231 GB。B に比例して DRAM の列に乗り（b=128×2 行で 29.6 GB、dense + routed 62.1 GB の 48%）→ 重みを償却しきった agg の漸近は 32 × 512 GB/s ÷ (0.2309 GB 状態 + 0.0049 GB KV) = 69,480 pass/s（k=1 で × 1.376 = 95,605 t/s）。gated delta rule の演算は b=1 でも 1 単位 1,856 cycle（k=1）が core に 1 つずつ乗り、tsu 最大点の演算 0.305 ms のうち 0.049 ms。
 - **PP の段の空き時間**: 段は micro-batch が他の段にいる間、常駐しきれない dense の先頭を先読みバッファ（L1 の残り − 1 層分の routed）へ先読みし、残りを窓で流す（§5.2 の「空き時間の先読み」列）。段の境は「DRAM バイト均等」と「鎖の時間均等」の速い方、PP2 の 16 chip は 4×4 と 8×2（受け渡し 1 hop）の速い方。
-- **routed は router の後**: dense は常駐または段が空いている間に L1 へ先読みできるが、層 l の top-10 は router まで分からず、しかも micro-batch の hidden に依存するので段の空き時間には読めない（最良でも 1 層前の演算の裏）。先読みの当たり方で 4 ケース。PP の段を分けると、micro-batch が居る段の chip しか routed を読まないので、b ≥ 8 では PP1（全 32 chip の DRAM が同じ layer の routed を分担）が勝つ。
+- **routed は router の後**: dense は常駐または段が空いている間に L1 へ先読みできるが、層 l の top-10 は router まで分からず、しかも micro-batch の hidden に依存するので段の空き時間には読めない（最良でも 1 層前の演算の裏、先読みバッファの分まで）。先読みの当たり方で 4 ケース。PP の段を分けると、micro-batch が居る段の chip しか routed を読まないので、b ≥ 8 では PP1（全 32 chip の DRAM が同じ layer の routed を分担）が勝つ。
 - **1 行タイル 32 行**: B × (k+1) ≤ 32 が今日の lanes 形の上限。限界性能は tile を複数並べる形で b を 2048 まで振る。
 
 ## 4. 4 ケース（代表仮定が置けないので並列列挙）
@@ -173,6 +173,6 @@ hop 280 ns を 1 / 2 / 4 倍にしたときの最良は PP2×TP16 / PP4×TP8 / P
 - gated delta rule の 1 単位 256 + 800 × 行 cycle は 27B §9 の 4,224 cycle/(head, user) を 4 単位に分けた机上値（単位間の k'S の交換は NoC 1 回で 1 単位の 1/10 未満、数えていない）。
 - b=1 の演算は「行列積の鎖」（K 分割の部分和の木）で決まり、27B §9 が「1 µs 未満」として省いた core 間の受け渡しを本件では数えている（tsu 最大点の演算 0.305 ms のうち行列積の鎖が大半）。K 分割の木の段数・NoC の値は設計値。
 - L1 のストリームバッファ 1 core 192 KiB（24.4 MiB/chip）と固定専有 140 KiB/core は設計値（27B §3/§7 の枠の入出力・作業域 3〜10 MiB に準ずる、多い側）。バッファを 0 / 2 倍にしたときの tsu 最大点: 1,594 / 1,499（1 倍 1,594）。
-- 活性の L1 占有は micro-batch の 4 × [rows, H] bf16 + 残差 [rows, 4H]/TP_a を設計値として置いた（27B §7 の枠の入出力 3〜10 MiB に準ずる）。b ≥ 256 で常駐量を削る側に効く。
+- 活性の L1 占有は micro-batch の 4 × [rows, H] bf16 + 残差 [rows, 4H]/TP_a を設計値として置いた（27B §7 の枠の入出力 3〜10 MiB に準ずる）。agg 最大点 `DP2xPP1x(TP16xDPa1|EP4xTPx4)xCP8 b=2048` では 80 MiB で常駐 dense を 68 MB に削る。
 - 空いている段の chip が隣の段の routed を自分の DRAM から読んで ETH で渡す形（1 chip の入口 8 link × 25 GB/s = 200 GB/s、DRAM 512 GB/s の 39%）は列挙していない。
 - CP の局所 top-k（各 chip が budget/CP を自分の範囲から選ぶ）は全体 top-k と選択が異なりうる（数値の差、時間には影響しない）。
