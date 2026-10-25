@@ -272,9 +272,9 @@ length 3.25 tokens per step over 672 of the 880 prompts (math, humanities and ST
 math 4.18, RAG 3.63, multilingual 3.49, reasoning 3.48, STEM 3.17, summarization 3.02, QA 2.97, writing 2.81, humanities 2.76,
 roleplay 2.24.  The paper's rows, the throughput split and the plain-decode arm: `docs/NUMERICS.md`.
 
-## 11. Decode limit on one Blackhole Galaxy: the unconstrained five-axis model (DP, PP, TP, EP, CP)
+## 11. Decode limit on one Blackhole Galaxy: the unconstrained five-axis model (DP, PP, TP, EP, DCP)
 
-`docs/LIMIT_5AXIS.md` (revision 3) enumerates every DP x PP x TP x EP x CP decomposition of the 32-chip BH Galaxy (6510 shapes
+`docs/LIMIT_5AXIS.md` (revision 3) enumerates every DP x PP x TP x EP x DCP decomposition of the 32-chip BH Galaxy (6510 shapes
 x 2 router placements x 2 expert column splits x 4 L1 splits, batch 1-2048) and gives each one's token time and aggregate rate from physical values and the
 HF shapes only (DRAM 512 GB/s, ETH 25 GB/s x 2 links x 4 directions, 280 ns per hop with store-and-forward packets, the
 Tensix cycle costs of the 27B README, L1 1,536 KiB per core); no design principle is imposed and no served measurement
@@ -284,9 +284,10 @@ busiest-group skew against the tile padding of column splitting, and the per-use
 (177 MiB after firmware) holds the stream buffers (24 MiB), the activations, a routed-expert prefetch buffer and as much
 of the stage's dense weights as is left (the 32-way dense split, 160 MiB, does not fit whole); the experts, state and KV
 stream from DRAM.
-Context parallelism splits the sequence inside a kv-head replication group (orthogonal to the head split of TP).
-Headline at ctx 192, MTP k=1, routed prefetched: aggregate 81,253 tok/s at `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | CP8/kv-group] b=2048` and 1,619 tok/s/user at
-`DP1 x PP4 x 8chip[TP8 | EP1 x TPx8 | CP2/kv-group] b=1` (PP1xTP32 1,514 / PP2xTP16 1,610 / PP4xTP8 1,619 / PP8xTP4 865: 0.363 ms of collective latency
+DCP is vLLM's decode context parallelism: the sequence split inside a kv-head replication group of the TP ranks, adding no chips
+(orthogonal to the head split of TP); the chip-adding context parallelism of prefill/training is not enumerated.
+Headline at ctx 192, MTP k=1, routed prefetched: aggregate 81,253 tok/s at `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` and 1,619 tok/s/user at
+`DP1 x PP4 x 8chip[TP8 | EP1 x TPx8 | DCP2/kv-group] b=1` (PP1xTP32 1,514 / PP2xTP16 1,610 / PP4xTP8 1,619 / PP8xTP4 865: 0.363 ms of collective latency
 against 0.391 ms of compute at the best point; the ranking turns on the hop design value: at 2x it is PP4xTP8); read after the router (today's form) 81,253 and 1,470;
 inside today's implementation constraints 9,824 / 604; the served DP8 x TP4 x 16 lanes measured 1,186.9 tok/s against
 9,824 for its own form (12.1 %).  Generator, census and worklog §10 in the shared directory named in the document.
@@ -302,4 +303,4 @@ inside today's implementation constraints 9,824 / 604; the served DP8 x TP4 x 16
 - `docs/TESTING.md`: the no-device tests, the reference corpus Q38-REF-v1 and its scorer, the regression harness
   (`tools/ci/q38_ci.py`), how to run the acceptance gate.
 - `docs/PREFILL.md`: the prefill chunk bodies and the 2048-row slab (`--prefill-slab`): what runs as one matmul, its numerics class, the expert forms, the served rates.
-- `docs/LIMIT_5AXIS.md`: the five-axis (DP, PP, TP, EP, CP) decode limit on one BH Galaxy from physical values: the formulas (the L1 accounted per buffer, the dense weights resident as far as it allows, pipeline stages streaming the rest and the routed experts inside their window), the four routed-read cases, the PP x TP ladder and its sensitivity to the hop latency, the Pareto fronts, and the census behind them (section 11).
+- `docs/LIMIT_5AXIS.md`: the five-axis (DP, PP, TP, EP, DCP = vLLM decode context parallel inside the TP ranks) decode limit on one BH Galaxy from physical values: the formulas (the L1 accounted per buffer, the dense weights resident as far as it allows, pipeline stages streaming the rest and the routed experts inside their window), the four routed-read cases, the PP x TP ladder and its sensitivity to the hop latency, the Pareto fronts, and the census behind them (section 11).
