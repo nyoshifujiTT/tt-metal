@@ -61,14 +61,15 @@ TEST(Qwen38DataflowCosts, RelaySteps) {
         "NIU status read",
         "semaphore inc (to self)",
         "704 B NoC write to the other core of the link, until sent",
-        "704 B NoC write to the other core of the link, until acked"};
+        "704 B NoC write to the other core of the link, until acked",
+        "TXQ idle check (eth_txq_is_busy)"};
     bool ok = true;
     for (auto core : {a, b}) {
         std::vector<uint32_t> w;
         tt::tt_metal::detail::ReadFromDeviceL1(dev, core, base, 128, w, tt::CoreType::ETH);
         ok = ok && w[30] == 0x600d0000u;
         out << "core (" << core.x << "," << core.y << ") ERISC1 NoC1, cycles per repetition (n " << n << "):\n";
-        for (int i = 0; i < 11; ++i) {
+        for (int i = 0; i < 12; ++i) {
             out << "  " << names[i] << ": " << static_cast<double>(w[i]) / n << "\n";
         }
     }

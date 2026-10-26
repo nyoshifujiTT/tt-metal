@@ -9,6 +9,7 @@
 // write to the peer Ethernet core of the same chip side waited until sent.  Results in cycles per repetition.
 #include <cstdint>
 #include "api/dataflow/dataflow_api.h"
+#include "internal/ethernet/dataflow_api.h"
 
 namespace {
 inline uint32_t load(uint32_t addr) { return *reinterpret_cast<volatile tt_l1_ptr uint32_t*>(addr); }
@@ -141,6 +142,12 @@ void kernel_main() {
         noc_nonposted_writes_num_issued[noc_index] += 1;
         noc_nonposted_writes_acked[noc_index] += 1;
         noc_async_write_barrier();
+    }
+    mark(t0);
+    // 11: TXQ idle check (eth_txq_is_busy: CMD read-back + STATUS read, BH-55 workaround), TXQ idle
+    t0 = now();
+    for (uint32_t i = 0; i < n; ++i) {
+        sink += internal_::eth_txq_is_busy(0) ? 1 : 0;
     }
     mark(t0);
     store(out + 4 * 31, sink);
