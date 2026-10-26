@@ -264,6 +264,7 @@ void kernel_main() {
         uint32_t received = 0;
         uint32_t head = ring;
         uint32_t head_index = 0;
+        uint32_t head_prev = 0;  // the tag last seen in the head slot (seen_tag[head_index]), kept in a register
         uint32_t issued_total = 0;
         uint32_t bad = 0;
         uint32_t idle = 0;
@@ -276,7 +277,7 @@ void kernel_main() {
             }
             const uint32_t w0 = load(head + trailer);
             const uint32_t w1 = load(head + trailer + 16);
-            if ((w0 != w1) | (w0 == seen_tag[head_index]) | ((w0 & kTagBit) == 0)) {
+            if ((w0 != w1) | (w0 == head_prev) | ((w0 & kTagBit) == 0)) {
                 if (++idle == kStallLimit) {
                     break;
                 }
@@ -350,6 +351,7 @@ void kernel_main() {
             } else {
                 head += stride;
             }
+            head_prev = seen_tag[head_index];
         }
         noc_nonposted_writes_num_issued[noc_index] += issued_total;
         noc_nonposted_writes_acked[noc_index] += issued_total;
