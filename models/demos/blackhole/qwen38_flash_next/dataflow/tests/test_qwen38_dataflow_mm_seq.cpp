@@ -273,6 +273,18 @@ std::string run_seq(const std::shared_ptr<distributed::MeshDevice>& mesh, uint32
             first_max = std::max(first_max, static_cast<double>(s[1] - s[0]));
         }
     }
+    if (steps == 48 && k_own == 50) {
+        const char* out_path = std::getenv("QWEN38_MM_OUT");
+        std::ofstream raw(std::string(out_path ? out_path : "/tmp/qwen38_mm.txt") + ".seqraw");
+        for (uint32_t i = 0; i < kCores; ++i) {
+            raw << i << " " << plan[i].core.x << " " << plan[i].core.y << " " << plan[i].role << " " << plan[i].segs.size()
+                << " " << plan[i].n_in << " " << (i == kHub ? 1 : 0);
+            for (uint32_t w = 64; w < 77; ++w) {
+                raw << " " << st[i * 128 + w];
+            }
+            raw << "\n";
+        }
+    }
     const auto o_rm = convert_layout<bfloat16>(
         ttsl::Span<const bfloat16>(o_t), {kRows, N}, TensorLayoutType::TILED_NFACES, TensorLayoutType::LIN_ROW_MAJOR,
         tile.get_tile_shape(), tile.get_face_shape());

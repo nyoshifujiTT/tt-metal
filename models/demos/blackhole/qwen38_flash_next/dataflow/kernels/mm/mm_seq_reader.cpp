@@ -14,9 +14,9 @@
 //   sender: per segment, sends the packed 2-row fp32 partial (cb_part) to rows 0..1 of faces 0 / 1 of its slot in the
 //           owner's cb_in_part;
 //   owner:  waits for the sentinels of its slots, pushes cb_in_part, waits for its packed column (cb_out), re-arms the
-//           sentinels, writes the column to slot col of the hub's half (s + 1) & 1 and increments the hub's counter
-//           (same source, destination and VC: the increment lands after the column);
-//   hub (one core): waits for the counter to reach 80 (s + 1), writes tag s + 2 in its trailer and multicasts the half
+//           sentinels, writes the column (non-posted) to slot col of the hub's half (s + 1) & 1;
+//   hub (one core): waits until its NIU has completed 80 (s + 1) incoming non-posted writes since the go
+//           (NIU_SLV_WR_ACK_SENT), writes tag s + 2 in its trailer and multicasts the half
 //           (Kt + 1 pages, one packet, one path reservation) to the other 129 cores.
 // (Worklog I-3b v2: 80 owners each multicasting their column, two path-reserving multicasts per owner per step,
 // measured 141 us/step: the concurrent path reservations back off exponentially.  27B rule 105 / Blitz mcast.)
@@ -42,6 +42,14 @@ bool wait_tag(uint32_t trailer, uint32_t tag) {
     for (uint32_t i = 0; i < kSpin; ++i) {
         invalidate_l1_cache();
         if (t[0] == tag && t[4] == tag) {
+            return true;
+        }
+    }
+    return false;
+}
+bool wait_acks(uint32_t target) {
+    for (uint32_t i = 0; i < kSpin; ++i) {
+        if (static_cast<int32_t>(NOC_STATUS_READ_REG(noc_index, NIU_SLV_WR_ACK_SENT) - target) >= 0) {
             return true;
         }
     }
@@ -93,7 +101,7 @@ void kernel_main() {
     const uint32_t is_hub = get_arg_val<uint32_t>(a++);
     const uint32_t hub_x = get_arg_val<uint32_t>(a++);
     const uint32_t hub_y = get_arg_val<uint32_t>(a++);
-    const uint32_t sem_cnt = get_semaphore(get_arg_val<uint32_t>(a++));
+    a++;  // the counter semaphore (v2 atomics; unused since the NIU counter)
     const uint32_t n_owners = get_arg_val<uint32_t>(a++);
     constexpr uint32_t Kp = Kt + 1;  // pages per half of cb_act: the Kt x tiles and the trailer page
     const uint32_t n_seg = get_arg_val<uint32_t>(a++);
@@ -169,33 +177,54 @@ void kernel_main() {
         noc_semaphore_set_multicast_loopback_src(sem_go, mc_go, n_cores);
     }
     errors += wait_min(go, 1) ? 0 : 0x100;
+    // the hub counts the owners' columns by its NIU's completed incoming non-posted writes (NIU_SLV_WR_ACK_SENT,
+    // tt-isa-documentation NoC/Counters.md: incremented after the L1 write); the only such writes to the hub on NOC0
+    // during the chain are the owners' columns
+    // (the go multicast is a non-posted write too: let its acknowledgement settle first; no owner column can arrive
+    // within this wait, an owner needs its first step's matmul before its first column)
+    const uint32_t settle = reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L);
+    while (reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L) - settle < 200) {
+    }
+    const uint32_t ack_base = NOC_STATUS_READ_REG(noc_index, NIU_SLV_WR_ACK_SENT);
     cb_reserve_back(cb_stamp, 1);
     volatile tt_l1_ptr uint32_t* stamps = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_write_ptr(cb_stamp));
     stamps[0] = reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L);
     const uint64_t mc_act = get_noc_multicast_addr(mc_x0, mc_y0, mc_x1, mc_y1, 0);
+    // profile of one step (kProf): words 64.. of the stamp page, each core's own clock
+    constexpr uint32_t kProf = steps > 21 ? 20 : 0xFFFFu;
+    auto prof = [&](uint32_t s, uint32_t w) {
+        if (s == kProf || (s == kProf + 1 && w == 64)) {
+            stamps[(s == kProf + 1) ? 76 : w] = reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L);
+        }
+    };
     for (uint32_t s = 0; s < steps; ++s) {
         const uint32_t h = s & 1, nh = (s + 1) & 1;
         // x_s: the hub's one multicast packet (Kt tiles + trailer) landed when both trailer lines show tag s + 1
         errors += wait_tag(act_base + (h * Kp + Kt) * kTile, s + 1) ? 0 : 0x10000;
+        prof(s, 64);
         cb_reserve_back(cb_act, Kp);
         cb_push_back(cb_act, Kp);
         if (role == 1) {
             for (uint32_t g = 0; g < n_seg; ++g) {
                 cb_wait_front(cb_part, 1);
+                prof(s, 65 + 2 * g);
                 const uint32_t src = get_read_ptr(cb_part);
                 const uint32_t slot = in_base + ((s & 1) * 3 + seg_slot[g]) * kSlot;
                 noc_async_write(src, get_noc_addr(seg_x[g], seg_y[g], slot), kChunk);
                 noc_async_write(src + kChunk, get_noc_addr(seg_x[g], seg_y[g], slot + kFace1), kChunk);
                 noc_async_writes_flushed();
+                prof(s, 66 + 2 * g);
                 cb_pop_front(cb_part, 1);
             }
         } else {
             for (uint32_t j = 0; j < n_in; ++j) {
                 errors += wait_landed(in_base + ((s & 1) * 3 + j) * kSlot) ? 0 : 0x10000;
             }
+            prof(s, 71);
             cb_reserve_back(cb_in_part, 3);
             cb_push_back(cb_in_part, 3);
             cb_wait_front(cb_out, 1);
+            prof(s, 72);
             for (uint32_t j = 0; j < n_in; ++j) {
                 arm(in_base + ((s & 1) * 3 + j) * kSlot);
             }
@@ -205,7 +234,7 @@ void kernel_main() {
                 // unicast VC: the increment lands after the tile, tt-isa-documentation NoC/Ordering.md)
                 noc_async_write(src, get_noc_addr(hub_x, hub_y, act_base + (nh * Kp + col) * kTile), kTile);
                 noc_async_writes_flushed();
-                noc_semaphore_inc(get_noc_addr(hub_x, hub_y, sem_cnt), 1);
+                prof(s, 73);
             } else {
                 noc_async_write_page(col, out, src);
                 noc_async_write_barrier();
@@ -217,8 +246,8 @@ void kernel_main() {
         }
         if (is_hub && s + 1 < steps) {
             // all owners' columns of x_{s+1} are in this core's half nh: tag the trailer, one multicast to the others
-            volatile tt_l1_ptr uint32_t* cnt = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(sem_cnt);
-            errors += wait_min(cnt, n_owners * (s + 1)) ? 0 : 0x10000;
+            errors += wait_acks(ack_base + n_owners * (s + 1)) ? 0 : 0x10000;
+            prof(s, 74);
             volatile tt_l1_ptr uint32_t* t =
                 reinterpret_cast<volatile tt_l1_ptr uint32_t*>(act_base + (nh * Kp + Kt) * kTile + 96);
             t[0] = s + 2;
@@ -228,9 +257,9 @@ void kernel_main() {
             const uint32_t half = act_base + nh * Kp * kTile;
             noc_async_write_multicast(half, mc_act | half, Kp * kTile, n_cores - 1);
             noc_async_writes_flushed();
+            prof(s, 75);
         }
     }
-    noc_async_atomic_barrier();
     stamps[127] = 0x600d0000u | (errors & 0xFFFFu) | (errors >> 16 ? 0x8000u : 0u);
     noc_async_write_page(stamp_page, st, get_write_ptr(cb_stamp));
     noc_async_write_barrier();
