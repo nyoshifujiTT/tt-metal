@@ -187,7 +187,8 @@ struct MeetingRun {
     int hops[8][8] = {};
     std::vector<std::string> stalls;
     uint32_t bad_iterations = 0;
-    std::vector<double> relay_us, loop_ns, loop_ns_rx;
+    std::vector<double> relay_us, loop_ns, loop_ns_rx, stage_rx, stage_noc, stage_tx;
+    std::vector<std::string> relay_lines;
 };
 
 MeetingRun run_meeting(
@@ -329,12 +330,23 @@ MeetingRun run_meeting(
                 stamp_chip && core == stamp_core ? 1u : 0u,
                 2000000u,
                 iters / 2};
-            args.push_back(static_cast<uint32_t>(cores.size()));
-            for (auto& c : cores) {
+            std::vector<tt::tt_metal::CoreCoord> own_cores;
+            for (auto& [oc, ocj] : jobs[n]) {
+                for (auto& tj : ocj.tx) {
+                    if (!tj.relayed) {
+                        own_cores.push_back(oc);
+                        break;
+                    }
+                }
+            }
+            args.push_back(static_cast<uint32_t>(own_cores.size()));
+            for (auto& c : own_cores) {
                 const auto v = dev->ethernet_core_from_logical_core(c);
                 args.push_back(v.x);
                 args.push_back(v.y);
             }
+            std::stable_sort(
+                cj.tx.begin(), cj.tx.end(), [](const TxSpec& a, const TxSpec& b) { return a.relayed > b.relayed; });
             args.push_back(static_cast<uint32_t>(cj.tx.size()));
             for (auto& tj : cj.tx) {
                 const auto v = dev->ethernet_core_from_logical_core(tj.up);
@@ -473,16 +485,23 @@ MeetingRun run_meeting(
     // flag seen for root r, on the same chip's wall clock; and each core's loop pass time
     for (int n = 0; n < 8; ++n) {
         auto* dev = meshes.at(chip_of[n])->get_devices()[0];
-        std::map<uint32_t, uint32_t> rx_seen, tx_first;
+        std::map<uint32_t, uint32_t> rx_seen, tx_first, rx_issued, tx_seen;
+        std::map<uint32_t, tt::tt_metal::CoreCoord> rx_core, tx_core;
         for (auto& [core, cj] : jobs[n]) {
             std::vector<uint32_t> pr;
-            tt::tt_metal::detail::ReadFromDeviceL1(dev, core, base + kRelayProbe, 72, pr, tt::CoreType::ETH);
+            tt::tt_metal::detail::ReadFromDeviceL1(dev, core, base + kRelayProbe, 160, pr, tt::CoreType::ETH);
             for (auto& [root, fwd] : cj.rx) {
                 rx_seen[root] = pr[root];
+                rx_issued[root] = pr[24 + root];
+                rx_core[root] = dev->ethernet_core_from_logical_core(core);
             }
             for (auto& tj : cj.tx) {
                 if (tj.relayed) {
                     tx_first[tj.root] = std::max(tx_first[tj.root], pr[8 + tj.root]);
+                    if (pr[32 + tj.root] >= tx_seen[tj.root]) {
+                        tx_seen[tj.root] = pr[32 + tj.root];
+                        tx_core[tj.root] = dev->ethernet_core_from_logical_core(core);
+                    }
                 }
             }
             if (!cj.tx.empty()) {
@@ -495,6 +514,16 @@ MeetingRun run_meeting(
         for (auto& [root, t1] : tx_first) {
             if (rx_seen.count(root)) {
                 run.relay_us.push_back(static_cast<int32_t>(t1 - rx_seen[root]) / 1350.0);
+                run.stage_rx.push_back(static_cast<int32_t>(rx_issued[root] - rx_seen[root]) / 1350.0);
+                run.stage_noc.push_back(static_cast<int32_t>(tx_seen[root] - rx_issued[root]) / 1350.0);
+                run.stage_tx.push_back(static_cast<int32_t>(t1 - tx_seen[root]) / 1350.0);
+                run.relay_lines.push_back(
+                    "    chip " + std::to_string(n) + " root " + std::to_string(root) + " rx (" +
+                    std::to_string(rx_core[root].x) + "," + std::to_string(rx_core[root].y) + ") -> tx (" +
+                    std::to_string(tx_core[root].x) + "," + std::to_string(tx_core[root].y) + "): seen->issued " +
+                    std::to_string(static_cast<int32_t>(rx_issued[root] - rx_seen[root])) + " cyc, issued->tx sees " +
+                    std::to_string(static_cast<int32_t>(tx_seen[root] - rx_issued[root])) + " cyc, tx sees->sent " +
+                    std::to_string(static_cast<int32_t>(t1 - tx_seen[root])) + " cyc");
             }
         }
     }
@@ -621,6 +650,21 @@ TEST(Qwen38DataflowMeeting, GroupAllGather) {
                 << (r.relay_us.empty() ? 0 : a / r.relay_us.size()) << " us (min " << lo << " max " << hi << ", "
                 << r.relay_us.size() << " relays); loop pass tx " << (r.loop_ns.empty() ? 0 : l / r.loop_ns.size())
                 << " ns, rx " << (r.loop_ns_rx.empty() ? 0 : lr / r.loop_ns_rx.size()) << " ns\n";
+        }
+        {
+            auto mean = [](const std::vector<double>& v) {
+                double a = 0;
+                for (double x : v) {
+                    a += x;
+                }
+                return v.empty() ? 0 : a / v.size();
+            };
+            out << "  relay stages: rx seen -> NoC issued " << mean(r.stage_rx) << " us, -> tx core sees the trailer "
+                << mean(r.stage_noc) << " us, -> eth send issued " << mean(r.stage_tx) << " us (" << r.stage_rx.size()
+                << " relays)\n";
+        }
+        for (auto& line : r.relay_lines) {
+            out << line << "\n";
         }
         out << "  raw arrive[n][r] (us):\n";
         for (int n = 0; n < 8; ++n) {

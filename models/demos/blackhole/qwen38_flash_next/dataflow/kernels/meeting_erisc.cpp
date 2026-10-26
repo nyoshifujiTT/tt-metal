@@ -39,6 +39,7 @@ constexpr uint32_t kCredits = 5120;
 constexpr uint32_t kSeen = 6144;
 constexpr uint32_t kRelayProbe = 14336;
 constexpr uint32_t kReleased = 14592;
+constexpr uint32_t kReleaseSum = 14720;
 constexpr uint32_t kStallLimit = 50000000;
 constexpr uint32_t kData = 16384;
 constexpr uint32_t kRoots = 8;
@@ -53,6 +54,13 @@ struct TxJob {
     uint32_t up_x;
     uint32_t up_y;
     uint32_t up_index;
+    uint32_t iter;
+    uint32_t index;
+    uint32_t addr;
+    uint32_t span;
+    uint32_t root_base[2];
+    uint64_t credit_dst;
+    uint32_t link_ok_until;
 };
 
 struct RxJob {
@@ -61,6 +69,14 @@ struct RxJob {
     uint32_t n_targets;
     uint32_t target_x[kMaxTargets];
     uint32_t target_y[kMaxTargets];
+    uint32_t iter;
+    uint32_t index;
+    uint32_t addr;
+    uint32_t span;
+    uint32_t root_base[2];
+    uint32_t target_coord[kMaxTargets];
+    uint32_t credit_addr[kMaxTargets];
+    uint32_t room_limit;
 };
 
 inline uint32_t load(uint32_t addr) { return *reinterpret_cast<volatile tt_l1_ptr uint32_t*>(addr); }
@@ -71,6 +87,29 @@ inline uint64_t wall_clock() {
     const uint32_t low = reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L);
     const uint32_t high = reg_read(RISCV_DEBUG_REG_WALL_CLOCK_H);
     return (static_cast<uint64_t>(high) << 32) | low;
+}
+
+inline void prepare_write_buf(uint32_t cmd_buf) {
+    while (!noc_cmd_buf_ready(noc_index, cmd_buf)) {
+    }
+    NOC_CMD_BUF_WRITE_REG(
+        noc_index,
+        cmd_buf,
+        NOC_CTRL,
+        NOC_CMD_CPY | NOC_CMD_WR | NOC_CMD_VC_STATIC | NOC_CMD_STATIC_VC(NOC_UNICAST_WRITE_VC) | NOC_CMD_RESP_MARKED);
+    NOC_CMD_BUF_WRITE_REG(noc_index, cmd_buf, NOC_RET_ADDR_MID, 0);
+}
+
+inline void issue_write(uint32_t cmd_buf, uint32_t src, uint32_t coord, uint32_t dst, uint32_t len) {
+    while (!noc_cmd_buf_ready(noc_index, cmd_buf)) {
+    }
+    NOC_CMD_BUF_WRITE_REG(noc_index, cmd_buf, NOC_TARG_ADDR_LO, src);
+    NOC_CMD_BUF_WRITE_REG(noc_index, cmd_buf, NOC_RET_ADDR_LO, dst);
+    NOC_CMD_BUF_WRITE_REG(noc_index, cmd_buf, NOC_RET_ADDR_COORDINATE, coord);
+    NOC_CMD_BUF_WRITE_REG(noc_index, cmd_buf, NOC_AT_LEN_BE, len);
+    NOC_CMD_BUF_WRITE_REG(noc_index, cmd_buf, NOC_CMD_CTRL, NOC_CTRL_SEND_REQ);
+    noc_nonposted_writes_num_issued[noc_index] += 1;
+    noc_nonposted_writes_acked[noc_index] += 1;
 }
 
 }  // namespace
@@ -143,7 +182,62 @@ void kernel_main() {
     auto span_of = [&](uint32_t count) {
         return ((((count % packets) == packets - 1 ? last_len : packet) + 31) & ~31u) + 32;
     };
-    auto trailer_seen = [&](uint32_t addr, uint32_t value) { return load(addr) == value && load(addr + 16) == value; };
+    auto trailer_seen = [&](uint32_t addr, uint32_t value) {
+        const uint32_t first = load(addr);
+        const uint32_t second = load(addr + 16);
+        return (first == value) & (second == value);
+    };
+    const uint32_t last_span = ((last_len + 31) & ~31u) + 32;
+    auto step = [&](uint32_t& index, uint32_t& iter, uint32_t& addr, uint32_t& span, const uint32_t* root_base) {
+        if (++index == packets) {
+            index = 0;
+            ++iter;
+            addr = root_base[iter & 1];
+        } else {
+            addr += frame;
+        }
+        span = index == packets - 1 ? last_span : frame;
+    };
+    for (uint32_t i = 0; i < n_rx; ++i) {
+        RxJob& job = rx[i];
+        for (uint32_t p = 0; p < 2; ++p) {
+            job.root_base[p] = base + kData + (p * kRoots + job.root) * slot_bytes;
+        }
+        job.iter = 0;
+        job.index = 0;
+        job.addr = job.root_base[0];
+        job.span = packets == 1 ? last_span : frame;
+        for (uint32_t t = 0; t < job.n_targets; ++t) {
+            job.target_coord[t] =
+                static_cast<uint32_t>(get_noc_addr(job.target_x[t], job.target_y[t], 0) >> NOC_ADDR_COORD_SHIFT) &
+                NOC_COORDINATE_MASK;
+            job.credit_addr[t] = base + kCredits + 16 * (job.root * kMaxTargets + t);
+        }
+        job.room_limit = job.n_targets == 0 ? 0xffffffffu : 2 * packets - 1;
+    }
+    uint64_t arrival_dst[kMaxChipCores];
+    for (uint32_t c = 0; c < n_chip_cores; ++c) {
+        arrival_dst[c] = get_noc_addr(chip_core_x[c], chip_core_y[c], base + kArrivals);
+    }
+    uint32_t release_sum = 0;
+    uint32_t release_seen = 0;
+    if (n_rx > 0) {
+        prepare_write_buf(write_cmd_buf);
+        prepare_write_buf(write_reg_cmd_buf);
+    }
+    for (uint32_t i = 0; i < n_tx; ++i) {
+        TxJob& job = tx[i];
+        for (uint32_t p = 0; p < 2; ++p) {
+            job.root_base[p] = base + kData + (p * kRoots + job.root) * slot_bytes;
+        }
+        job.iter = 0;
+        job.index = 0;
+        job.addr = job.root_base[0];
+        job.span = packets == 1 ? last_span : frame;
+        job.credit_dst =
+            get_noc_addr(job.up_x, job.up_y, base + kCredits + 16 * (job.root * kMaxTargets + job.up_index));
+        job.link_ok_until = 1;
+    }
 
     for (uint32_t i = 0; i < startup_spin; ++i) {
         asm volatile("nop");
@@ -208,56 +302,65 @@ void kernel_main() {
                 continue;
             }
             busy = true;
-            if (!trailer_seen(slot_of(job.done, job.root) + span_of(job.done) - 32, job.done + 1)) {
+            if (!trailer_seen(job.addr + job.span - 32, job.done + 1)) {
                 continue;
             }
-            if (job.done == probe_iter * packets) {
+            const bool probe = job.done == probe_iter * packets;
+            if (probe) {
                 store(base + kRelayProbe + 4 * job.root, reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L));
             }
-            if (job.done >= 2 * packets) {
-                bool room = true;
-                for (uint32_t t = 0; t < job.n_targets; ++t) {
-                    if (load(base + kCredits + 16 * (job.root * kMaxTargets + t)) < job.done - 2 * packets + 1) {
-                        room = false;
-                    }
+            if (job.done > job.room_limit) {
+                uint32_t least = load(job.credit_addr[0]);
+                for (uint32_t t = 1; t < job.n_targets; ++t) {
+                    const uint32_t credit = load(job.credit_addr[t]);
+                    least = credit < least ? credit : least;
                 }
-                if (!room) {
+                job.room_limit = least + 2 * packets - 1;
+                if (job.done > job.room_limit) {
                     continue;
                 }
             }
-            const uint32_t src = slot_of(job.done, job.root);
-            const uint32_t span = span_of(job.done);
+            const uint32_t src = job.addr;
+            const uint32_t span = job.span;
             for (uint32_t t = 0; t < job.n_targets; ++t) {
-                noc_async_write(src, get_noc_addr(job.target_x[t], job.target_y[t], src), span);
+                issue_write((t & 1) ? write_reg_cmd_buf : write_cmd_buf, src, job.target_coord[t], src, span);
             }
-            if (job.done % packets == 0) {
-                const uint32_t iteration = job.done / packets;
-                store(base + kSeen + 4 * (job.root * 256 + (iteration & 255)), load(src));
+            if (probe) {
+                store(base + kRelayProbe + 96 + 4 * job.root, reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L));
+            }
+            if (job.index == 0) {
+                store(base + kSeen + 4 * (job.root * 256 + (job.iter & 255)), load(src));
             }
             ++job.done;
             ++progress;
+            step(job.index, job.iter, job.addr, job.span, job.root_base);
             if (job.done == (probe_iter + 1) * packets) {
                 const uint64_t now = wall_clock();
                 store(base + kProbe + 8 * job.root, static_cast<uint32_t>(now));
                 store(base + kProbe + 8 * job.root + 4, static_cast<uint32_t>(now >> 32));
             }
-            if (job.done % packets == 0) {
-                noc_async_writes_flushed();
-                store(base + kReleased + 16 * job.root, job.done / packets);
+            if (job.index == 0) {
                 for (uint32_t c = 0; c < n_chip_cores; ++c) {
-                    noc_semaphore_inc(get_noc_addr(chip_core_x[c], chip_core_y[c], base + kArrivals), 1);
+                    noc_semaphore_inc(arrival_dst[c], 1);
                 }
+                noc_async_writes_flushed();
+                store(base + kReleased + 16 * job.root, job.iter);
+                store(base + kReleaseSum, ++release_sum);
             }
         }
         if constexpr (kRole == 0) {
-            for (uint32_t i = 0; i < n_credit; ++i) {
-                const uint32_t released = load(base + kReleased + 16 * credit_roots[i]);
-                if (released > credits_sent[i]) {
-                    while (internal_::eth_txq_is_busy(0)) {
+            const uint32_t sum = load(base + kReleaseSum);
+            if (sum != release_seen) {
+                release_seen = sum;
+                for (uint32_t i = 0; i < n_credit; ++i) {
+                    const uint32_t released = load(base + kReleased + 16 * credit_roots[i]);
+                    if (released > credits_sent[i]) {
+                        while (internal_::eth_txq_is_busy(0)) {
+                        }
+                        remote_update_ptr_val<0>(credit_roots[i], static_cast<int32_t>(released - credits_sent[i]));
+                        credits_sent[i] = released;
+                        ++progress;
                     }
-                    remote_update_ptr_val<0>(credit_roots[i], static_cast<int32_t>(released - credits_sent[i]));
-                    credits_sent[i] = released;
-                    ++progress;
                 }
             }
         }
@@ -267,21 +370,31 @@ void kernel_main() {
                 continue;
             }
             busy = true;
-            const uint32_t iteration = job.sent / packets;
-            const uint32_t src = slot_of(job.sent, job.root);
-            const uint32_t span = span_of(job.sent);
+            const uint32_t iteration = job.iter;
+            const uint32_t src = job.addr;
+            const uint32_t span = job.span;
             const bool ready = job.relayed ? trailer_seen(src + span - 32, job.sent + 1)
                                            : load(base + kArrivals) >= arrivals_per_iter * iteration;
-            if (!ready || (iteration >= 2 && get_ptr_val(job.root) < static_cast<int32_t>(iteration - 1))) {
+            if (ready && job.relayed && job.sent == probe_iter * packets &&
+                load(base + kRelayProbe + 128 + 4 * job.root) == 0) {
+                store(base + kRelayProbe + 128 + 4 * job.root, reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L));
+            }
+            if (!ready) {
                 continue;
             }
-            if (stamp && i == first_own && job.sent % packets == 0 && stamped == iteration) {
+            if (iteration > job.link_ok_until) {
+                job.link_ok_until = static_cast<uint32_t>(get_ptr_val(job.root)) + 1;
+                if (iteration > job.link_ok_until) {
+                    continue;
+                }
+            }
+            if (stamp && i == first_own && job.index == 0 && stamped == iteration) {
                 const uint64_t now = wall_clock();
                 store(base + kStamps + 8 * iteration, static_cast<uint32_t>(now));
                 store(base + kStamps + 8 * iteration + 4, static_cast<uint32_t>(now >> 32));
                 ++stamped;
             }
-            if (!job.relayed && job.sent % packets == 0 && (iteration == probe_iter || iteration == probe_iter + 1)) {
+            if (!job.relayed && job.index == 0 && (iteration == probe_iter || iteration == probe_iter + 1)) {
                 const uint64_t now = wall_clock();
                 const uint32_t at = base + kProbe + 8 * (kRoots + iteration - probe_iter);
                 store(at, static_cast<uint32_t>(now));
@@ -299,10 +412,9 @@ void kernel_main() {
             internal_::eth_send_packet_bytes_unsafe(0, src, src, span);
             ++job.sent;
             ++progress;
+            step(job.index, job.iter, job.addr, job.span, job.root_base);
             if (job.relayed) {
-                noc_semaphore_inc(
-                    get_noc_addr(job.up_x, job.up_y, base + kCredits + 16 * (job.root * kMaxTargets + job.up_index)),
-                    1);
+                noc_inline_dw_write<InlineWriteDst::L1, true>(job.credit_dst, job.sent);
             }
         }
     }
