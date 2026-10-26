@@ -71,6 +71,9 @@ void kernel_main() {
     // reads of the slice per round, back to back without any sync between them (a round of `chain` reads after one go
     // measures the stream without the per-round go / done cost)
     const uint32_t chain = get_arg_val<uint32_t>(a++);
+    // pacing (I-1b' stream): with period > 0 the q-th read of a round is issued no earlier than go + q x period cycles
+    // (wall clock, read by each core from the go time it saw), so every core starts its reads in lockstep
+    const uint32_t period = get_arg_val<uint32_t>(a++);
     constexpr auto out_args = TensorAccessorArgs<1>();
     const auto out = TensorAccessor(out_args, out_addr);
     volatile tt_l1_ptr uint32_t* go = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(sem_go);
@@ -97,7 +100,15 @@ void kernel_main() {
         for (uint32_t r = 0; r < rounds; ++r) {
             wait_min(go, r + 1);
             if (has && mode == 2) {
+                const uint32_t t_go_seen = reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L);
                 for (uint32_t q = 0; q < chain; ++q) {
+                    if (period) {
+                        while (reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L) - t_go_seen < q * period) {
+                        }
+                        if (q > 0) {
+                            noc_async_read_barrier();
+                        }
+                    }
                     uint32_t d = dst;
                     for (uint32_t i = 0; i < nseg; ++i) {
                         if (sn[i] == 1) {
@@ -135,7 +146,15 @@ void kernel_main() {
                 uint32_t d = dst;
                 // this RISC reads its own NoC's segments (a RISC issues only on its dedicated NoC: the firmware sets up
                 // the counters of that NoC alone, brisc.cc noc_local_state_init(noc_index)); the other RISC reads the rest
+                const uint32_t t_go_seen = reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L);
                 for (uint32_t q = 0; q < chain; ++q) {
+                    if (period) {
+                        while (reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L) - t_go_seen < q * period) {
+                        }
+                        if (q > 0) {
+                            noc_async_read_barrier();
+                        }
+                    }
                     d = dst;
                     for (uint32_t i = 0; i < nseg; ++i) {
                         if (sn[i] == role) {

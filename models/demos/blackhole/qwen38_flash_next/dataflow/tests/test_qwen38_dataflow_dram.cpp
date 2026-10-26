@@ -37,7 +37,8 @@ struct Case {
     std::string assign;  // mode 2: the LP's assignment file (per core: x y nseg {bank offset bytes})
     bool optimal;  // the 8 bank-adjacent cores of get_optimal_dram_bank_to_logical_worker_assignment (readers == banks)
     bool vc_spread;
-    uint32_t chain = 1;  // mode 2: reads of the slice per round (back to back, one go)
+    uint32_t chain = 1;   // mode 2: reads of the slice per round (back to back, one go)
+    uint32_t period = 0;  // mode 2: pace the reads of a round at go + q x period cycles (0: back to back)
 };
 
 std::string run_case(const std::shared_ptr<distributed::MeshDevice>& mesh, const Case& c, bool& ok) {
@@ -230,6 +231,7 @@ std::string run_case(const std::shared_ptr<distributed::MeshDevice>& mesh, const
         }
         args.push_back(sem_local);
         args.push_back(c.chain);
+        args.push_back(c.period);
         SetRuntimeArgs(program, k, core, args);
         SetRuntimeArgs(program, k1, core, args);
     }
@@ -261,7 +263,7 @@ std::string run_case(const std::shared_ptr<distributed::MeshDevice>& mesh, const
     const double mean = sum / n;
     const double bytes = c.mode == 2 ? static_cast<double>(total_bytes) * c.chain : static_cast<double>(readers) * slice;
     std::ostringstream os;
-    os << "chain " << c.chain << ": ";
+    os << "chain " << c.chain << (c.period ? " period " + std::to_string(c.period) : std::string()) << ": ";
     os << (c.mode ? "TRID pipeline (page " + std::to_string(c.page) + ", " + std::to_string(c.group) + " a trid)" : "one read")
        << (c.optimal ? ", bank-adjacent" : ", spread") << (c.vc_spread ? ", VC j%4" : ", VC 0") << ": readers " << readers << " x slice " << slice << " B = " << bytes / 1e6 << " MB: round mean " << mean
        << " us (best " << best << ", worst " << worst << ") = " << bytes / (mean * 1e3) << " GB/s = "
@@ -280,14 +282,22 @@ TEST(Qwen38DataflowDram, SliceLane) {
     bool ok = true;
     [[maybe_unused]] constexpr uint32_t P = 16384;
     const std::string A = std::string(std::getenv("HOME")) + "/work/noc/";
+    // the MILP NOC1 slice (256 KiB a core, 34.1 MB in all) at the bank bound takes 34.1 MB / (8 x 47.4 B/cycle) =
+    // 89,856 cycles; paced streams of 4 reads at periods of 1.00 / 1.02 / 1.05 x that
     std::vector<Case> cases = {
-        {130, 0, 2, 0, 0, A + "balanced_262144_noc1.txt", false, false},  // LP, NOC1 (run 8: 96.4%)
-        {130, 0, 2, 0, 0, A + "milp_262144_noc1_u50.txt", false, false},  // MILP, NOC1, <= 2 banks a link
-        {130, 0, 2, 0, 0, A + "milp_262144_noc0_u40.txt", false, false},  // MILP, NOC0
-        {130, 0, 2, 0, 0, A + "milp_262144_noc01_u40.txt", false, false}, // MILP, both NoCs
-        {130, 0, 2, 0, 0, A + "milp_262144_noc1_u50.txt", false, false},  // MILP, NOC1, two reads back to back
+        {130, 0, 2, 0, 0, A + "milp_262144_noc1_u50.txt", false, false},  // one read a round (run 9: 98.4%)
+        {130, 0, 2, 0, 0, A + "milp_262144_noc1_u50.txt", false, false},  // 4 reads back to back
+        {130, 0, 2, 0, 0, A + "milp_262144_noc1_u50.txt", false, false},  // 4 reads paced 1.00
+        {130, 0, 2, 0, 0, A + "milp_262144_noc1_u50.txt", false, false},  // 4 reads paced 1.02
+        {130, 0, 2, 0, 0, A + "milp_262144_noc1_u50.txt", false, false},  // 4 reads paced 1.05
     };
-    cases[4].chain = 2;
+    cases[1].chain = 4;
+    cases[2].chain = 4;
+    cases[2].period = 89856;
+    cases[3].chain = 4;
+    cases[3].period = 91653;
+    cases[4].chain = 4;
+    cases[4].period = 94349;
     for (const auto& c : cases) {
         out << run_case(mesh, c, ok) << "\n";
         out.flush();
