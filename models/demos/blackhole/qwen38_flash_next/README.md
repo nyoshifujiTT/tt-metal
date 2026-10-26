@@ -274,7 +274,7 @@ roleplay 2.24.  The paper's rows, the throughput split and the plain-decode arm:
 
 ## 11. Decode limit on one Blackhole Galaxy: 5 軸（DP, PP, TP, EP, DCP）の限界性能と、そこから採る形
 
-この節は、32 chip の BH Galaxy で本モデルの decode を回すときの**限界性能**（物理値と HF 定義だけから出る 1 token の時間と機械全体の tokens/s）と、その限界を出す**形**（5 軸の分け方、chip の中身、1 token の時間線）を、詳細設計と実装がそのまま使える粒度で書く。並び: §11.1 目標と指標 → §11.2 設計の入力（モデル・routing の実態・機械の物理値・系列長） → §11.3 確定原則（設計規則） → §11.4 解析モデル（時間の式） → §11.5 限界性能の答え（系列長別、ctx 192 の詳細） → §11.6 採る形の詳細設計（tsu 側 / agg 側） → §11.7 今の実装との差と近づける順番 → §11.8 未確定と決着方法 → §11.9 生成・検証・運用。本文の数値・順位は全て生成器 `render_free5d_v3.py` が `free5d_v3.py` の結果と census から決定的に生成する（手書きの数値は無い）。経緯・指摘・撤回は作業記録 `/opt/codex/shared-with-lxd-containers/BH-GLX_Qwen3.8-Flash-Next_SC1_handoff_worklog_20261023.md` §9.4〜§10（追記専用）、生成器と census は同じ共有ディレクトリ（`BH-GLX_Qwen3.8-Flash-Next_free5d_v3_20261024.py`、`..._render_free5d_v3_20261024.py`、`..._routing_census_20261023.py`、`..._routing_stats_20261023.py`、`..._routing_stats_full_20261023.json`）。README と食い違ったら新しい方の作業記録が正しい。
+この節は、32 chip の BH Galaxy で本モデルの decode を回すときの**限界性能**（物理値と HF 定義だけから出る 1 token の時間と機械全体の tokens/s）と、その限界を出す**形**（5 軸の分け方、chip の中身、1 token の時間線）を、詳細設計と実装がそのまま使える粒度で書く。並び: §11.1 目標と指標 → §11.2 設計の入力（モデル・routing の実態・機械の物理値・系列長） → §11.3 確定原則（設計規則） → §11.4 解析モデル（時間の式） → §11.5 限界性能の答え（系列長別、ctx 192 の詳細） → §11.6 採る形の詳細設計（tsu 側 / agg 側） → §11.7 今の実装との差と近づける順番 → §11.8 未確定と決着方法 → §11.9 生成・検証・運用。本文の数値・順位は全て生成器 `render_free5d_v4.py` が `free5d_v4.py` の結果と census から決定的に生成する（手書きの数値は無い）。第 4 版は §12 の詳細設計で見つかった 8 点（§12.8）を取り込んだもの: 会合（collective）は packet 模型、routed は 2 段先読み、tail の全単品、受け渡しは生きている行、hyper-connection の形の軸、先読み容量。経緯・指摘・撤回は作業記録 `/opt/codex/shared-with-lxd-containers/BH-GLX_Qwen3.8-Flash-Next_SC1_handoff_worklog_20261023.md` §9.4〜§13（追記専用）、生成器と census は同じ共有ディレクトリ（`BH-GLX_Qwen3.8-Flash-Next_free5d_v4_20261026.py`、`..._render_free5d_v4_20261026.py`、`..._design_comm_model_20261026.py`、`..._design_census_stage2_batches_20261026.py`、`..._routing_census_20261023.py`、`..._routing_stats_20261023.py`）。README と食い違ったら新しい方の作業記録が正しい。
 
 ### 11.1 目標と指標
 
@@ -315,16 +315,16 @@ H = 2560、48 層 = 36 GDN（gated delta net、value head 48 × 128、qk head 16
 
 #### 11.2.2 routing の実態（census: 本件プロンプト集合 34 item × 256 decode 位置の層別 top-10、CPU oracle）
 
-routed の分子は一様仮定ではなく census の実測: 同時 B 行の実 distinct expert 数、EP 群に丸ごと置いたときの最繁忙群、tile 回し置きのときの最繁忙 chip、投機 routing（層 l の router を 1 ブロック早い hidden で回す）のヒット率。rows > 256 は外挿（distinct の減衰則と偏り則）。
+routed の分子は一様仮定ではなく census の実測: 同時 B 行の実 distinct expert 数、EP 群に丸ごと置いたときの最繁忙群、tile 回し置きのときの最繁忙 chip、2 段先読み（層 l の router を 2 ブロック早い / 1 ブロック早い残差で回す）の集合とヒット率（h2 = P2 のヒット率、h12 = P1 ∪ P2 のヒット率）。rows > 256 は外挿（distinct の減衰則と偏り則）。
 
-| B（行） | 実 distinct expert/層（一様仮定） | 投機 routing（1 ブロック早い router）のヒット率 h | 最繁忙 group（EP2 / EP4 / EP8、expert 数） | 最繁忙 chip（tiles 形 TPx8 / TPx16 / TPx32、tile 数; 均等なら distinct×20/TPx） |
-|---|---|---|---|---|
-| 1 | 10.0（10.0） | 0.78 | 6.2 / 4.2 / 3.0 | 27 / 15 / 9（25 / 12 / 6） |
-| 1x2 | 16.5（19.8） | 0.79 | 9.8 / 6.2 / 4.2 | 44 / 24 / 13（41 / 21 / 10） |
-| 16x2 | 183.3（239.6） | 0.85 | 95.9 / 51.3 / 28.3 | 466 / 237 / 124（458 / 229 / 115） |
-| 32x2 | 270.2（367.1） | 0.88 | 139.4 / 73.3 / 39.3 | 684 / 346 / 179（676 / 338 / 169） |
-| 128x2 | 419.0（508.7） | 0.94 | 212.7 / 109.1 / 56.4 | 1054 / 530 / 269（1048 / 524 / 262） |
-| 256 | 426.2（508.7） | 0.94 | 216.1 / 110.7 / 57.2 | 1071 / 539 / 274（1065 / 533 / 266） |
+| B（行） | 実 distinct expert/層（一様仮定） | 2 段先読みのヒット率 h2 / h12 | 最繁忙 group（EP2 / EP4 / EP8、expert 数） | 最繁忙 chip（tiles 形 TPx8 / TPx16 / TPx32、tile 数; 均等なら distinct×20/TPx） | tiles TPx8 の集合（P2 / P1−P2 / 外れ / 無駄読み、tile） |
+|---|---|---|---|---|---|
+| 1 | 10.0（10.0） | 0.64 / 0.81 | 6.2 / 4.2 / 3.0 | 27 / 15 / 9（25 / 12 / 6） | 26.0 / 8.1 / 5.4 / 12.1 |
+| 1x2 | 16.5（19.8） | 0.66 / 0.83 | 9.8 / 6.2 / 4.2 | 44 / 24 / 13（41 / 21 / 10） | 42.8 / 12.7 / 8.3 / 19.5 |
+| 16x2 | 183.3（239.6） | 0.73 / 0.87 | 95.9 / 51.3 / 28.3 | 466 / 237 / 124（458 / 229 / 115） | 435.6 / 98.8 / 64.0 / 130.7 |
+| 32x2 | 270.2（367.1） | 0.77 / 0.89 | 139.4 / 73.3 / 39.3 | 684 / 346 / 179（676 / 338 / 169） | 634.3 / 119.7 / 76.5 / 144.6 |
+| 128x2 | 419.0（508.7） | 0.86 / 0.94 | 212.7 / 109.1 / 56.4 | 1054 / 530 / 269（1048 / 524 / 262） | 978.5 / 108.4 / 68.2 / 99.2 |
+| 256 | 426.2（508.7） | 0.86 / 0.94 | 216.1 / 110.7 / 57.2 | 1071 / 539 / 274（1065 / 533 / 266） | 994.0 / 106.3 / 67.2 / 93.7 |
 
 #### 11.2.3 機械の物理値（設計の入力、出典は 27B README §3 と同じ）
 
@@ -354,25 +354,28 @@ QSA 1 行 1 層の KV 読み = 選択 K/V min(ctx, 2048) 行 × 2 head × 256 ×
 10. PP は固定段（R = 1）と周（層+tail を PP × R 枠に切り、枠 f を群 f mod PP に置く）の両方を列挙する。段の chip は空いている間に自段の dense を L1 に先読みするので、1 token の DRAM 時間には全 chip の帯域が効く。micro-batch 数 n_mb は 1〜min(PP, b) の自由変数。段の境はバイト均等と鎖均等の速い方、受け渡しの hop 数は段の形（8 × 4 torus 上の配置）から。
 
 **C. MoE**
-11. routed expert は router の後にしか読めない（dense だけ先読み可）。層の時間 = 前段の鎖 + [router 後に読む分があれば発行レイテンシ 0.16 µs] + max(expert 段の鎖, 先読みできなかった routed/BW)、かつ ≥ 層の routed 全バイト/BW。先読みは L1 の routed バッファの分まで。全ヒットでも routed は micro-batch の hidden に依存するので段の空き時間には読めず、最良でも 1 層前の裏。
+11. routed expert は router の後にしか読めない（dense だけ先読み可）。先読みは **2 段**: 層 l の router を 2 ブロック早い残差に当てた集合 P2 を層 l−1 の間に、1 ブロック早い集合 P1 の差分を層 l の attention ブロックの間に読み、外れ A − P1 − P2 は router 後（発行レイテンシ 0.16 µs）に読む。層の時間 = 前段の鎖 + [発行] + max(expert 段の鎖, 先読みできなかった routed/BW)、かつ ≥ 層の routed 全バイト/BW。L00 の expert は確定（embedding 行）だが pass 開始後にしか発行できず、MTP 層の expert は本 pass の argmax 後にしか予測できない（構造的な露出）。
 12. routed の分子は census（§11.2.2）。全 expert 読みは群の 512/EP expert を毎 step 読む形で偏り無し。
 13. 露出した routed 読みを二重に数えない（占有 = max(演算+通信, 先読み分/BW) + 露出分/BW）。
 
 **D. メモリ**
-14. L1 は積み上げで勘定する: 固定専有 → ストリームバッファ → 活性 4 × [rows, H] bf16 + 残差 [rows, 4H]/TP_a → expert 片 2 枚 → 最終段の logits chunk → 残りを常駐 dense と routed 先読みバッファに分ける（分け方は 0 / 1 層分 / 2 層分 / 残り全部の 4 通りを列挙）。dense 5.38 GB の 32 分割 160 MiB は L1 に全部は置けない。
+14. L1 は積み上げで勘定する: 固定専有 → ストリームバッファ → 活性 4 × [rows, H] bf16 + 残差（列分割なら [rows, 4H]/TP_a、複製なら全体）→ expert 片 2 枚 → 最終段の logits chunk → 残りを常駐 dense と routed 先読みバッファに分ける（分け方は 0 / 1 層分 / 2 層分 / 残り全部の 4 通りを列挙）。空き時間の先読みは常駐の残り全部から routed 3 層分を取り置いた分まで（枠の dense は鎖が消費した順に空く）。dense 5.38 GB の 32 分割 160 MiB は L1 に全部は置けない。
 15. 候補を「物理的に劣るはず」という理由で列挙から外さない。選択は (時間, pass あたりの DRAM バイト) の辞書順だけで決める。
 16. 残差は L1 に入らなければ DRAM に置き、層ごとの往復を DRAM 車線に加える。容量は expert 分 + 段の dense 分 + ユーザの状態/KV ≤ 30.8 GB/chip（PP > 1 では自段の層分だけ）。
 
 **E. 通信と演算**
-17. 通信は物理式: ring の link 時間 (n−1)/n × T / (paths × 25 GB/s)、最後の tile のレイテンシ = hop × (280 ns + 蓄積転送) + 中継の NoC、tile ごとに流して層の演算の半分までに隠す。all-reduce は RS+AG（レイテンシ 2 本）と「部分和の all-gather + 局所 reduce」（1 本）の速い方。
-18. 層の collective は配備 `read_tp4` の形から数える: hc 統計の all-reduce × 2、ブロック入力の all-gather × 2、ブロック出力の reduce-scatter × 2 = 6 本/層 + router 列分割なら候補の all-gather 1 本 + DP_a > 1 なら a2a 2 本 + DCP > 1 なら merge 1 本（QSA 層）。重みの分割と通信の本数は同じ形から出す（形を混ぜない）。router は複製（collective 無し、dense +126 MB/chip）と列分割の両形を評価。
+17. 通信（会合 = collective 1 回）は packet 模型で数える（`comm_model.py`: link 25 GB/s/方向、hop 280 ns、送り手の蓄積転送 16 ns/2 KiB packet、中継 92 cycle + 32 flit、packet 2 KiB + 56 B、link は FIFO、経路は縦 → 環の短い向き、形は BFS 木の multicast / 直送 / 木の reduce の速いもの、all-reduce は AG+局所 と RS+AG の速い方）。鎖に乗る露出: 入力 x の all-gather は届いた K chunk から次の射影が追いかける（露出 = 最後の chunk + 残りの仕事 − 射影）、部分和の reduce-scatter / all-reduce は 10 波で行列積の間に流す（露出 = 行列積を超えた分）、hc 読みの部分和の all-reduce も down の間に波で流す。投機 router の会合は鎖の外。
+18. 層の会合は hyper-connection の形から数え、形は軸として列挙する: **A**（配備 `read_tp4`: 残差を列で TP_a 分割、down K 分割 → 部分和 AR（波）、up N 分割 → x の AG、出力 RS（波））、**B**（残差を複製: 出力 AR（波）に attention 出力の折り畳み F_i h_i（[1280, 768] bf16/chip/ブロック）を相乗りさせ MoE 読みの low-rank を局所に）、**Bn**（B + attention 読みの D を N 分割 + low-rank の AG）、**B+D**（B + D を複製）。B 系は受け渡しで残差の AG が 1 本増える。router は複製（会合無し、dense +126 MB/chip）と列分割（候補の AG 1 本）の両形、DP_a > 1 なら a2a 2 本、DCP > 1 なら merge 1 本（QSA 層）。
 19. b=1 の演算は行列積の鎖で決まる: 出力 tile が core 数より少なければ K を分けて部分和を NoC の木で足し（1 段 92 cycle + 64 flit + 32 cycle）、同じ入力を読む行列積は並べて走る（27B §9「和でなく max」）。GDR の単位は core に 1 つずつ乗り、verify 行は再帰で直列。
 
 **F. 条件と結論の出し方**
 20. 系列長は今の配備の計測条件（192）を設計条件にせず、§11.1 の 6 点を並べる。
 21. agg は b を漸近（ユーザ状態の往復 95,605 t/s）まで振り、容量で落ちる b を明記する。「EP=1・DCP=1 が最速」のような結論を比較せずに前提から出さない。
+22. tail は全単品を数える: final mixer（+ 部分和 AR + x の AG）、lm_head、局所 argmax（7.5 tile/core + NoC 集約）+ 候補の AG、MTP の mixer・fc・MTP 層・draft lm_head + argmax。PLE は演算と統計の AR × 2。
+23. 群間の受け渡しは枠の境で生きている行全部（残差 1/TP_a + ブロック入力 x + inject）を、列の 2 chip が共有する群間 link に packet 模型で流す。
+24. 限界モデルは層の中で DRAM 車線を平滑化する上限（max(鎖, routed/BW)）。時間軸で車線を追う詳細設計（§12）は routed の読みが層境を越えて積み上がる分だけ長くなりうる（全ヒットでは一致、census・全ミスでは §12 が長い）。設計の到達値は §12、§11 は形の比較と上限。
 
-### 11.4 解析モデル（時間の式。実装は `free5d_v3.py`、docstring に全式）
+### 11.4 解析モデル（時間の式。実装は `free5d_v4.py`、docstring に全式）
 
 #### 11.4.1 軸と列挙
 
@@ -388,9 +391,9 @@ QSA 1 行 1 層の KV 読み = 選択 K/V min(ctx, 2048) 行 × 2 head × 256 ×
 
 #### 11.4.2 層の時間と段の時間
 
-- 層 = 前段（hc 読み 2 本、GDN または QSA、shared + router の射影、top-10、それらの collective）+ [発行レイテンシ] + max(expert 段の鎖（expert の up/gate → down + shared down、RS）, 先読みできなかった routed/BW)、かつ ≥ 層の routed 全バイト/BW。通信は link の合計が層の演算の半分までに隠れ、隠れない分 + 最後の tile のレイテンシが露出。
+- 層 = 前段（hc 読み 2 本、GDN または QSA、shared + router の射影、top-10、それらの collective）+ [発行レイテンシ] + max(expert 段の鎖（expert の up/gate → down + shared down、RS）, 先読みできなかった routed/BW)、かつ ≥ 層の routed 全バイト/BW。会合の露出は原則 17（x の AG は K chunk で射影が追いかける、部分和の RS / AR は 10 波で行列積の間に流す）、a2a / merge は link の合計が演算の半分までに隠れ残りが露出。L00 と MTP 層は routed の構造的露出（原則 11）を足す。
 - 枠 f の占有 occ_f = max(Σ層 + 受け渡し, 窓 = (常駐しない dense − 空き時間の先読み + micro-batch の routed + 状態/KV + 残差の往復)/BW)。群 g の DRAM/pass = Σ(群の枠) [常駐しない dense × n_mb + 状態/KV + routed × n_mb + 残差往復 × n_mb]/BW。
-- **T_pass = max(max_g 群の DRAM/pass, max_g Σ(群の枠) occ_f × n_mb, Σ_f occ_f)**。空き時間の先読みは「T_pass − 群の占有」を枠に配り、バッファ上限まで（不動点）。T_tok = T_pass。
+- **T_pass = max(max_g 群の DRAM/pass, max_g Σ(群の枠) occ_f × n_mb, Σ_f occ_f)**。空き時間の先読みは「T_pass − 群の占有」を枠に配り、常駐の残り − routed 3 層分まで（不動点）。T_tok = T_pass。tail = 原則 22、受け渡し = 原則 23。
 
 #### 11.4.3 L1 と DRAM の勘定（1 chip）
 
@@ -398,14 +401,14 @@ L1 177.2 MiB − ストリームバッファ 24.4 MiB − 活性（b=1 で 40 Ki
 
 #### 11.4.4 通信と演算の単価
 
-最後の tile のレイテンシ: 4 chip 0.68 µs、8 chip 1.07、16 chip 1.85、32 chip 2.23。all-reduce の 2 形: hc 統計の行（b=1 で 2.5 KiB）は AG+局所で 1 本、残差 [rows, H] は RS+AG。行列積の鎖（1 chip、b=1、K 分割の木込み）: GDN qkv/z/a/b pool TP8 1.10 µs、TP32 0.68 µs。GDR 1 単位 1,856 cycle（k=1）。tile padding: expert 640 列を TPx 分割 → TPx16 1.6 倍、TPx32 1.6 倍（slice 形のみ）。
+会合（packet 模型、b=1 の行、submesh 4 / 8 / 16 / 32 chip）: x の AG 0.87 / 1.27 / 1.99 / 2.32 µs、hc 部分和の AR（枝ごと [2, 4×325] fp32）1.34 / 2.25 / 3.98 / 5.05、出力部分和 [2, H] bf16 の RS 1.10 / 1.51 / 2.38 / 2.59（鎖に乗る露出はこれより短い: TP8 で AG_x 0.30、RS の波 1.21、AR の波 1.76 µs）。行列積の鎖（1 chip、b=1、K 分割の木込み）: GDN qkv/z/a/b pool TP8 1.10 µs、TP32 0.68 µs。GDR 1 単位 1,856 cycle（k=1）。tile padding: expert 640 列を TPx 分割 → TPx16 1.6 倍、TPx32 1.6 倍（slice 形のみ）。
 
 #### 11.4.5 routed の 4 ケース（代表仮定が置けないので並列列挙）
 
 | ケース | 意味 | routed の DRAM バイト | router 後に読む分 |
 |---|---|---|---|
-| hit | routed を router の前に読み終える（投機 routing が全部当たる） | distinct × 2.76 MB | 0 |
-| census | 1 ブロック早い投機 routing の実測ヒット率（h: B=1 0.78、B=16×2 0.85、B=256 0.94）、外れ分は router 後に読み直す | distinct × 2.76 MB × (2−h) | (1−h) 分 + 発行レイテンシ |
+| hit | routed を router の前に読み終える（2 段先読みが全部当たる; L00 は pass 開始後、MTP 層は自分の attention 後） | distinct × 2.76 MB | 0 |
+| census | 2 段先読みの実測集合（B=1×2 行: 実 43.9 tile/層のうち P2 42.8、P1−P2 12.7、外れ 8.3、無駄読み 19.5（tiles 形 TPx8 最繁忙 chip）; ヒット率 h12 B=1×2 0.83、B=256 0.94） | A ∪ P1 ∪ P2 × 2.76 MB/expert | 外れ分 + 発行レイテンシ |
 | miss | router の後に読む（今の runtime の形） | distinct × 2.76 MB | 全部 + 発行レイテンシ |
 | all | 毎 step 群の 512/EP expert 全部を読む（router に依存しない、偏り無し） | 512/EP × 2.76 MB | 0 |
 
@@ -415,127 +418,126 @@ L1 177.2 MiB − ストリームバッファ 24.4 MiB − 活性（b=1 で 40 Ki
 
 | ctx | tsu 最大（全ヒット） | 構成 | T_tok [ms]; DRAM/pass / 演算 / 通信 | tsu 最大（census / 全ミス） | agg 最大（全ヒット） | 構成 | users | T_pass [ms] | agg 最大（census / 全ミス） | DP1 で容量に入る最大 b |
 |---|---|---|---|---|---|---|---|---|---|---|
-| 1 | 1,913 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` | 0.719; 0.589 / 0.376 / 0.308 | 1,783 / 1,470 | 84,191 | `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` | 4096 | 66.9 | 83,576 / 84,191 | 2,048 |
-| 128 | 1,913 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` | 0.719; 0.591 / 0.376 / 0.308 | 1,779 / 1,470 | 82,215 | `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` | 4096 | 68.6 | 81,628 / 82,215 | 2,048 |
-| 8,192 | 1,902 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP2/kv-group] b=1` | 0.723; 0.607 / 0.376 / 0.312 | 1,726 / 1,469 | 58,892 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=2048` | 2048 | 47.9 | 58,590 / 58,892 | 2,048 |
-| 32,768 | 1,889 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group] b=1` | 0.728; 0.601 / 0.376 / 0.317 | 1,708 / 1,468 | 42,281 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=512` | 512 | 16.7 | 41,665 / 42,281 | 512 |
-| 262,144 | 1,784 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group] b=1` | 0.771; 0.630 / 0.377 / 0.317 | 1,582 / 1,460 | 18,037 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group] b=128` | 128 | 9.8 | 17,647 / 18,037 | 128 |
-| 1,000,000 | 1,579 | `DP1 x PP2(R2) x 16chip[TP16 | EP1 x TPx16 | DCP8/kv-group] b=1` | 0.872; 0.769 / 0.299 / 0.545 | 1,565 / 1,444 | 6,960 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group] b=32` | 32 | 6.3 | 6,657 / 6,960 | 32 |
+| 1 | 1,751 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` | 0.786; 0.289 / 0.423 / 0.348 | 1,620 / 1,636 | 82,058 | `DP2 x PP1 x 16chip[TP4 x DPa4 | EP16 x TPx1] b=2048` | 4096 | 68.7 | 80,826 / 82,058 | 2,048 |
+| 128 | 1,751 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` | 0.786; 0.291 / 0.423 / 0.348 | 1,615 / 1,636 | 80,194 | `DP2 x PP1 x 16chip[TP4 x DPa4 | EP16 x TPx1 | DCP2/kv-group] b=2048` | 4096 | 70.3 | 79,003 / 80,194 | 2,048 |
+| 8,192 | 1,742 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP2/kv-group] b=1` | 0.790; 0.308 / 0.423 / 0.352 | 1,595 / 1,628 | 56,735 | `DP1 x PP1 x 32chip[TP4 x DPa8 | EP8 x TPx4 | DCP2/kv-group] b=2048` | 2048 | 49.7 | 56,183 / 56,735 | 2,048 |
+| 32,768 | 1,741 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP2/kv-group] b=1` | 0.790; 0.314 / 0.424 / 0.352 | 1,587 / 1,628 | 40,796 | `DP1 x PP1 x 32chip[TP8 x DPa4 | EP8 x TPx4 | DCP4/kv-group] b=512` | 512 | 17.3 | 39,582 / 40,796 | 512 |
+| 262,144 | 1,683 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group] b=1` | 0.818; 0.330 / 0.424 / 0.357 | 1,564 / 1,608 | 17,966 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group] b=128` | 128 | 9.8 | 17,228 / 17,962 | 128 |
+| 1,000,000 | 1,601 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group] b=1` | 0.859; 0.857 / 0.260 / 0.600 | 1,483 / 1,589 | 6,960 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group] b=32` | 32 | 6.3 | 6,385 / 6,960 | 32 |
 
 b ごとの tsu 最良（全ヒット、k=1）:
 
 | ctx \ b | 1 | 4 | 16 | 64 | 256 | 1024 |
 |---|---|---|---|---|---|---|
-| 1 | 1,913 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8]` | 1,518 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group]` | 645 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]` | 307 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group]` | 168 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group]` | 72 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group]` |
-| 128 | 1,913 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8]` | 1,514 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group]` | 643 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]` | 305 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group]` | 166 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group]` | 70 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group]` |
-| 8,192 | 1,902 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP2/kv-group]` | 1,458 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group]` | 613 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]` | 283 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group]` | 138 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group]` | 52 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group]` |
-| 32,768 | 1,889 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group]` | 1,440 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group]` | 603 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]` | 274 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group]` | 130 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group]` | 容量超過 |
-| 262,144 | 1,784 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group]` | 1,336 `DP1 x PP2 x 16chip[TP16 | EP1 x TPx16 | DCP8/kv-group]` | 524 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]` | 215 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group]` | 容量超過 | 容量超過 |
-| 1,000,000 | 1,579 `DP1 x PP2(R2) x 16chip[TP16 | EP1 x TPx16 | DCP8/kv-group]` | 1,140 `DP1 x PP2(R2) x 16chip[TP16 | EP1 x TPx16 | DCP8/kv-group]` | 372 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]` | 容量超過 | 容量超過 | 容量超過 |
+| 1 | 1,751 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8]` | 1,518 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8]` | 591 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32]` | 303 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32]` | 155 `DP1 x PP1 x 32chip[TP8 x DPa4 | EP8 x TPx4 | DCP4/kv-group]` | 65 `DP1 x PP1 x 32chip[TP4 x DPa8 | EP16 x TPx2]` |
+| 128 | 1,751 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8]` | 1,510 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP2/kv-group]` | 588 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP4/kv-group]` | 301 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP4/kv-group]` | 153 `DP1 x PP1 x 32chip[TP8 x DPa4 | EP8 x TPx4 | DCP4/kv-group]` | 64 `DP1 x PP1 x 32chip[TP4 x DPa8 | EP16 x TPx2 | DCP2/kv-group]` |
+| 8,192 | 1,742 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP2/kv-group]` | 1,458 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group]` | 570 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]` | 279 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group]` | 129 `DP1 x PP1 x 32chip[TP8 x DPa4 | EP8 x TPx4 | DCP4/kv-group]` | 51 `DP1 x PP1 x 32chip[TP8 x DPa4 | EP32 x TPx1 | DCP4/kv-group]` |
+| 32,768 | 1,741 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP2/kv-group]` | 1,440 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group]` | 561 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]` | 271 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group]` | 123 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP32 x TPx1 | DCP8/kv-group]` | 容量超過 |
+| 262,144 | 1,683 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group]` | 1,285 `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group]` | 500 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]` | 213 `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group]` | 容量超過 | 容量超過 |
+| 1,000,000 | 1,601 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]` | 1,093 `DP1 x PP2 x 16chip[TP16 | EP1 x TPx16 | DCP8/kv-group]` | 369 `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]` | 容量超過 | 容量超過 | 容量超過 |
 
-読み方: tsu 最大は全系列長で PP4 の 2 周 × TP8（1M だけ PP2 の 2 周 × TP16 + DCP8: 常駐 KV 25 GB/user を 8 枚に分けないと容量に入らない）で、DCP は ctx ≥ 8k で b=1 から効く（index block の走査が分かれる: 262k で DCP4 1,784 vs DCP1 1,502）。agg 最大は常駐 KV が b を縛るので系列長とともに落ちる（DP1 で入る最大 b: 2,048 / 2,048 / 2,048 / 512 / 128 / 32）。全ミス（今の runtime の形）の tsu は系列長に鈍感（1,470 / 1,470 / 1,469 / 1,468 / 1,460 / 1,444）で、TP32 × PP1 の通信床で決まる。
+読み方: tsu 最大の形は ctx 1〜262,144 で `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8]` の系（DCP が 1 → 1 → 2 → 2 → 4 → 16 と増える: index block の走査が分かれる; 262k で DCP4 1,683 vs DCP1 1,513）、1,000,000 で `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]`。agg 最大は常駐 KV が b を縛るので系列長とともに落ちる（DP1 で入る最大 b: 2,048 / 2,048 / 2,048 / 512 / 128 / 32）。全ミス（今の runtime の形）の tsu は系列長に鈍感（1,636 / 1,636 / 1,628 / 1,628 / 1,608 / 1,589）。
 
 #### 11.5.2 ctx 192（今の配備の計測条件）の詳細
 
-- **agg 最大（全ヒット、k=1）**: **81,253 t/s** = `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048`（4096 users、T_pass 69.4 ms = 群の DRAM/pass: dense 324 MB + 状態/KV 30,855 MB + routed 4,335 MB per chip；演算 19.5 + 通信 16.8 ms は窓の中；L1 常駐 68 / 段の dense 392 MB、活性 80 MiB）。漸近 95,605 の 85%。census 80,680、全ミス 81,253、全 expert 読み 81,255。k=0 60,392。
-- **tsu 最大（全ヒット、k=1）**: **1,913 t/s/u** = `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1`（T_tok 0.719 ms = 演算 0.376 + 通信 0.308 + 受け渡し + 窓；群の DRAM/pass 0.592 ms；周 R1 1,615 / R2 1,913 / R4 1,786；DCP1 1,913 / DCP2 1,903 / DCP4 1,890）。census 1,778（`DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group] b=1`）、全ミス 1,470（`DP1 x PP1 x 32chip[TP32 | EP1 x TPx32] b=1`）、全 expert 読み 306。k=0 1,528。
+- **agg 最大（全ヒット、k=1）**: **79,279 t/s** = `DP2 x PP1 x 16chip[TP4 x DPa4 | EP16 x TPx1 | DCP2/kv-group] b=2048`（4096 users、T_pass 71.1 ms = 群の DRAM/pass: dense 1248 MB + 状態/KV 30,816 MB + routed 4,335 MB per chip；演算 18.4 + 通信 50.7 ms は窓の中；L1 常駐 121 / 段の dense 1368 MB、活性 80 MiB）。漸近 95,605 の 83%。census 78,115、全ミス 79,279、全 expert 読み 79,279。k=0 59,912。
+- **tsu 最大（全ヒット、k=1）**: **1,751 t/s/u** = `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1`（T_tok 0.786 ms = 演算 0.423 + 通信 0.348 + 受け渡し + 窓；群の DRAM/pass 0.293 ms；周 R1 1,588 / R2 1,751 / R4 1,723；DCP1 1,751 / DCP2 1,742 / DCP4 1,731）。census 1,615（`DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP4/kv-group] b=1`）、全ミス 1,636（`DP1 x PP1 x 32chip[TP32 | EP1 x TPx32] b=1`）、全 expert 読み 306。k=0 1,671。
 - PP × TP の梯子（b=1、EP/DCP/周は自由）と hop 設計値への感度:
 
-| PP × TP_a（b=1 の最良、EP/DCP/周 自由） | 構成 | router / expert / 段の切り方 / 段の形 | tsu | T_tok [ms] | 段 DRAM/pass | 演算 | 隠れない通信 | L1: 常駐 dense / 先読みバッファ / 空き時間の先読み [MB]（段の dense） | hop ×1 / ×2 / ×4 |
+| PP × TP_a（b=1 の最良、EP/DCP/周/hc 形 自由） | 構成 | router / expert / 段の切り方 / 段の形 / hc | tsu | T_tok [ms] | 段 DRAM/pass | 演算 | 隠れない通信 | L1: 常駐 dense / 先読みバッファ / 空き時間の先読み [MB]（段の dense） | hop ×1 / ×2 / ×4 |
 |---|---|---|---|---|---|---|---|---|---|
-| PP1 × TP32 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32] b=1` | replicated / slice / bytes / 8x4 | 1514 | 0.909 | 0.643 | 0.242 | 0.643 | 157 / 2.3 / 0 (360) | 1514 / 980 / 574 |
-| PP2 × TP16 | `DP1 x PP2 x 16chip[TP16 | EP1 x TPx16] b=1` | replicated / tiles / bytes / 8x2 | 1610 | 0.855 | 0.371 | 0.297 | 0.532 | 156 / 3.3 / 0 (261) | 1610 / 1085 / 657 |
-| PP4 × TP8 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` | replicated / tiles / bytes / 2x4 | 1913 | 0.719 | 0.592 | 0.376 | 0.308 | 0 / 159.4 / 209 (209) | 1913 / 1416 / 938 |
-| PP8 × TP4 | `DP1 x PP8(R2) x 4chip[TP4 | EP1 x TPx4 | DCP2/kv-group] b=1` | split / slice / chain / 1x4 | 1040 | 1.323 | 0.696 | 0.528 | 0.233 | 0 / 158.8 / 236 (294) | 1040 / 1039 / 1005 |
-| PP16 × TP2 | `DP1 x PP16(R2) x 2chip[TP2 | EP1 x TPx2] b=1` | split / slice / chain / 2x1 | 464 | 2.963 | 1.107 | 0.853 | 0.099 | 0 / 157.5 / 219 (492) | 464 / 464 / 462 |
-| PP32 × TP1 | `DP1 x PP32 x 1chip[TP1 | EP1 x TPx1] b=1` | split / slice / chain / 1x1 | 175 | 7.849 | 1.396 | 1.571 | 0.000 | 155 / 0.0 / 0 (792) | 175 / 175 / 175 |
+| PP1 × TP32 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32] b=1` | replicated / slice / bytes / 8x4 / B | 1656 | 0.831 | 0.812 | 0.258 | 0.573 | 157 / 2.3 / 0 (446) | 1656 / 1656 / 1656 |
+| PP2 × TP16 | `DP1 x PP2(R4) x 16chip[TP16 | EP1 x TPx16] b=1` | replicated / tiles / chain / 8x2 / B+D | 1635 | 0.842 | 0.759 | 0.396 | 0.417 | 156 / 3.3 / 220 (450) | 1635 / 1635 / 1635 |
+| PP4 × TP8 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` | replicated / tiles / bytes / 2x4 / A | 1751 | 0.786 | 0.293 | 0.423 | 0.348 | 153 / 6.1 / 55 (209) | 1751 / 1751 / 1751 |
+| PP8 × TP4 | `DP1 x PP8(R2) x 4chip[TP4 | EP1 x TPx4 | DCP2/kv-group] b=1` | split / slice / chain / 1x4 / A | 1005 | 1.369 | 0.423 | 0.619 | 0.235 | 147 / 11.4 / 73 (294) | 1005 / 1005 / 1005 |
+| PP16 × TP2 | `DP1 x PP16 x 2chip[TP2 | EP1 x TPx2] b=1` | split / slice / chain / 2x1 / B | 386 | 3.560 | 0.539 | 1.102 | 0.093 | 157 / 0.0 / 0 (395) | 386 / 386 / 386 |
+| PP32 × TP1 | `DP1 x PP32 x 1chip[TP1 | EP1 x TPx1] b=1` | split / slice / chain / 1x1 / A | 134 | 10.294 | 1.396 | 1.999 | 0.000 | 155 / 0.0 / 0 (792) | 134 / 134 / 134 |
 
-hop 280 ns を 1 / 2 / 4 倍にしたときの最良は PP4×TP8 / PP4×TP8 / PP8×TP4。ストリームバッファを 0 / 2 倍にすると tsu 最大点は 1,913 / 1,913。
+hop 280 ns を 1 / 2 / 4 倍にしたときの最良は PP4×TP8 / PP4×TP8 / PP4×TP8。ストリームバッファを 0 / 2 倍にすると tsu 最大点は 1,775 / 1,751。
 
 - 各 TP の tsu 最良（b=1）:
 
 | TP_a | PP1, EP1×TPx=TP（列等分）, DCP1 tsu | agg (users) | tsu 最良の構成（PP/EP/DCP/n_mb 自由） | router / expert | tsu | agg (users) | T_tok [ms]; 段 DRAM/pass / 演算 / 通信 |
 |---|---|---|---|---|---|---|---|
-| 4 | 383 | 3,066 (8) | `DP1 x PP8(R2) x 4chip[TP4 | EP1 x TPx4 | DCP2/kv-group] b=1` | split / slice | 1040 | 1,040 (1) | 1.323; 0.696 / 0.528 / 0.233 |
-| 8 | 796 | 3,185 (4) | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` | replicated / tiles | 1913 | 1,913 (1) | 0.719; 0.592 / 0.376 / 0.308 |
-| 16 | 1425 | 2,849 (2) | `DP1 x PP2 x 16chip[TP16 | EP1 x TPx16] b=1` | replicated / tiles | 1610 | 1,610 (1) | 0.855; 0.371 / 0.297 / 0.532 |
-| 32 | 1514 | 1,514 (1) | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32] b=1` | replicated / slice | 1514 | 1,514 (1) | 0.909; 0.643 / 0.242 / 0.643 |
+| 4 | 383 | 3,066 (8) | `DP1 x PP8(R2) x 4chip[TP4 | EP1 x TPx4 | DCP2/kv-group] b=1` | split / slice | 1005 | 1,005 (1) | 1.369; 0.423 / 0.619 / 0.235 |
+| 8 | 796 | 3,185 (4) | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` | replicated / tiles | 1751 | 1,751 (1) | 0.786; 0.293 / 0.423 / 0.348 |
+| 16 | 1360 | 2,721 (2) | `DP1 x PP2(R4) x 16chip[TP16 | EP1 x TPx16] b=1` | replicated / tiles | 1635 | 1,635 (1) | 0.842; 0.759 / 0.396 / 0.417 |
+| 32 | 1656 | 1,656 (1) | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32] b=1` | replicated / slice | 1656 | 1,656 (1) | 0.831; 0.812 / 0.258 / 0.573 |
 
 - 各 TP の tsu 最良（b=16; DP が違うと users が違うので agg は同列に比べない）:
 
 | TP_a | PP1, EP1×TPx=TP（列等分）, DCP1 tsu | agg (users) | tsu 最良の構成（PP/EP/DCP/n_mb 自由） | router / expert | tsu | agg (users) | T_tok [ms]; 段 DRAM/pass / 演算 / 通信 |
 |---|---|---|---|---|---|---|---|
-| 4 | 84 | 10,700 (128) | `DP1 x PP8 x 4chip[TP4 | EP1 x TPx4 | DCP2/kv-group] b=16 mb=8` | replicated / slice | 454 | 7,265 (16) | 3.030; 3.030 / 0.679 / 0.200 |
-| 8 | 166 | 10,612 (64) | `DP1 x PP4 x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group] b=16 mb=4` | split / tiles | 508 | 8,121 (16) | 2.711; 2.711 / 0.620 / 0.368 |
-| 16 | 328 | 10,485 (32) | `DP1 x PP2(R2) x 16chip[TP16 | EP1 x TPx16 | DCP8/kv-group] b=16 mb=2` | split / tiles | 579 | 9,259 (16) | 2.378; 2.378 / 0.557 / 0.722 |
-| 32 | 602 | 9,630 (16) | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group] b=16` | split / tiles | 642 | 10,270 (16) | 2.144; 2.144 / 0.483 / 1.053 |
+| 4 | 84 | 10,700 (128) | `DP1 x PP8 x 4chip[TP4 | EP1 x TPx4] b=16 mb=8` | split / slice | 450 | 7,205 (16) | 3.056; 2.865 / 0.889 / 0.199 |
+| 8 | 166 | 10,612 (64) | `DP1 x PP4 x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group] b=16 mb=4` | split / tiles | 499 | 7,991 (16) | 2.755; 2.755 / 0.704 / 0.454 |
+| 16 | 323 | 10,327 (32) | `DP1 x PP2(R2) x 16chip[TP16 | EP1 x TPx16 | DCP8/kv-group] b=16 mb=2` | split / tiles | 579 | 9,259 (16) | 2.378; 2.378 / 0.610 / 1.322 |
+| 32 | 560 | 8,964 (16) | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP4/kv-group] b=16` | split / tiles | 588 | 9,400 (16) | 2.342; 2.342 / 0.609 / 1.724 |
 
 - ケース × k の最大:
 
 | ケース | k | agg 最大 | その tsu | users | 構成 | tsu 最大 | その agg | 構成 |
 |---|---|---|---|---|---|---|---|---|
-| hit | 0 | 60,392 | 14.7 | 4096 | `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` | 1528 | 1,528 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` |
-| hit | 1 | 81,253 | 19.8 | 4096 | `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` | 1913 | 1,913 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` |
-| census | 0 | 59,965 | 14.6 | 4096 | `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` | 1510 | 1,510 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` |
-| census | 1 | 80,680 | 19.7 | 4096 | `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` | 1778 | 1,778 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group] b=1` |
-| miss | 0 | 60,392 | 14.7 | 4096 | `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` | 1159 | 1,159 | `DP1 x PP2 x 16chip[TP16 | EP1 x TPx16] b=1` |
-| miss | 1 | 81,253 | 19.8 | 4096 | `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` | 1470 | 1,470 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32] b=1` |
-| all | 0 | 60,393 | 14.7 | 4096 | `DP2 x PP1 x 16chip[TP16 | EP1 x TPx16 | DCP8/kv-group] b=2048` | 227 | 227 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group] b=1` |
-| all | 1 | 81,255 | 19.8 | 4096 | `DP2 x PP1 x 16chip[TP16 | EP1 x TPx16 | DCP8/kv-group] b=2048` | 306 | 306 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group] b=1` |
+| hit | 0 | 59,912 | 14.6 | 4096 | `DP2 x PP1 x 16chip[TP8 x DPa2 | EP4 x TPx4 | DCP4/kv-group] b=2048` | 1671 | 1,671 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` |
+| hit | 1 | 79,279 | 19.4 | 4096 | `DP2 x PP1 x 16chip[TP4 x DPa4 | EP16 x TPx1 | DCP2/kv-group] b=2048` | 1751 | 1,751 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` |
+| census | 0 | 59,015 | 14.4 | 4096 | `DP2 x PP1 x 16chip[TP8 x DPa2 | EP4 x TPx4 | DCP4/kv-group] b=2048` | 1622 | 1,622 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` |
+| census | 1 | 78,115 | 19.1 | 4096 | `DP2 x PP1 x 16chip[TP4 x DPa4 | EP16 x TPx1 | DCP2/kv-group] b=2048` | 1615 | 1,615 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP4/kv-group] b=1` |
+| miss | 0 | 59,912 | 14.6 | 4096 | `DP2 x PP1 x 16chip[TP8 x DPa2 | EP4 x TPx4 | DCP4/kv-group] b=2048` | 1304 | 1,304 | `DP1 x PP2(R2) x 16chip[TP16 | EP1 x TPx16] b=1` |
+| miss | 1 | 79,279 | 19.4 | 4096 | `DP2 x PP1 x 16chip[TP4 x DPa4 | EP16 x TPx1 | DCP2/kv-group] b=2048` | 1636 | 1,636 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32] b=1` |
+| all | 0 | 59,913 | 14.6 | 4096 | `DP2 x PP1 x 16chip[TP8 x DPa2 | EP1 x TPx16 | DCP4/kv-group] b=2048` | 227 | 227 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group] b=1` |
+| all | 1 | 79,279 | 19.4 | 4096 | `DP2 x PP1 x 16chip[TP4 x DPa4 | EP16 x TPx1 | DCP2/kv-group] b=2048` | 306 | 306 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group] b=1` |
 
-- Pareto 前線（全ヒット、k=1; PP>1 3 点、EP>1 5 点、DCP>1 11 点、全 13 点）:
+- Pareto 前線（全ヒット、k=1; PP>1 3 点、EP>1 6 点、DCP>1 11 点、全 12 点）:
 
-| agg [t/s] | tsu | users | 構成 | router / expert | T_pass [ms] | 段 DRAM/pass | 演算 | 隠れない通信 | router 後の routed 読み | L1: 常駐 / バッファ [MB]（段の dense） | 最繁忙 expert/層（tiles は tile/20） | routing |
+| agg [t/s] | tsu | users | 構成 | router / expert / hc | T_pass [ms] | 段 DRAM/pass | 演算 | 隠れない通信 | router 後の routed 読み | L1: 常駐 / バッファ [MB]（段の dense） | 最繁忙 expert/層（tiles は tile/20） | routing |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 81,253 | 19.8 | 4096 | `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` | split / slice | 69.364 | 69.364 | 19.537 | 16.826 | 0.000 | 68 / 0.0 (392) | 128.0 | fitted |
-| 80,719 | 39.4 | 2048 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=2048` | split / slice | 34.912 | 34.912 | 9.115 | 20.639 | 0.000 | 112 / 0.0 (392) | 64.0 | fitted |
-| 71,153 | 69.5 | 1024 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=1024` | split / slice | 19.803 | 19.803 | 4.602 | 10.809 | 0.000 | 135 / 0.0 (392) | 64.0 | fitted |
-| 57,521 | 112.3 | 512 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=512` | split / slice | 12.248 | 12.248 | 2.669 | 5.733 | 0.000 | 146 / 0.0 (392) | 64.0 | fitted |
-| 42,174 | 164.7 | 256 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=256` | split / slice | 8.352 | 8.352 | 1.698 | 3.198 | 0.000 | 151 / 0.0 (392) | 62.2 | fitted |
-| 29,808 | 232.9 | 128 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group] b=128` | split / tiles | 5.909 | 5.909 | 1.152 | 2.211 | 0.000 | 155 / 0.0 (392) | 13.5 | census |
-| 19,468 | 304.2 | 64 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group] b=64` | split / tiles | 4.524 | 4.524 | 0.861 | 1.476 | 0.000 | 125 / 32.0 (392) | 11.6 | census |
-| 13,772 | 430.4 | 32 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group] b=32` | split / tiles | 3.197 | 3.197 | 0.654 | 1.201 | 0.000 | 133 / 24.7 (242) | 8.9 | census |
-| 10,270 | 641.9 | 16 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group] b=16` | split / tiles | 2.144 | 2.144 | 0.483 | 1.053 | 0.000 | 141 / 17.1 (242) | 6.2 | census |
-| 7,936 | 992.0 | 8 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP2/kv-group] b=8` | split / tiles | 1.387 | 1.378 | 0.383 | 0.970 | 0.000 | 148 / 10.5 (242) | 3.8 | census |
-| 6,050 | 1512.4 | 4 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group] b=4 mb=4` | split / tiles | 0.910 | 0.910 | 0.391 | 0.368 | 0.000 | 153 / 6.1 (199) | 2.2 | census |
-| 3,403 | 1701.5 | 2 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=2 mb=2` | split / tiles | 0.809 | 0.483 | 0.391 | 0.360 | 0.000 | 147 / 12.1 (186) | 2.2 | census |
-| 1,913 | 1913.2 | 1 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1` | replicated / tiles | 0.719 | 0.592 | 0.376 | 0.308 | 0.000 | 0 / 159.4 (209) | 2.2 | census |
+| 79,279 | 19.4 | 4096 | `DP2 x PP1 x 16chip[TP4 x DPa4 | EP16 x TPx1 | DCP2/kv-group] b=2048` | split / slice / A | 71.092 | 71.092 | 18.396 | 50.693 | 0.000 | 121 / 0.0 (1368) | 32.0 | fitted |
+| 76,705 | 37.5 | 2048 | `DP1 x PP1 x 32chip[TP4 x DPa8 | EP32 x TPx1 | DCP2/kv-group] b=2048` | split / slice / A | 36.739 | 36.739 | 9.218 | 27.383 | 0.000 | 134 / 0.0 (1368) | 16.0 | fitted |
+| 65,010 | 63.5 | 1024 | `DP1 x PP1 x 32chip[TP4 x DPa8 | EP16 x TPx2 | DCP2/kv-group] b=1024` | split / slice / A | 21.674 | 21.674 | 5.017 | 16.091 | 0.000 | 143 / 0.0 (1368) | 32.0 | fitted |
+| 53,419 | 104.3 | 512 | `DP1 x PP1 x 32chip[TP8 x DPa4 | EP32 x TPx1 | DCP4/kv-group] b=512` | split / slice / Bn | 13.188 | 13.068 | 3.103 | 10.091 | 0.000 | 96 / 44.2 (765) | 16.0 | fitted |
+| 38,918 | 152.0 | 256 | `DP1 x PP1 x 32chip[TP8 x DPa4 | EP8 x TPx4 | DCP4/kv-group] b=256` | split / slice / A | 9.051 | 9.051 | 1.859 | 6.907 | 0.000 | 109 / 43.0 (709) | 62.2 | fitted |
+| 27,519 | 215.0 | 128 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=128` | split / slice / Bn | 6.400 | 6.312 | 1.395 | 5.007 | 0.000 | 113 / 39.0 (469) | 56.4 | census |
+| 19,287 | 301.4 | 64 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP4/kv-group] b=64` | split / tiles / A | 4.566 | 4.562 | 0.936 | 3.630 | 0.000 | 125 / 32.0 (392) | 11.6 | census |
+| 13,183 | 412.0 | 32 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group] b=32` | split / tiles / A | 3.340 | 3.340 | 0.737 | 2.195 | 0.000 | 133 / 24.7 (392) | 8.9 | census |
+| 9,400 | 587.5 | 16 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP4/kv-group] b=16` | split / tiles / Bn | 2.342 | 2.342 | 0.609 | 1.724 | 0.000 | 141 / 17.1 (328) | 6.2 | census |
+| 7,791 | 973.9 | 8 | `DP1 x PP2(R4) x 16chip[TP16 | EP1 x TPx16 | DCP8/kv-group] b=8 mb=2` | split / tiles / A | 1.413 | 1.413 | 0.467 | 0.793 | 0.000 | 148 / 11.2 (206) | 4.0 | census |
+| 6,029 | 1507.2 | 4 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP2/kv-group] b=4 mb=4` | split / tiles / A | 0.913 | 0.913 | 0.438 | 0.400 | 0.000 | 153 / 6.1 (199) | 2.2 | census |
+| 3,502 | 1750.8 | 2 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=2 mb=2` | replicated / tiles / A | 0.786 | 0.585 | 0.423 | 0.348 | 0.000 | 153 / 6.1 (209) | 2.2 | census |
 
 - Pareto 前線（census、k=1）:
 
-| agg [t/s] | tsu | users | 構成 | router / expert | T_pass [ms] | 段 DRAM/pass | 演算 | 隠れない通信 | router 後の routed 読み | L1: 常駐 / バッファ [MB]（段の dense） | 最繁忙 expert/層（tiles は tile/20） | routing |
+| agg [t/s] | tsu | users | 構成 | router / expert / hc | T_pass [ms] | 段 DRAM/pass | 演算 | 隠れない通信 | router 後の routed 読み | L1: 常駐 / バッファ [MB]（段の dense） | 最繁忙 expert/層（tiles は tile/20） | routing |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 80,680 | 19.7 | 4096 | `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` | split / slice | 69.857 | 69.857 | 19.537 | 16.826 | 0.501 | 68 / 0.0 (392) | 128.0 | fitted |
-| 80,153 | 39.1 | 2048 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=2048` | split / slice | 35.159 | 35.159 | 9.115 | 20.639 | 0.254 | 112 / 0.0 (392) | 64.0 | fitted |
-| 70,278 | 68.6 | 1024 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=1024` | split / slice | 20.049 | 20.049 | 4.602 | 10.809 | 0.254 | 135 / 0.0 (392) | 64.0 | fitted |
-| 56,386 | 110.1 | 512 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=512` | split / slice | 12.494 | 12.494 | 2.669 | 5.733 | 0.254 | 146 / 0.0 (392) | 64.0 | fitted |
-| 40,998 | 160.1 | 256 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=256` | split / slice | 8.592 | 8.592 | 1.698 | 3.198 | 0.247 | 151 / 0.0 (392) | 62.2 | fitted |
-| 28,757 | 224.7 | 128 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group] b=128` | split / tiles | 6.125 | 6.125 | 1.152 | 2.211 | 0.224 | 155 / 0.0 (392) | 13.5 | census |
-| 18,357 | 286.8 | 64 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group] b=64` | split / tiles | 4.797 | 4.797 | 0.861 | 1.476 | 0.282 | 125 / 32.0 (392) | 11.6 | census |
-| 12,634 | 394.8 | 32 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group] b=32` | split / tiles | 3.485 | 3.485 | 0.654 | 1.201 | 0.296 | 133 / 24.7 (242) | 8.9 | census |
-| 9,186 | 574.2 | 16 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group] b=16` | split / tiles | 2.397 | 2.397 | 0.483 | 1.053 | 0.261 | 141 / 17.1 (242) | 6.2 | census |
-| 7,217 | 902.1 | 8 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group] b=8` | split / tiles | 1.525 | 1.525 | 0.383 | 0.988 | 0.188 | 148 / 10.5 (242) | 3.8 | census |
-| 5,377 | 1344.2 | 4 | `DP1 x PP2 x 16chip[TP16 | EP1 x TPx16] b=4 mb=2` | split / tiles | 1.024 | 0.988 | 0.353 | 0.620 | 0.240 | 154 / 6.0 (213) | 2.2 | census |
-| 3,154 | 1577.2 | 2 | `DP1 x PP2 x 16chip[TP16 | EP1 x TPx16] b=2 mb=2` | replicated / tiles | 0.872 | 0.850 | 0.297 | 0.532 | 0.140 | 156 / 3.3 (269) | 1.2 | census |
-| 1,778 | 1777.6 | 1 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group] b=1` | replicated / tiles | 0.774 | 0.624 | 0.376 | 0.317 | 0.128 | 0 / 159.4 (218) | 2.2 | census |
+| 78,115 | 19.1 | 4096 | `DP2 x PP1 x 16chip[TP4 x DPa4 | EP16 x TPx1 | DCP2/kv-group] b=2048` | split / slice / A | 72.152 | 72.152 | 18.396 | 50.693 | 0.655 | 121 / 0.0 (1368) | 32.0 | fitted |
+| 75,614 | 36.9 | 2048 | `DP1 x PP1 x 32chip[TP4 x DPa8 | EP32 x TPx1 | DCP2/kv-group] b=2048` | split / slice / A | 37.269 | 37.269 | 9.218 | 27.383 | 0.331 | 134 / 0.0 (1368) | 16.0 | fitted |
+| 63,459 | 62.0 | 1024 | `DP1 x PP1 x 32chip[TP4 x DPa8 | EP16 x TPx2 | DCP2/kv-group] b=1024` | split / slice / A | 22.204 | 22.204 | 5.017 | 16.091 | 0.331 | 143 / 0.0 (1368) | 32.0 | fitted |
+| 51,795 | 101.2 | 512 | `DP1 x PP1 x 32chip[TP8 x DPa4 | EP32 x TPx1 | DCP4/kv-group] b=512` | split / slice / Bn | 13.602 | 13.602 | 3.107 | 10.091 | 0.331 | 94 / 46.4 (765) | 16.0 | fitted |
+| 36,806 | 143.8 | 256 | `DP1 x PP1 x 32chip[TP8 x DPa4 | EP8 x TPx4 | DCP4/kv-group] b=256` | split / slice / A | 9.571 | 9.571 | 1.863 | 6.907 | 0.322 | 107 / 45.1 (709) | 62.2 | fitted |
+| 26,444 | 206.6 | 128 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group] b=128` | split / tiles / Bn | 6.660 | 6.547 | 1.367 | 5.287 | 0.264 | 114 / 38.8 (469) | 13.5 | census |
+| 17,438 | 272.5 | 64 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group] b=64` | split / tiles / A | 5.050 | 5.050 | 0.941 | 3.633 | 0.301 | 122 / 34.4 (392) | 11.6 | census |
+| 11,245 | 351.4 | 32 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group] b=32` | split / tiles / A | 3.916 | 3.916 | 0.743 | 2.195 | 0.299 | 130 / 27.6 (392) | 8.9 | census |
+| 8,033 | 502.1 | 16 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP2/kv-group] b=16` | split / tiles / A | 2.741 | 2.732 | 0.519 | 2.214 | 0.256 | 138 / 19.9 (242) | 6.2 | census |
+| 5,909 | 738.7 | 8 | `DP1 x PP2 x 16chip[TP16 | EP1 x TPx16 | DCP8/kv-group] b=8 mb=2` | split / tiles / A | 1.863 | 1.863 | 0.470 | 0.884 | 0.404 | 146 / 13.8 (213) | 4.0 | census |
+| 4,985 | 1246.4 | 4 | `DP1 x PP2(R4) x 16chip[TP16 | EP1 x TPx16 | DCP4/kv-group] b=4 mb=2` | split / tiles / A | 1.104 | 1.090 | 0.389 | 0.660 | 0.238 | 152 / 7.6 (206) | 2.2 | census |
+| 2,888 | 1444.2 | 2 | `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group] b=2 mb=2` | replicated / tiles / A | 0.953 | 0.737 | 0.426 | 0.357 | 0.236 | 152 / 7.7 (209) | 2.2 | census |
+| 1,615 | 1614.9 | 1 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP4/kv-group] b=1` | replicated / tiles / B | 0.852 | 0.851 | 0.261 | 0.585 | 0.044 | 157 / 2.4 (446) | 0.7 | census |
 
 - Pareto 前線（全ミス = 今の runtime の形、k=1）:
 
-| agg [t/s] | tsu | users | 構成 | router / expert | T_pass [ms] | 段 DRAM/pass | 演算 | 隠れない通信 | router 後の routed 読み | L1: 常駐 / バッファ [MB]（段の dense） | 最繁忙 expert/層（tiles は tile/20） | routing |
+| agg [t/s] | tsu | users | 構成 | router / expert / hc | T_pass [ms] | 段 DRAM/pass | 演算 | 隠れない通信 | router 後の routed 読み | L1: 常駐 / バッファ [MB]（段の dense） | 最繁忙 expert/層（tiles は tile/20） | routing |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 81,253 | 19.8 | 4096 | `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` | split / slice | 69.364 | 69.364 | 19.537 | 16.826 | 8.475 | 68 / 0.0 (392) | 128.0 | fitted |
-| 80,719 | 39.4 | 2048 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=2048` | split / slice | 34.912 | 34.912 | 9.115 | 20.639 | 4.241 | 112 / 0.0 (392) | 64.0 | fitted |
-| 71,153 | 69.5 | 1024 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=1024` | split / slice | 19.803 | 19.803 | 4.602 | 10.809 | 4.241 | 135 / 0.0 (392) | 64.0 | fitted |
-| 57,521 | 112.3 | 512 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=512` | split / slice | 12.248 | 12.248 | 2.669 | 5.733 | 4.241 | 146 / 0.0 (392) | 64.0 | fitted |
-| 42,174 | 164.7 | 256 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP8 x TPx4 | DCP8/kv-group] b=256` | split / slice | 8.352 | 8.352 | 1.698 | 3.198 | 4.123 | 151 / 0.0 (392) | 62.2 | fitted |
-| 29,808 | 232.9 | 128 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group] b=128` | split / tiles | 5.909 | 5.909 | 1.152 | 2.211 | 3.570 | 155 / 0.0 (392) | 13.5 | census |
-| 18,771 | 293.3 | 64 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group] b=64` | replicated / tiles | 4.692 | 4.692 | 0.851 | 1.374 | 3.067 | 157 / 0.0 (510) | 11.6 | census |
-| 12,385 | 387.0 | 32 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP4/kv-group] b=32` | replicated / tiles | 3.555 | 3.541 | 0.659 | 1.067 | 2.370 | 157 / 0.0 (510) | 8.9 | census |
-| 8,422 | 526.4 | 16 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP2/kv-group] b=16` | replicated / tiles | 2.614 | 2.589 | 0.494 | 0.906 | 1.644 | 158 / 0.0 (510) | 6.2 | census |
-| 6,269 | 783.6 | 8 | `DP1 x PP4 x 8chip[TP8 | EP1 x TPx8] b=8 mb=4` | replicated / tiles | 1.756 | 1.634 | 0.452 | 0.308 | 4.431 | 159 / 0.0 (234) | 4.2 | census |
-| 4,571 | 1142.7 | 4 | `DP1 x PP4 x 8chip[TP8 | EP1 x TPx8] b=4 mb=4` | replicated / tiles | 1.204 | 1.133 | 0.376 | 0.308 | 2.353 | 159 / 0.0 (234) | 2.2 | census |
-| 2,672 | 1335.9 | 2 | `DP1 x PP2 x 16chip[TP16 | EP1 x TPx16] b=2 mb=2` | replicated / tiles | 1.030 | 0.777 | 0.297 | 0.532 | 0.639 | 160 / 0.0 (269) | 1.2 | census |
-| 1,470 | 1469.6 | 1 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32] b=1` | replicated / tiles | 0.936 | 0.598 | 0.244 | 0.643 | 0.185 | 159 / 0.0 (360) | 0.7 | census |
+| 79,279 | 19.4 | 4096 | `DP2 x PP1 x 16chip[TP4 x DPa4 | EP16 x TPx1 | DCP2/kv-group] b=2048` | split / slice / A | 71.092 | 71.092 | 18.396 | 50.693 | 8.475 | 121 / 0.0 (1368) | 32.0 | fitted |
+| 76,705 | 37.5 | 2048 | `DP1 x PP1 x 32chip[TP4 x DPa8 | EP32 x TPx1 | DCP2/kv-group] b=2048` | split / slice / A | 36.739 | 36.739 | 9.218 | 27.383 | 4.241 | 134 / 0.0 (1368) | 16.0 | fitted |
+| 65,010 | 63.5 | 1024 | `DP1 x PP1 x 32chip[TP4 x DPa8 | EP16 x TPx2 | DCP2/kv-group] b=1024` | split / slice / A | 21.674 | 21.674 | 5.017 | 16.091 | 4.241 | 143 / 0.0 (1368) | 32.0 | fitted |
+| 51,982 | 101.5 | 512 | `DP1 x PP1 x 32chip[TP8 x DPa4 | EP32 x TPx1 | DCP4/kv-group] b=512` | replicated / slice / Bn | 13.553 | 13.196 | 3.144 | 9.961 | 4.241 | 140 / 0.0 (876) | 16.0 | fitted |
+| 38,256 | 149.4 | 256 | `DP1 x PP1 x 32chip[TP8 x DPa4 | EP32 x TPx1 | DCP4/kv-group] b=256` | split / slice / Bn | 9.208 | 9.208 | 1.995 | 5.029 | 4.241 | 146 / 0.0 (765) | 16.0 | fitted |
+| 26,487 | 206.9 | 128 | `DP1 x PP1 x 32chip[TP8 x DPa4 | EP2 x TPx16 | DCP4/kv-group] b=128` | split / tiles / Bn | 6.649 | 6.649 | 1.342 | 3.042 | 3.580 | 153 / 0.0 (765) | 13.5 | census |
+| 17,238 | 269.3 | 64 | `DP1 x PP1 x 32chip[TP8 x DPa4 | EP2 x TPx16 | DCP4/kv-group] b=64` | split / tiles / A | 5.109 | 5.094 | 0.976 | 1.798 | 3.079 | 155 / 0.0 (709) | 11.6 | census |
+| 11,250 | 351.6 | 32 | `DP1 x PP1 x 32chip[TP8 x DPa4 | EP1 x TPx32 | DCP4/kv-group] b=32` | split / tiles / A | 3.914 | 3.914 | 0.800 | 1.160 | 2.370 | 156 / 0.0 (709) | 8.9 | census |
+| 7,872 | 492.0 | 16 | `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32] b=16` | replicated / tiles / Bn | 2.797 | 2.776 | 0.602 | 1.216 | 1.644 | 157 / 0.0 (586) | 6.2 | census |
+| 6,218 | 777.3 | 8 | `DP1 x PP4 x 8chip[TP8 | EP1 x TPx8] b=8 mb=4` | split / tiles / B | 1.770 | 1.740 | 0.530 | 0.316 | 4.431 | 159 / 0.0 (238) | 4.2 | census |
+| 4,459 | 1114.7 | 4 | `DP1 x PP2 x 16chip[TP16 | EP1 x TPx16] b=4 mb=2` | replicated / tiles / B | 1.234 | 1.221 | 0.364 | 0.482 | 1.173 | 160 / 0.0 (307) | 2.2 | census |
+| 2,803 | 1401.5 | 2 | `DP1 x PP2 x 16chip[TP16 | EP1 x TPx16] b=2 mb=2` | replicated / tiles / Bn | 0.982 | 0.923 | 0.382 | 0.507 | 0.639 | 160 / 0.0 (307) | 1.2 | census |
+| 1,636 | 1636.1 | 1 | `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32] b=1` | replicated / tiles / B | 0.841 | 0.767 | 0.258 | 0.576 | 0.185 | 159 / 0.0 (446) | 0.7 | census |
 
 - 今日の実装拘束内（TP ∈ {4,8}、EP = TP、PP = DCP = 1、lanes × (k+1) ≤ 32）:
 
@@ -543,50 +545,50 @@ hop 280 ns を 1 / 2 / 4 倍にしたときの最良は PP4×TP8 / PP4×TP8 / PP
 |---|---|---|---|---|---|
 | hit | 0 | 2,263 (283 tsu) | `DP8 x PP1 x 4chip[TP4 | EP4 x TPx1] b=1` | 525 (2,101 agg) | `DP4 x PP1 x 8chip[TP8 | EP8 x TPx1] b=1` |
 | hit | 1 | 9,824 (77 tsu) | `DP8 x PP1 x 4chip[TP4 | EP4 x TPx1] b=16` | 604 (2,417 agg) | `DP4 x PP1 x 8chip[TP8 | EP8 x TPx1] b=1` |
-| census | 0 | 2,117 (265 tsu) | `DP8 x PP1 x 4chip[TP4 | EP4 x TPx1] b=1` | 481 (1,925 agg) | `DP4 x PP1 x 8chip[TP8 | EP8 x TPx1] b=1` |
-| census | 1 | 8,795 (69 tsu) | `DP8 x PP1 x 4chip[TP4 | EP4 x TPx1] b=16` | 548 (2,194 agg) | `DP4 x PP1 x 8chip[TP8 | EP8 x TPx1] b=1` |
+| census | 0 | 1,904 (238 tsu) | `DP8 x PP1 x 4chip[TP4 | EP4 x TPx1] b=1` | 404 (1,618 agg) | `DP4 x PP1 x 8chip[TP8 | EP8 x TPx1] b=1` |
+| census | 1 | 7,785 (61 tsu) | `DP8 x PP1 x 4chip[TP4 | EP4 x TPx1] b=16` | 452 (1,807 agg) | `DP4 x PP1 x 8chip[TP8 | EP8 x TPx1] b=1` |
 | miss | 0 | 2,263 (283 tsu) | `DP8 x PP1 x 4chip[TP4 | EP4 x TPx1] b=1` | 525 (2,101 agg) | `DP4 x PP1 x 8chip[TP8 | EP8 x TPx1] b=1` |
 | miss | 1 | 9,824 (77 tsu) | `DP8 x PP1 x 4chip[TP4 | EP4 x TPx1] b=16` | 604 (2,417 agg) | `DP4 x PP1 x 8chip[TP8 | EP8 x TPx1] b=1` |
 | all | 0 | 226 (56 tsu) | `DP4 x PP1 x 8chip[TP8 | EP8 x TPx1] b=1` | 56 (226 agg) | `DP4 x PP1 x 8chip[TP8 | EP8 x TPx1] b=1` |
-| all | 1 | 4,615 (72 tsu) | `DP4 x PP1 x 8chip[TP8 | EP8 x TPx1] b=16` | 76 (304 agg) | `DP4 x PP1 x 8chip[TP8 | EP8 x TPx1] b=1` |
+| all | 1 | 4,609 (36 tsu) | `DP8 x PP1 x 4chip[TP4 | EP4 x TPx1] b=16` | 75 (603 agg) | `DP4 x PP1 x 8chip[TP8 | EP8 x TPx1] b=2` |
 
 ### 11.6 採る形の詳細設計
 
-#### 11.6.1 tsu 側: `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1`（ctx 192、k=1、全ヒット: 1,913 tsu）
+#### 11.6.1 tsu 側: `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1`（ctx 192、k=1、全ヒット: 1,751 tsu）
 
 - **chip の配置**: 32 chip を PP4 群 × 8 chip（8 × 4 torus 上の 2×4 ブロック、群の直径 3 hop、群間の受け渡し 2 hop）。周 R2: 層 + tail を 8 枠に切り（bytes 均等）、枠 f を群 f mod 4 に置く。1 token は 8 枠を順に通り、各群は 1 pass に 2 回番が回る。
-- **群の中（TP8）**: GDN は value head 6 本/chip（状態 S もその chip の DRAM）、qk head 2 本/chip；QSA は query head 3 本/chip、kv head 2 本を 4 枚ずつが複製（DCP1: ctx 192 では分けない）；hc の down は K 分割・up は N 分割（残差 [rows, 4H] は列で 8 分割）；shared expert は列で 8 分割；router は **複製**（collective 無し）；routed expert は EP1 × TPx8 の **tiles** 形（20 tile を e mod 8 から回し置き、padding 無し、最繁忙 chip は census で 2.19 expert 相当/層）。
+- **群の中（TP8）**: GDN は value head 6 本/chip（状態 S もその chip の DRAM）、qk head 2 本/chip；QSA は query head 3 本/chip、kv head 2 本を 4 枚ずつが複製（DCP1: ctx 192 では分けない）；hc は形 A（残差 [rows, 4H] を列で 8 分割、down K 分割・up N 分割）；shared expert は列で 8 分割；router は **複製**（collective 無し）；routed expert は EP1 × TPx8 の **tiles** 形（20 tile を e mod 8 から回し置き、padding 無し、最繁忙 chip は census で 2.19 expert 相当/層）。
 - **枠**（dense は群の DRAM にあり、空いている間に次の枠を L1 のバッファへ先読み; routed・状態は窓で）:
 
 | 枠 | chip 群 | 層 | dense [MB] | 状態+KV [MB] | routed [MB] | 鎖 [ms] | 占有 [ms] | 空き時間の先読み [MB] |
 |---|---|---|---|---|---|---|---|---|
-| 0 | 0 | L0〜L5 | 96.4 | 4.4 | 36.4 | 0.087 | 0.087 | 96.4 |
-| 1 | 1 | L6〜L12 | 104.3 | 4.8 | 42.5 | 0.100 | 0.100 | 104.3 |
-| 2 | 2 | L13〜L19 | 104.3 | 4.8 | 42.5 | 0.100 | 0.100 | 104.3 |
-| 3 | 3 | L20〜L26 | 102.6 | 5.2 | 42.5 | 0.101 | 0.101 | 102.6 |
-| 4 | 0 | L27〜L33 | 104.3 | 4.8 | 42.5 | 0.100 | 0.100 | 104.3 |
-| 5 | 1 | L34〜L40 | 104.3 | 4.8 | 42.5 | 0.100 | 0.100 | 104.3 |
-| 6 | 2 | L41〜L47 | 104.3 | 4.8 | 42.5 | 0.100 | 0.100 | 104.3 |
-| 7 | 3 | tail | 99.0 | 0.0 | 6.1 | 0.030 | 0.030 | 99.0 |
+| 0 | 0 | L0〜L5 | 96.4 | 4.4 | 36.4 | 0.096 | 0.096 | 22.7 |
+| 1 | 1 | L6〜L12 | 104.3 | 4.8 | 42.5 | 0.104 | 0.104 | 27.6 |
+| 2 | 2 | L13〜L19 | 104.3 | 4.8 | 42.5 | 0.104 | 0.104 | 27.6 |
+| 3 | 3 | L20〜L26 | 102.6 | 5.2 | 42.5 | 0.106 | 0.106 | 26.6 |
+| 4 | 0 | L27〜L33 | 104.3 | 4.8 | 42.5 | 0.104 | 0.104 | 24.6 |
+| 5 | 1 | L34〜L40 | 104.3 | 4.8 | 42.5 | 0.104 | 0.104 | 27.6 |
+| 6 | 2 | L41〜L47 | 104.3 | 4.8 | 42.5 | 0.104 | 0.104 | 27.6 |
+| 7 | 3 | tail | 99.0 | 0.0 | 6.1 | 0.063 | 0.063 | 25.7 |
 
-- **1 chip の L1**（177.2 MiB）: ストリームバッファ 24.4 MiB + 活性 45 KiB + expert 片 2 枚 + 残り 159.4 MB = 常駐 dense 0 MB + routed 先読みバッファ 159.4 MB。次の枠の dense 最大 104.3 MB + 1 層の routed 6.1 MB がこのバッファに入る（余り 49 MB）。
-- **1 chip の DRAM**（1 pass に読む量 1150 MB = dense 819 + 状態/KV 34 + routed 297; 0.592 ms = 帯域の 82%）。常駐: expert 2.17 GB + 自群の dense + ユーザ状態。
-- **1 層の通信**（TP8、最後の tile のレイテンシ 1.07 µs）: hc 統計 AR × 2（AG + 局所、1 本ずつ）、ブロック入力 AG × 2、ブロック出力 RS × 2 = 6 本 = 6.4 µs/層 → 48 層 0.308 ms。群間受け渡し 0.79 µs × 8。
-- **1 token の時間線**: 演算 0.376 ms（行列積の鎖が大半、GDR 0.049 ms）+ 通信 0.308 + 受け渡し 0.006 + 窓の超過 = 0.719 ms。routed（全ヒット）は 1 層前の裏でバッファに読まれ、露出 0。
-- **何が床か**: 通信 43%、演算 52%。hop が 2 倍なら PP4×TP8 に移る。TP32 × PP1 は通信 0.643 ms が床で 1,514。
+- **1 chip の L1**（177.2 MiB）: ストリームバッファ 24.4 MiB + 活性 45 KiB + expert 片 2 枚 + 残り 159.4 MB = 常駐 dense 153 MB + routed 先読みバッファ 6.1 MB。次の枠の dense 最大 104.3 MB + 1 層の routed 6.1 MB がこのバッファに入る（余り -104 MB）。
+- **1 chip の DRAM**（1 pass に読む量 541 MB = dense 210 + 状態/KV 34 + routed 297; 0.293 ms = 帯域の 37%）。常駐: expert 2.17 GB + 自群の dense + ユーザ状態。
+- **1 層の通信**（TP8、hc 形 A、packet 模型の露出）: GDN 層 6.90 µs、QSA 層 6.79 µs、tail 16.0 µs → 1 pass 0.348 ms（原則 17/18）。群間受け渡し 1.58 µs × 8（生きている行: 残差 1/8 + x + inject）。
+- **1 token の時間線**: 演算 0.423 ms（行列積の鎖が大半、GDR 0.049 ms、tail 込み）+ 通信 0.348 + 受け渡し 0.013 + 窓の超過 = 0.786 ms。routed（全ヒット）は 2 ブロック早い予測で前の層の裏に読まれ、露出は L00 と MTP 層の構造的な分だけ。詳細設計（§12.6）の同じ形の値は 784.1 µs（同じ入力の時間軸模擬、差 +1.8 µs）。
+- **何が床か**: 通信 44%、演算 54%。hop が 2 倍なら PP4×TP8 に移る。TP32 × PP1 は通信 0.573 ms が床で 1,656。
 
-#### 11.6.2 agg 側: `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048`（ctx 192、k=1、全ヒット: 81,253 t/s）
+#### 11.6.2 agg 側: `DP2 x PP1 x 16chip[TP4 x DPa4 | EP16 x TPx1 | DCP2/kv-group] b=2048`（ctx 192、k=1、全ヒット: 79,279 t/s）
 
-- **chip の配置**: DP2 複製 × 16 chip（4×4）、PP1、各複製が b=2048 users（rows 4096）。dense は TP16（列分割 router）、routed は EP4 × TPx4（slice: TPx4 は 20 tile を割り切るので padding 無し；最繁忙群 128 expert/層 = 群の全部、全 expert を毎 step 読む形に近い）、DCP8（kv-head 複製群 8 枚で KV を分ける）。
-- **1 chip の DRAM/pass** 69.4 ms = dense 324 MB（常駐 68 MB の残り）+ 状態/KV 30,855 MB（2048 users × GDN 状態 231 MB 往復 /16 + KV）+ routed 4,335 MB。演算 19.5 ms・通信 16.8 ms は DRAM の窓に隠れる。
-- **L1**: 活性 80 MiB（rows 4096 × 4 × H bf16）が常駐 dense を 68 MB に削る。残差 5 MiB は L1。
-- **容量**: 20.1 GB/chip（expert 4.3 + dense + 2048 users の状態/KV）。b=2048 は ctx 192 まで、8k で DP1、32k で b=512、262k で 128、1M で 32 が容量の上限（§11.5.1）。
-- **何が床か**: ユーザ状態の往復（漸近 95,605 t/s）。重みの読みはこの b でほぼ償却されている（85%）。
+- **chip の配置**: DP2 複製 × 16 chip（4×4）、PP1、各複製が b=2048 users（rows 4096）。dense は TP4（列分割 router）、routed は EP16 × TPx1（slice: TPx1 は 20 tile を割り切るので padding 無し；最繁忙群 32 expert/層 = 群の全部、全 expert を毎 step 読む形に近い）、DCP2（kv-head 複製群 2 枚で KV を分ける）。
+- **1 chip の DRAM/pass** 71.1 ms = dense 1248 MB（常駐 121 MB の残り）+ 状態/KV 30,816 MB（2048 users × GDN 状態 231 MB 往復 /4 + KV）+ routed 4,335 MB。演算 18.4 ms・通信 50.7 ms は DRAM の窓に隠れる。
+- **L1**: 活性 80 MiB（rows 4096 × 4 × H bf16）が常駐 dense を 121 MB に削る。残差 20 MiB は L1。
+- **容量**: 21.1 GB/chip（expert 4.3 + dense + 2048 users の状態/KV）。b=2048 は ctx 192 まで、8k で DP1、32k で b=512、262k で 128、1M で 32 が容量の上限（§11.5.1）。
+- **何が床か**: ユーザ状態の往復（漸近 95,605 t/s）。重みの読みはこの b でほぼ償却されている（83%）。
 
 #### 11.6.3 系列長で形がどう変わるか
 
-- b=1 の tsu 側は 262k まで PP4(R2) × TP8 のまま DCP を 1 → 2 → 4 と増やす（kv-head 複製群 4 枚の内側）。1M では常駐 KV 25 GB/user が 8 枚に分かれないと DRAM に入らず、PP2(R2) × TP16 + DCP8 に移る（1,579 tsu）。
-- agg 側は常駐 KV で b が縛られ、8k から DP1、32k で TP16 × DPa2 + EP8 + DCP8 の b=512、262k で b=128、1M では TP32 + DCP16 の b=32（6,960 t/s）。
+- b=1 の tsu 側: 1 → `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8]`（1,751）、128 → `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8]`（1,751）、8,192 → `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP2/kv-group]`（1,742）、32,768 → `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP2/kv-group]`（1,741）、262,144 → `DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8 | DCP4/kv-group]`（1,683）、1,000,000 → `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group]`（1,601）。1M は常駐 KV 25 GB/user が DCP の枚数に分かれないと DRAM に入らない。
+- agg 側は常駐 KV で b が縛られる: 1 → `DP2 x PP1 x 16chip[TP4 x DPa4 | EP16 x TPx1] b=2048`（82,058 t/s、DP1 で入る最大 b 2,048）、128 → `DP2 x PP1 x 16chip[TP4 x DPa4 | EP16 x TPx1 | DCP2/kv-group] b=2048`（80,194 t/s、DP1 で入る最大 b 2,048）、8,192 → `DP1 x PP1 x 32chip[TP4 x DPa8 | EP8 x TPx4 | DCP2/kv-group] b=2048`（56,735 t/s、DP1 で入る最大 b 2,048）、32,768 → `DP1 x PP1 x 32chip[TP8 x DPa4 | EP8 x TPx4 | DCP4/kv-group] b=512`（40,796 t/s、DP1 で入る最大 b 512）、262,144 → `DP1 x PP1 x 32chip[TP16 x DPa2 | EP1 x TPx32 | DCP8/kv-group] b=128`（17,966 t/s、DP1 で入る最大 b 128）、1,000,000 → `DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group] b=32`（6,960 t/s、DP1 で入る最大 b 32）。
 
 ### 11.7 今の実装との差と、限界へ近づける順番（ctx 192、k=1）
 
@@ -596,26 +598,26 @@ hop 280 ns を 1 / 2 / 4 倍にしたときの最良は PP4×TP8 / PP4×TP8 / PP
 | 同じ形の限界（全ミス）: T_pass 17.93 ms は段の DRAM/pass で、うち router 後の routed 読み 13.59 ms、1 chip の dense 1,368 MB のうち常駐 146 MB（残りを pass ごとに読む） | 9,824 tok/s（効率 12.1%） |
 | 同じ形で routed を先読みしても（全ヒット） | 9,824（DRAM/pass 支配で不変） |
 | 今日の実装拘束内（TP∈{4,8}, EP=TP, PP=DCP=1, lanes×2 ≤ 32）の最良: agg / tsu | 9,824（`DP8 x PP1 x 4chip[TP4 | EP4 x TPx1] b=16`）/ 604（`DP4 x PP1 x 8chip[TP8 | EP8 x TPx1] b=1`） |
-| 拘束を外した b=16（同じ 16 users/instance）: TP32 + DCP16、expert tiles、router 列分割 | tsu 642、agg 10,270（`DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP16/kv-group] b=16`） |
-| b=1 の tsu 最大: PP4 の 2 周 × TP8、expert tiles、router 複製、L1 に次の枠を先読み | 1,913（`DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1`） |
-| agg 最大: DP2 × 16chip[TP16 | EP4 × TPx4 | DCP8]、b=2048（4,096 users） | 81,253（漸近 95,605 の 85%） |
+| 拘束を外した b=16（同じ 16 users/instance）: TP32 + DCP4、expert tiles（EP1 × TPx32）、router 列分割、hc Bn | tsu 588、agg 9,400（`DP1 x PP1 x 32chip[TP32 | EP1 x TPx32 | DCP4/kv-group] b=16`） |
+| b=1 の tsu 最大: TP8、PP4 の 2 周、expert tiles（EP1 × TPx8）、router 複製、hc A、L1 に次の枠を先読み | 1,751（`DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1`） |
+| agg 最大: DP2 × 16chip、TP4 × DPa4 + DCP2、expert slice（EP16 × TPx1）、router 列分割、hc A、b=2048（4,096 users） | 79,279（漸近 95,605 の 83%） |
 
-今の形の効率 12.1% の差（9,824 − 1,187）は限界モデルの外（実装の stall・admission・lane の同期・router 後の読みの直列化・dispatch）にあり、作業記録 §9.4 の分解で追う。限界側で形を変える順: (1) router 後の読みを投機 routing で先読み（全ミス → census → 全ヒット。同じ形では DRAM/pass 支配で agg は変わらず、tsu 側で効く）、(2) expert を tiles 形で列分割し router を複製（TP8 以上）、(3) TP8 の段を 4 群 × 2 周に組み次の枠を L1 に先読み（b=1〜4）、(4) agg 側は DP2 × 16 chip の EP4 × DCP8 で b を漸近まで上げる。各段階の限界値は §11.5 の表の該当行。
+今の形の効率 12.1% の差（9,824 − 1,187）は限界モデルの外（実装の stall・admission・lane の同期・router 後の読みの直列化・dispatch）にあり、作業記録 §9.4 の分解で追う。限界側で形を変える順: (1) router 後の読みを 2 段先読みに（全ミス → census → 全ヒット。同じ形では DRAM/pass 支配で agg は変わらず、tsu 側で効く）、(2) b=1 の tsu 最大の形（`DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1`）へ: expert tiles、router 複製、PP4 の 2 周で次の枠を L1 に先読み、(3) agg 側は `DP2 x PP1 x 16chip[TP4 x DPa4 | EP16 x TPx1 | DCP2/kv-group] b=2048` で b を漸近まで上げる。各段階の限界値は §11.5 の表の該当行。
 
 ### 11.8 未確定（決着方法）
 
 - hop 280 ns は EthernetSsDesignSpec Table 16（AI clk 1.5 GHz）の設計値、本機 1.35 GHz では最大 311 ns、ケーブル伝搬は仕様値無し: §11.5.2 の感度の範囲（×2 で PP4×TP8）。
-- rows > 256 の routing は census 外で fitted（distinct の減衰則と偏り則）。b ≥ 256 の agg（最大点 `DP2 x PP1 x 16chip[TP16 | EP4 x TPx4 | DCP8/kv-group] b=2048` を含む）はこの外挿に依存。
+- rows > 256 の routing は census 外で fitted（distinct の減衰則と偏り則）。b ≥ 256 の agg（最大点 `DP2 x PP1 x 16chip[TP4 x DPa4 | EP16 x TPx1 | DCP2/kv-group] b=2048` を含む）はこの外挿に依存。
 - k=1 の R_eff 1.376 は本件プロンプト集合（ISL 128）の採択率。投機 routing のヒット率は CPU oracle（bf16 expert）の greedy 連鎖で、device の BF4 連鎖では未測。
 - GDR の 1 単位 256 + 800 × 行 cycle は 27B §9 の 4,224 cycle/(head, user) を 4 単位に分けた机上値（単位間の k'S の交換は数えていない）。行列積の K 分割の木の段数・NoC の値は設計値。
-- L1 のストリームバッファ 1 core 192 KiB と固定専有 140 KiB/core、活性 4 × [rows, H] は設計値（感度: バッファ ×0 / ×2 で tsu 最大点 1,913 / 1,913）。
+- L1 のストリームバッファ 1 core 192 KiB と固定専有 140 KiB/core、活性 4 × [rows, H] は設計値（感度: バッファ ×0 / ×2 で tsu 最大点 1,775 / 1,751）。
 - 枠の群への割付は f mod PP の固定 round-robin（群間の量の差が残る近似）。空いている段の chip が隣の段の routed を自分の DRAM から読んで ETH で渡す形（入口 8 link × 25 GB/s = 39% の DRAM 相当）は列挙していない。
 - 系列長の掃引は k=1 の 4 ケースのみ。長文脈の prefill（chunked prefill、KV の書き込み）は decode の限界の外。1M は YaRN 前提で精度は限界の外。
 - DCP の局所 top-k（各 chip が budget/DCP を自分の範囲から選ぶ）は全体 top-k と選択が異なりうる（数値の差、時間には影響しない）。
 
 ### 11.9 生成・検証・運用
 
-- 生成: `routing_census.py`（CPU oracle、34 item）→ `routing_stats.py` → `routing/stats.json`；`free5d_v3.py routing/stats.json <ctx> <out> [k1]`（ctx 192 は 4 ケース × k 0/1、他の ctx は k=1）→ `render_free5d_v3.py` → 本節；`install_free5d_v3.sh` が README の §11 を差し替える。
+- 生成: `routing_census.py`（CPU oracle、34 item）→ `routing_stats.py` → `routing/stats.json`、`design/census_stage2_batches.py` → `routing/stats_stage2.json`；`run_free5d_v4.sh`（`free5d_v4.py routing/stats.json <ctx> <out> [k1]`: ctx 192 は 4 ケース × k 0/1、他の ctx は k=1、7 ctx 並列）→ `render_free5d_v4.py` → 本節；`install_free5d_v4.sh` が README の §11 を差し替える。
 - 検証: 同じ入力から最初から再生成し、stats・results・README が byte 一致（`sha256sum -c routing/H*.sha256`）、`git status` が空、本文を通読して訂正点ゼロになるまで周回する。訂正があれば最初から。
 - 運用: 作業記録は追記専用・日本語・実時間 UTC、ユーザの発言と答え（誤答も）を 1 往復ごとに記録する。README は「現在の確定状態」だけを書き、誤りは上書きで直す。数値・順位は生成値だけ。限界に実測値を入れない。
 
@@ -623,7 +625,7 @@ hop 280 ns を 1 / 2 / 4 倍にしたときの最良は PP4×TP8 / PP4×TP8 / PP
 
 この節は §11.6.1 の形を単品の粒まで降ろして確定した設計（作業記録 §12 の手順 0〜7）で、実装がそのまま使う: 単品の割付（§12.1）、1 chip の L1 と DRAM の会計（§12.2）、枠（§12.3）、単品の時間（§12.4）、通信（§12.5）、鎖を追った定常状態 = 到達目標（§12.6）、実装への予算の配り方（§12.7）、限界モデル §11 との差（§12.8）、生成と検証（§12.9）。条件: 極短文（ctx 1: KV・index block を無視）、1 user、MTP k=1（verify 2 行）、数値形式は配備のもの。本文の数値は全て生成器 `scripts/design/*.py` の出力（`render_design.py` が本節を組む）。
 
-**到達目標（この形の 100%）: 1 pass 763.7 µs = 1,802 tsu（全ヒット、hc 形 A）。** 内訳: 演算 414.5 + 会合の露出 325.6 + 読み待ち 10.6 + 受け渡し 10.4 + 折り返し 2.6 µs。DRAM 車線 89〜91%、L1 高水位 144〜152 MiB / 152.6。census（2 段先読みの実測ヒット率）989.4 µs = 1,391 tsu、全ミス（今の runtime の形）1256.0 µs = 1,096 tsu。
+**到達目標（この形の 100%）: 1 pass 784.1 µs = 1,755 tsu（全ヒット、hc 形 A）。** 内訳: 演算 414.5 + 会合の露出 347.6 + 読み待ち 9.3 + 受け渡し 10.4 + 折り返し 2.4 µs。DRAM 車線 86〜89%、L1 高水位 144〜152 MiB / 152.6。census（2 段先読みの実測ヒット率）994.6 µs = 1,383 tsu、全ミス（今の runtime の形）1282.2 µs = 1,073 tsu。
 
 ### 12.1 単品と割付（手順 0〜1）
 
@@ -684,17 +686,17 @@ hop 280 ns を 1 / 2 / 4 倍にしたときの最良は PP4×TP8 / PP4×TP8 / PP
 | AG_ids | 予測 expert id 40 B | 40 | AG_tree | 1.04 |
 | AG_argmax | argmax 候補 8 × 2 行 × 8 B | 128 | AG_tree | 1.06 |
 
-鎖に乗る露出（会合の全体ではなく、演算と重ねて残る分）: AG_x は届いた K chunk から射影を進めるので露出 GDN 0.30 / QSA 0.17 / MoE 0.19 µs；RS_y / AR_down は出力を 10 波で出し波ごとに流すので露出 RS_y 1.21（attention）/ 1.21（MoE）、AR_down 1.76 µs。投機 router の会合（AR_down 2.24 + AG_x 1.27）は鎖の外。
+鎖に乗る露出（会合の全体ではなく、演算と重ねて残る分）: AG_x は届いた K chunk から射影を進めるので露出 GDN 0.30 / QSA 0.17 / MoE 0.63 µs；RS_y / AR_down は出力を 10 波で出し波ごとに流すので露出 RS_y 1.21（attention）/ 1.21（MoE）、AR_down 1.76 µs。投機 router の会合（AR_down 2.24 + AG_x 1.27）は鎖の外。
 
 hc の形（残差の置き方と down/up の分け方）を列挙して手順 7 で時間比較した:
 
 | 形 | 1 層の hc 区間（出力行列積 + 会合 + down + 会合 + up + AG_x 露出、GDN / QSA）[µs] | pass [µs] | DRAM 増 [MiB/chip/pass] | 中身 |
 |---|---|---|---|---|
-| A | 9.35 / 9.22 | 456 | +0.0 | column-split residual: D K-split (AR_down), U N-split (AG_x), output RS_y (waves) |
-| B | 8.80 / 8.67 | 430 | +13.4 | replicated residual: outputs AR_y (waves); the attention output carries the fold F_i h_i, so the MoE read's low-rank is local (its R_start term off the chain); the attention read's D K-split (AR_down waves), U N-split (AG_x) |
-| Bn | 8.51 / 8.38 | 415 | +13.4 | B with the attention read's D N-split (40 rows from the whole row, AG_low) instead of K-split |
-| B0 | 10.41 / 10.28 | 508 | +0.0 | B without the fold (both reads D K-split with AR_down waves) |
-| B+D | 7.61 / 7.48 | 371 | +80.4 | B with the attention read's D replicated (no meeting; down on the whole row; +6.25 MiB per layer per chip) |
+| A | 9.80 / 9.67 | 478 | +0.0 | column-split residual: D K-split (AR_down), U N-split (AG_x), output RS_y (waves) |
+| B | 9.25 / 9.12 | 452 | +13.4 | replicated residual: outputs AR_y (waves); the attention output carries the fold F_i h_i, so the MoE read's low-rank is local (its R_start term off the chain); the attention read's D K-split (AR_down waves), U N-split (AG_x) |
+| Bn | 8.96 / 8.83 | 437 | +13.4 | B with the attention read's D N-split (40 rows from the whole row, AG_low) instead of K-split |
+| B0 | 10.86 / 10.73 | 530 | +0.0 | B without the fold (both reads D K-split with AR_down waves) |
+| B+D | 8.05 / 7.92 | 393 | +80.4 | B with the attention read's D replicated (no meeting; down on the whole row; +6.25 MiB per layer per chip) |
 | B+D+U | 7.81 / 7.81 | 383 | +214.4 | B+D with both reads' U replicated (no AG_x; +12.5 MiB per layer per chip) |
 
 | 群間の受け渡し（枠の境） | 生きている行 | bytes/chip | [µs] |
@@ -708,7 +710,7 @@ hc の形（残差の置き方と down/up の分け方）を列挙して手順 7
 | L39.moe.routed gate_up | routed down | 残差 1/8 + expert の行（43.9 tile）+ score + inject | 10,887 | 1.22 |
 | L46.moe.shared gate/up | shared down | 残差 1/8 + x + shared の行 + router 結果 + inject | 15,832 | 1.60 |
 
-受け渡し合計 11.1 µs/pass（形 B 系は受け手で残差の AG +1.62 µs/境）。投機 router が群をまたぐ先頭層: 前の群が残差 1/8（5 KiB）を 2 hop 0.98 µs で送り、受け手（空いている群）が自前の重みで読み + router を回す。
+受け渡し合計 11.1 µs/pass（形 B 系は受け手で残差の AG +1.62 µs/境）。投機 router が群をまたぐ先頭層: 前の群が残差 1/8（5 KiB）を 2 hop 0.98 µs で送り、受け手（空いている群）が自前の重みで読み + router を回す。link の共有: 群内の会合（BFS 木）は環の E/W とブロック内の縦 link だけを使い、群間の縦 link（受け渡し、残差 hop、router と expert が別枠に落ちる切れ目 3・6 の id hop）とは物理的に別で、群間 link に乗る 3 本は時刻が重ならない（受け渡しは枠の最後、残差 hop と id hop は枠の途中）ので予定表は要らない。
 
 ### 12.6 鎖を追った定常状態 = 到達目標（手順 7）
 
@@ -716,49 +718,41 @@ hc の形（残差の置き方と down/up の分け方）を列挙して手順 7
 
 | ケース / hc 形 | T_pass [µs] | tsu | 演算 | 会合の露出 | 読み待ち（dense / routed） | 受け渡し | 車線 | L1 高水位 [MiB] |
 |---|---|---|---|---|---|---|---|---|
-| 全ヒット / A | **763.7** | **1,802** | 414.5 | 325.6 | 10.6（0.0 / 10.6） | 10.4 | 89〜91% | 144〜152 |
-| 全ヒット / A + S 常駐 | **763.6** | **1,802** | 414.5 | 325.6 | 10.2（0.0 / 10.2） | 10.4 | 87〜89% | 147〜153 |
-| 全ヒット / B | **772.1** | **1,782** | 387.1 | 326.1 | 34.9（16.9 / 18.0） | 21.8 | 90〜94% | 140〜153 |
-| 全ヒット / Bn | **767.6** | **1,793** | 405.4 | 293.6 | 44.2（22.8 / 21.4） | 21.8 | 91〜95% | 140〜152 |
-| 全ヒット / B+D | **1168.0** | **1,178** | 414.7 | 240.1 | 488.8（307.5 / 181.3） | 21.8 | 69〜75% | 149〜153 |
-| census（2 段先読み）/ A | **989.4** | **1,391** | 414.5 | 325.6 | 232.2（7.2 / 225.0） | 10.4 | 74〜77% | 139〜143 |
-| 全ミス（router 後）/ A | **1256.0** | **1,096** | 414.5 | 325.6 | 494.9（0.0 / 494.9） | 10.4 | 54〜55% | 137〜148 |
+| 全ヒット / A | **784.1** | **1,755** | 414.5 | 347.6 | 9.3（0.0 / 9.3） | 10.4 | 86〜89% | 144〜152 |
+| 全ヒット / A + S 常駐 | **783.9** | **1,755** | 414.5 | 347.6 | 8.9（0.0 / 8.9） | 10.4 | 85〜87% | 147〜153 |
+| 全ヒット / B | **779.7** | **1,765** | 387.1 | 348.1 | 20.6（7.0 / 13.6） | 21.8 | 89〜93% | 141〜152 |
+| 全ヒット / Bn | **775.8** | **1,774** | 405.4 | 315.5 | 30.9（13.4 / 17.5） | 21.8 | 90〜94% | 140〜153 |
+| 全ヒット / B+D | **1169.2** | **1,177** | 414.7 | 262.1 | 468.5（296.4 / 172.1） | 21.8 | 68〜75% | 149〜153 |
+| census（2 段先読み）/ A | **994.6** | **1,383** | 414.5 | 347.6 | 216.6（6.2 / 210.4） | 10.4 | 74〜77% | 139〜144 |
+| 全ミス（router 後）/ A | **1282.2** | **1,073** | 414.5 | 347.6 | 499.6（0.0 / 499.6） | 10.4 | 53〜53% | 137〜148 |
 
 | 枠 | 群 | 演算 [µs] | 始まり → 終わり [µs]（幅） | 会合の露出 | 読み待ち | 受け渡し |
 |---|---|---|---|---|---|---|
-| 0 | 0 | 51.8 | 0.0 → 101.1（101.1） | 44.9 | 4.4 | 0.00 |
-| 1 | 1 | 52.0 | 102.3 → 198.9（96.7） | 44.7 | 0.0 | 1.11 |
-| 2 | 2 | 51.5 | 200.5 → 293.4（92.9） | 41.4 | 0.0 | 1.56 |
-| 3 | 3 | 54.1 | 295.0 → 392.0（97.0） | 42.9 | 0.0 | 1.62 |
-| 4 | 0 | 52.0 | 395.1 → 488.8（93.7） | 43.5 | 0.0 | 1.35 |
-| 5 | 1 | 51.8 | 490.8 → 584.0（93.2） | 41.4 | 0.0 | 1.99 |
-| 6 | 2 | 54.2 | 585.2 → 684.2（99.0） | 44.8 | 0.0 | 1.22 |
-| 7 | 3 | 47.2 | 685.8 → 761.1（75.3） | 21.9 | 6.2 | 1.60 |
+| 0 | 0 | 51.8 | 0.0 → 103.0（103.0） | 47.6 | 3.5 | 0.00 |
+| 1 | 1 | 52.0 | 104.1 → 203.9（99.8） | 47.8 | 0.0 | 1.11 |
+| 2 | 2 | 51.5 | 205.5 → 301.6（96.0） | 44.6 | 0.0 | 1.56 |
+| 3 | 3 | 54.1 | 303.2 → 402.8（99.7） | 45.6 | 0.0 | 1.62 |
+| 4 | 0 | 52.0 | 405.9 → 502.8（96.8） | 46.6 | 0.0 | 1.35 |
+| 5 | 1 | 51.8 | 504.8 → 601.1（96.4） | 44.6 | 0.0 | 1.99 |
+| 6 | 2 | 54.2 | 602.3 → 704.5（102.1） | 48.0 | 0.0 | 1.22 |
+| 7 | 3 | 47.2 | 706.1 → 781.8（75.7） | 22.8 | 5.8 | 1.60 |
 
-読み: **形 A（配備 `read_tp4` の列分割残差）が最良**。B 系は鎖は短い（会合 −32、演算 −27 µs）が、折り畳み重み +13.4 MiB と受け手の残差 AG +11 µs で車線が 95% に張り付き待ちが出る。B+D は +80 MiB で車線律速。S 常駐は車線 −1% で鎖に効かない。本件 b=1 は「DRAM 車線 89% + 鎖 100%」の釣り合いの点にあり、鎖を短くする形は車線を増やし、車線を減らす形は鎖に効かない。全ヒットでも残る routed の露出 10.6 µs は L00（pass 開始後 2.7 µs にしか発行できない）と MTP 層（argmax 後にしか予測できない）の分で構造的。投機 router の演算 217 µs/pass は鎖の待ち 336 µs に入る。
+読み: **形 A（配備 `read_tp4` の列分割残差）が最良**。B 系は鎖は短い（会合 −32、演算 −27 µs）が、折り畳み重み +13.4 MiB と受け手の残差 AG +11 µs で車線が 95% に張り付き待ちが出る。B+D は +80 MiB で車線律速。S 常駐は車線 −1% で鎖に効かない。本件 b=1 は「DRAM 車線 86% + 鎖 100%」の釣り合いの点にあり、鎖を短くする形は車線を増やし、車線を減らす形は鎖に効かない。全ヒットでも残る routed の露出 9.3 µs は L00（pass 開始後 2.7 µs にしか発行できない）と MTP 層（argmax 後にしか予測できない）の分で構造的。投機 router の演算 217 µs/pass は鎖の待ち 357 µs に入る。
 
 ### 12.7 実装への予算（効率 100% = §12.6 の値を出す条件）
 
 - 単品の演算: §12.4 の値（行列積は K 分割 + NoC の木で 130 core 全部を使う; GDR は 24 単位を 24 core に; argmax は局所）。1 pass 414.5 µs。
-- 会合: §12.5 の露出（AG_x は K chunk で射影が追いかける、RS/AR は 10 波で流す、投機の会合は鎖の外）。1 pass 325.6 µs。
+- 会合: §12.5 の露出（AG_x は K chunk で射影が追いかける、RS/AR は 10 波で流す、投機の会合は鎖の外）。1 pass 347.6 µs。
 - 受け渡し: 枠の境で生きている行だけを 2 hop（10.4 µs/pass）。
-- DRAM: 各群 271〜275 MiB/pass を 512 GB/s の 89〜91% で（8 reader、bank 隣接、片 512 KiB、消費順の発行、routed は 3 段のトリガで）。読み待ち 10.6 µs 以内。
+- DRAM: 各群 271〜275 MiB/pass を 512 GB/s の 86〜89% で（8 reader、bank 隣接、片 512 KiB、消費順の発行、routed は 3 段のトリガで）。読み待ち 9.3 µs 以内。
 - L1: 枠の容量 152.6 MiB、routed の取り置き 3 層分、高水位 152 MiB。
-- 投機 router: 層 l の router を持つ群で、attention ブロック開始の残差から 2 本（l、l+1）を鎖の待ち時間に回す。ヒット率は census（h12 0.849、h2 0.698）で、外れ分は router 後に読む（census ケース 989.4 µs がその場合の到達値）。
+- 投機 router: 層 l の router を持つ群で、attention ブロック開始の残差から 2 本（l、l+1）を鎖の待ち時間に回す。ヒット率は census（h12 0.849、h2 0.698）で、外れ分は router 後に読む（census ケース 994.6 µs がその場合の到達値）。
 
-### 12.8 限界モデル §11 との差（§11 側の訂正対象）
+### 12.8 限界モデル §11 との整合
 
-§11.5 の同じ形（`DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1`）の値 719.2 µs（1,913 tsu）= 48 層の演算 375.7 + 48 層の通信 308.5 + tail と受け渡し 35.0 に対し、本設計 763.7 µs（1,802 tsu、差 +44.5）= 演算 414.5 + 会合 325.6 + 受け渡し 10.4 + 読み待ち 10.6 + 折り返し 2.6。差の出所（§11 側の訂正）:
-
-1. §11 が数えていない単品: MTP の lm_head（draft）、final / MTP の mixer、MTP の fc、PLE の演算 = 17.6 µs、その会合（PLE の統計 AR × 2、mixer の AR + AG × 2、argmax の候補 AG）= 12.5 µs。
-2. 会合 1 回の時間: §11 は最後の tile のレイテンシ（8 chip 1.07 µs）× 6 本/層 = 6.43 µs、本設計は packet 模型（直列化 + 蓄積転送 + 中継、AG_x 1.27 / AR_down 2.24 / RS_y 1.51 µs）から K chunk と波の重なりを引いた露出で GDN 層 6.42 / QSA 層 6.29 µs: 層あたりはほぼ同じ値になるが、中身（会合の全体は長く、重なりで短い）が違うので §11 は packet 模型に置き換える。
-3. 受け渡し: §11 は残差 1/8 だけ（8 × 0.79 = 6.3 µs）、本設計は境で生きている行全部（10.4 µs）。
-4. routed の構造的露出 10.6 µs: L00 の expert は pass 開始後にしか確定せず、MTP 層の expert は本 pass の argmax 後にしか予測できない（§11 は全層を 1 層前の裏と置いた）。
-5. 投機 router の会合は鎖の外（§11 と同じ扱いだが、その重みを持つ群で回す条件と残差の hop を本設計は数える）。
-6. 先読みの L1 容量は「枠の列 − dense」（§11.6.1 の「バッファ 159 MB に次の枠を丸ごと」は列の数え方が違ったが結論は同じ）。
-7. §11 H-21 の「バッファは 1 層先」は 2 ブロック早い予測（pred2）のタイミングなのに census ケースは 1 ブロック早い予測（pred1）のヒット率を使っていた → 2 段先読み（P2 / P1−P2 / 外れ、無駄読み込み: 本設計の census ケース 989.4 µs）に直す。
-8. hc の形: §11 H-6' の「複製残差は会合の本数が同じ」は誤り（§12.5 の列挙）。本件 b=1 では形 A が最良だが、§11 の全構成の列挙には形の軸として入れる。
-これらを `free5d_v3.py` の次版に取り込み §11 を再生成する（本節の値が確定値、§11 はそれに揃える）。
+§11（第 4 版）は本節の 8 つの知見（会合の packet 模型と重なり、2 段先読みと L00 / MTP 層の構造的露出、tail の全単品、受け渡しの生きている行、hc の形の軸、先読み容量、argmax 局所化、投機 router の会合は鎖の外）を取り込んだもので、同じ形（`DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1`、ctx 1）の値は §11 785.9 µs（1,751 tsu）= 演算 423.1 + 会合 348.4 + 受け渡し・窓 14.4、本節 784.1 µs（1,755 tsu）: 差 -1.8 µs（-0.2%、§11 は会合の payload を 256 B・行列積時間を 50 ns に量子化して表引きする分）。
+census と全ミスでは §11 が短い（census §11 949.7 / 本節 994.6 µs、全ミス 1162.7 / 1282.2）: §11 は層の中で DRAM 車線を平滑化する上限（層 = max(鎖, routed/BW)）、本節は車線を時間軸で追うので routed の読みが層境を越えて積み上がる分だけ長い（§11.3 原則 24）。設計の到達値は本節、§11 は形の比較と上限。
+§11 の全列挙（6,510 構成 × 形）でも b=1 の tsu 最大は本節の形のままで（§11.5.1）、hc 形は A（§11 の列挙でも B 系は DRAM 車線を増やすだけで勝たない）。
 
 ### 12.9 生成と検証
 

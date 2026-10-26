@@ -194,7 +194,7 @@ live = {
 for h in S6["hand"]:
     P(f"| {h['desc']} | {live[h['cut']]} | {h['bytes']:,.0f} | {h['us']:.2f} |")
 P(
-    f"\n受け渡し合計 {sum(h['us'] for h in S6['hand']):.1f} µs/pass（形 B 系は受け手で残差の AG +{S6['hand_B_extra']:.2f} µs/境）。投機 router が群をまたぐ先頭層: 前の群が残差 1/8（5 KiB）を 2 hop {pa['res_hop']:.2f} µs で送り、受け手（空いている群）が自前の重みで読み + router を回す。\n"
+    f"\n受け渡し合計 {sum(h['us'] for h in S6['hand']):.1f} µs/pass（形 B 系は受け手で残差の AG +{S6['hand_B_extra']:.2f} µs/境）。投機 router が群をまたぐ先頭層: 前の群が残差 1/8（5 KiB）を 2 hop {pa['res_hop']:.2f} µs で送り、受け手（空いている群）が自前の重みで読み + router を回す。link の共有: 群内の会合（BFS 木）は環の E/W とブロック内の縦 link だけを使い、群間の縦 link（受け渡し、残差 hop、router と expert が別枠に落ちる切れ目 3・6 の id hop）とは物理的に別で、群間 link に乗る 3 本は時刻が重ならない（受け渡しは枠の最後、残差 hop と id hop は枠の途中）ので予定表は要らない。\n"
 )
 # ---------- 12.6 steady state ----------
 P("### 12.6 鎖を追った定常状態 = 到達目標（手順 7）\n")
@@ -233,48 +233,21 @@ P(
     f"- 単品の演算: §12.4 の値（行列積は K 分割 + NoC の木で 130 core 全部を使う; GDR は 24 単位を 24 core に; argmax は局所）。1 pass {hit['comp']:.1f} µs。\n- 会合: §12.5 の露出（AG_x は K chunk で射影が追いかける、RS/AR は 10 波で流す、投機の会合は鎖の外）。1 pass {hit['expo']:.1f} µs。\n- 受け渡し: 枠の境で生きている行だけを 2 hop（{hit['hand']:.1f} µs/pass）。\n- DRAM: 各群 {min(gd)/MiB:.0f}〜{max(gd)/MiB:.0f} MiB/pass を 512 GB/s の {min(hit['busy'])*100:.0f}〜{max(hit['busy'])*100:.0f}% で（8 reader、bank 隣接、片 512 KiB、消費順の発行、routed は 3 段のトリガで）。読み待ち {hit['wait']:.1f} µs 以内。\n- L1: 枠の容量 {S3['cap']/MiB:.1f} MiB、routed の取り置き 3 層分、高水位 {max(hit['l1_hwm'])/MiB:.0f} MiB。\n- 投機 router: 層 l の router を持つ群で、attention ブロック開始の残差から 2 本（l、l+1）を鎖の待ち時間に回す。ヒット率は census（h12 {CEN['pass']['hit12_mean']:.3f}、h2 {CEN['pass']['hit2_mean']:.3f}）で、外れ分は router 後に読む（census ケース {C7['census_A']['T_steady']:.1f} µs がその場合の到達値）。\n"
 )
 # ---------- 12.8 diff to the limit ----------
-P("### 12.8 限界モデル §11 との差（§11 側の訂正対象）\n")
-V3 = json.load(open(f"{D}/free5d_v3_results_ctx1.json"))["hit|k=1"]
-v3 = next(r for r in V3 if r["cfg"] == "DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1")
-v3T = v3["slot_ms"] * 1e3
-v3c = v3["comp_ms"] * 1e3
-v3m = v3["comm_ms"] * 1e3
-v3rest = v3T - v3c - v3m
-
-
-def tt(pred):
-    return sum(t["t_us"] for i, t in enumerate(T4) if not t["spec"] and pred(U[i]["unit"]))
-
-
-miss_comp = (
-    tt(lambda n: n.startswith("mtp.lm_head"))
-    + tt(lambda n: n.startswith("final hyper") or n.startswith("mtp.hyper"))
-    + tt(lambda n: n.startswith("mtp.embed"))
-    + tt(lambda n: ".ple." in n)
-)
-miss_meet = 2 * pa["ar_down_full"] + 2 * (pa["ar_down_full"] + S6["AG_x"]["us"]) + S6["AG_argmax"]["us"]
-l_gdn = 2 * pa["ar_down"] + pa["ag_gdn"] + pa["ag_moe"] + pa["rs_attn"] + pa["rs_moe"]
-l_qsa = 2 * pa["ar_down"] + pa["ag_qsa"] + pa["ag_moe"] + pa["rs_attn"] + pa["rs_moe"]
+P("### 12.8 限界モデル §11 との整合\n")
+V4 = json.load(open(f"{D}/free5d_v4_results_ctx1.json"))["hit|k=1"]
+v4 = next(r for r in V4 if r["cfg"] == "DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1")
+V4c = json.load(open(f"{D}/free5d_v4_results_ctx1.json"))["census|k=1"]
+v4c = next(r for r in V4c if r["cfg"] == "DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1")
+V4m = json.load(open(f"{D}/free5d_v4_results_ctx1.json"))["miss|k=1"]
+v4m = next(r for r in V4m if r["cfg"] == "DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1")
+v4T = v4["slot_ms"] * 1e3
 P(
-    f"§11.5 の同じ形（`{v3['cfg']}`）の値 {v3T:.1f} µs（{1e6/v3T*R_EFF:,.0f} tsu）= 48 層の演算 {v3c:.1f} + 48 層の通信 {v3m:.1f} + tail と受け渡し {v3rest:.1f} に対し、本設計 {T:.1f} µs（{tsu:,.0f} tsu、差 {T-v3T:+.1f}）= 演算 {hit['comp']:.1f} + 会合 {hit['expo']:.1f} + 受け渡し {hit['hand']:.1f} + 読み待ち {hit['wait']:.1f} + 折り返し {T-hit['comp']-hit['expo']-hit['wait']-hit['hand']:.1f}。差の出所（§11 側の訂正）:\n"
+    f"§11（第 4 版）は本節の 8 つの知見（会合の packet 模型と重なり、2 段先読みと L00 / MTP 層の構造的露出、tail の全単品、受け渡しの生きている行、hc の形の軸、先読み容量、argmax 局所化、投機 router の会合は鎖の外）を取り込んだもので、同じ形（`{v4['cfg']}`、ctx 1）の値は §11 {v4T:.1f} µs（{1e6/v4T*R_EFF:,.0f} tsu）= 演算 {v4['comp_ms']*1e3:.1f} + 会合 {v4['comm_ms']*1e3:.1f} + 受け渡し・窓 {v4T-v4['comp_ms']*1e3-v4['comm_ms']*1e3:.1f}、本節 {T:.1f} µs（{tsu:,.0f} tsu）: 差 {T-v4T:+.1f} µs（{(T/v4T-1)*100:+.1f}%、§11 は会合の payload を 256 B・行列積時間を 50 ns に量子化して表引きする分）。"
 )
 P(
-    f"1. §11 が数えていない単品: MTP の lm_head（draft）、final / MTP の mixer、MTP の fc、PLE の演算 = {miss_comp:.1f} µs、その会合（PLE の統計 AR × 2、mixer の AR + AG × 2、argmax の候補 AG）= {miss_meet:.1f} µs。"
+    f"census と全ミスでは §11 が短い（census §11 {v4c['slot_ms']*1e3:.1f} / 本節 {C7['census_A']['T_steady']:.1f} µs、全ミス {v4m['slot_ms']*1e3:.1f} / {C7['miss_A']['T_steady']:.1f}）: §11 は層の中で DRAM 車線を平滑化する上限（層 = max(鎖, routed/BW)）、本節は車線を時間軸で追うので routed の読みが層境を越えて積み上がる分だけ長い（§11.3 原則 24）。設計の到達値は本節、§11 は形の比較と上限。"
 )
-P(
-    f"2. 会合 1 回の時間: §11 は最後の tile のレイテンシ（8 chip 1.07 µs）× 6 本/層 = 6.43 µs、本設計は packet 模型（直列化 + 蓄積転送 + 中継、AG_x {S6['AG_x']['us']:.2f} / AR_down {S6['AR_down']['us']:.2f} / RS_y {S6['RS_y']['us']:.2f} µs）から K chunk と波の重なりを引いた露出で GDN 層 {l_gdn:.2f} / QSA 層 {l_qsa:.2f} µs: 層あたりはほぼ同じ値になるが、中身（会合の全体は長く、重なりで短い）が違うので §11 は packet 模型に置き換える。"
-)
-P(f"3. 受け渡し: §11 は残差 1/8 だけ（8 × 0.79 = 6.3 µs）、本設計は境で生きている行全部（{hit['hand']:.1f} µs）。")
-P(
-    f"4. routed の構造的露出 {hit['wait']:.1f} µs: L00 の expert は pass 開始後にしか確定せず、MTP 層の expert は本 pass の argmax 後にしか予測できない（§11 は全層を 1 層前の裏と置いた）。"
-)
-P(f"5. 投機 router の会合は鎖の外（§11 と同じ扱いだが、その重みを持つ群で回す条件と残差の hop を本設計は数える）。")
-P(f"6. 先読みの L1 容量は「枠の列 − dense」（§11.6.1 の「バッファ 159 MB に次の枠を丸ごと」は列の数え方が違ったが結論は同じ）。")
-P(
-    f"7. §11 H-21 の「バッファは 1 層先」は 2 ブロック早い予測（pred2）のタイミングなのに census ケースは 1 ブロック早い予測（pred1）のヒット率を使っていた → 2 段先読み（P2 / P1−P2 / 外れ、無駄読み込み: 本設計の census ケース {C7['census_A']['T_steady']:.1f} µs）に直す。"
-)
-P(f"8. hc の形: §11 H-6' の「複製残差は会合の本数が同じ」は誤り（§12.5 の列挙）。本件 b=1 では形 A が最良だが、§11 の全構成の列挙には形の軸として入れる。")
-P("これらを `free5d_v3.py` の次版に取り込み §11 を再生成する（本節の値が確定値、§11 はそれに揃える）。\n")
+P("§11 の全列挙（6,510 構成 × 形）でも b=1 の tsu 最大は本節の形のままで（§11.5.1）、hc 形は A（§11 の列挙でも B 系は DRAM 車線を増やすだけで勝たない）。\n")
 P("### 12.9 生成と検証\n")
 P(
     "- 生成: `scripts/design/run_design.sh`（step0 → step2 → step3 → step4 → step5 → census_stage2 → step6 → step7 の各ケース、入力は HF 定義・`routing/stats.json`・`routing/*.npz`・物理値だけ）→ `render_design.py` → 本節；`install_design.sh` が README の §12 を差し替える。\n- 検証: 同じ入力から再生成して `routing/design_*.json` と README が byte 一致、`git status` が空、本文を通読して訂正点ゼロになるまで周回する。\n- 作業記録: `BH-GLX_Qwen3.8-Flash-Next_SC1_handoff_worklog_20261023.md` §12（手順ごとの結果と見つけて直した誤り）。\n"
