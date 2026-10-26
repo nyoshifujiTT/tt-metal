@@ -216,6 +216,22 @@ Result run(
             }
         }
     }
+    // the own flows of a link leave farthest destination first (the longest route starts earliest, as in the packet
+    // model's schedule where every flow is ready at time 0 and the link is a FIFO)
+    auto depth = [&](uint32_t fi) {
+        int best = 0;
+        for (int d : flows[fi].dsts) {
+            int h = 0;
+            for (int x = d; x != flows[fi].src; x = flows[fi].parent.at(x)) {
+                ++h;
+            }
+            best = std::max(best, h);
+        }
+        return best;
+    };
+    for (auto& [key, j] : jobs) {
+        std::stable_sort(j.own_flows.begin(), j.own_flows.end(), [&](uint32_t a, uint32_t b) { return depth(a) > depth(b); });
+    }
     // the inputs of a chip's next iteration: AG every flow not its own; RS the flows that end at it
     std::array<std::vector<uint32_t>, 8> inputs;
     for (int n = 0; n < 8; ++n) {
