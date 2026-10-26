@@ -42,6 +42,9 @@ constexpr uint32_t kState = 256;
 constexpr uint32_t kBad = 512;
 constexpr uint32_t kStamps = 1024;
 constexpr uint32_t kProbe = 4096;
+constexpr uint32_t kWindow = 64;           // iterations probe_iter .. probe_iter + 63 are stamped
+constexpr uint32_t kArrArr = 8192;         // [root][window] u32: wall clock of the last packet of root's half, rx core
+constexpr uint32_t kOwnArr = 10240;        // [window] u32: wall clock of the own half's first send, own-half tx core
 constexpr uint32_t kStallLimit = 50000000;
 constexpr uint32_t kSpinLimit = 10000000;  // an inner hardware wait (command buffer ready, TXQ busy) that exceeds this
                                            // marks the core broken; every loop then ends (finite time)
@@ -282,7 +285,7 @@ void kernel_main() {
                 const uint32_t w1 = load(head + trailer + 16);
                 if ((w0 == w1) & (w0 != seen_tag[head_index]) & ((w0 & kTagBit) != 0)) {
                     const uint32_t it = w0 & 0xffff;
-                    const uint32_t seen = it == probe_iter ? clock_low() : 0;
+                    const uint32_t seen = it - probe_iter < kWindow ? clock_low() : 0;
                     const uint32_t root = (w0 >> 24) & 0x7f;
                     const uint32_t pk = (w0 >> 16) & 0xff;
                     const bool last_pk = pk == packets - 1;
@@ -335,6 +338,9 @@ void kernel_main() {
                             store(base + kProbe + 288 + 4 * root, t_checked - seen);
                             store(base + kProbe + 320 + 4 * root, t_issue[0] ? t_issue[0] - t_checked : 0);
                             store(base + kProbe + 352 + 4 * root, t_issue[1] ? t_issue[1] - t_checked : 0);
+                        }
+                        if (last_pk && it - probe_iter < kWindow) {
+                            store(base + kArrArr + 4 * (root * kWindow + (it - probe_iter)), seen);
                         }
                         if (it == probe_iter) {
                             if (last_pk) {
@@ -483,13 +489,14 @@ void kernel_main() {
                         continue;
                     }
                 }
-                const uint32_t seen = clock_low();
+                const bool probe = (w0 & 0xffffff) == probe_iter;
+                const uint32_t seen = probe ? clock_low() : 0;
                 const uint32_t off = ((w0 >> 16) & 0xff) == packets - 1 ? last_off : 0;
                 eth_send(at + off, ring + (sent & ring_mask) * stride + off, payload - off + 32);
                 rec[sent & ring_mask] = static_cast<uint8_t>(s);
                 ++sent;
                 src_seen[s][slot] = w0;
-                if ((w0 & 0xffffff) == probe_iter) {
+                if (probe) {
                     const uint32_t root = (w0 >> 24) & 0x7f;
                     store(base + kProbe + 64 + 4 * root, seen);
                     store(base + kProbe + 96 + 4 * root, clock_low());
@@ -499,11 +506,12 @@ void kernel_main() {
                 moved = true;
             }
             if (own_sent < own_total) {
-                if (own_pk == 0 && own_it > 0 && wait_root < 8) {
+                while (own_pk == 0 && own_it > 0 && wait_root < 8) {
                     const uint32_t e = load(base + kArriveTab + 16 * wait_root);
-                    if ((e & kTagBit) && (e & 0xffff) + 1 >= own_it) {
-                        wait_root = wait_root + 1 == me ? me + 1 : wait_root + 1;
+                    if (!((e & kTagBit) && (e & 0xffff) + 1 >= own_it)) {
+                        break;
                     }
+                    wait_root = wait_root + 1 == me ? me + 1 : wait_root + 1;
                 }
                 const bool ready = own_pk != 0 || own_it == 0 || wait_root >= 8;
                 if (ready) {
@@ -516,6 +524,9 @@ void kernel_main() {
                             own_seen = true;
                             if (own_it == probe_iter || own_it == probe_iter + 1) {
                                 store_clock64(base + kProbe + 8 * (own_it - probe_iter));
+                            }
+                            if (own_it - probe_iter < kWindow) {
+                                store(base + kOwnArr + 4 * (own_it - probe_iter), clock_low());
                             }
                             if (stamp && stamped == own_it) {
                                 store_clock64(base + kStamps + 8 * own_it);
@@ -534,13 +545,13 @@ void kernel_main() {
                         ++sent;
                         own_last[own_slot] = sent;
                         ++own_sent;
+                        moved = true;
                         if (++own_pk == packets) {
                             own_pk = 0;
                             ++own_it;
                             own_seen = false;
                             wait_root = me == 0 ? 1 : 0;
                         }
-                        moved = true;
                     }
                 }
             }
@@ -551,14 +562,14 @@ void kernel_main() {
                 fwd = rel;
                 moved = true;
             }
-            if (!moved && sent != credits) {
+            if (!moved && sent != credits && (idle & 31) == 31) {
                 if (refresh_credits()) {
                     moved = true;
                 }
             }
             bool all = own_sent == own_total && credits == sent;
-            for (uint32_t s = 0; s < n_src; ++s) {
-                all = all && src_count[s] == src_expected[s] && src_freed[s] == src_count[s];
+            for (uint32_t s = 0; all && s < n_src; ++s) {
+                all = src_count[s] == src_expected[s] && src_freed[s] == src_count[s];
             }
             if (all) {
                 invalidate_l1_cache();

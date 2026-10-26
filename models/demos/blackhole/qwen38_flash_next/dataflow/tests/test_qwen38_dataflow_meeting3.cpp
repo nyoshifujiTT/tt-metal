@@ -12,6 +12,7 @@
 // word of every packet; both must report zero bad packets and every core a clean end.
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <climits>
 #include <cstdlib>
 #include <fstream>
 #include <map>
@@ -63,6 +64,8 @@ struct Meeting3Run {
     int hops[8][8] = {};
     double restart[2][8] = {};
     std::vector<double> st_rx, st_noc, st_tx, relay, fine_check, fine_issue0, fine_issue1;
+    double gather_us[2] = {0, 0};      // per plane: mean over chips and over 64 iterations of (last arrival - own start)
+    double gather_max_us[2] = {0, 0};  // per plane: mean over 64 iterations of the slowest chip
     std::vector<double> loop_tx, loop_rx;
 };
 
@@ -382,6 +385,44 @@ Meeting3Run run_meeting3(
             }
         }
     }
+    // the meeting time per chip and iteration on the chip's own clock: the last other root's half arrived minus the own
+    // half's first send, over the 64 stamped iterations
+    for (uint32_t p = 0; p < 2; ++p) {
+        double sum = 0, sum_max = 0;
+        uint32_t cnt = 0;
+        std::vector<std::vector<uint32_t>> own_t(8), arr_t(8 * 8);
+        for (int n = 0; n < 8; ++n) {
+            own_t[n] = read(n, own_cores[{n, p}].front(), base + 10240, 4 * 64);
+            for (auto& [key, j] : jobs) {
+                if (j.chip != n || j.plane != p) {
+                    continue;
+                }
+                const auto a = read(n, j.core, base + 8192, 4 * 8 * 64);
+                for (int r = 0; r < 8; ++r) {
+                    if ((j.rx_roots >> r) & 1) {
+                        arr_t[n * 8 + r] = std::vector<uint32_t>(a.begin() + r * 64, a.begin() + (r + 1) * 64);
+                    }
+                }
+            }
+        }
+        for (int w = 0; w < 64; ++w) {
+            double worst = 0;
+            for (int n = 0; n < 8; ++n) {
+                int32_t last = INT32_MIN;
+                for (int r = 0; r < 8; ++r) {
+                    if (r != n) {
+                        last = std::max(last, static_cast<int32_t>(arr_t[n * 8 + r][w] - own_t[n][w]));
+                    }
+                }
+                sum += last / 1350.0;
+                worst = std::max(worst, last / 1350.0);
+                ++cnt;
+            }
+            sum_max += worst;
+        }
+        run.gather_us[p] = sum / cnt;
+        run.gather_max_us[p] = sum_max / 64;
+    }
     for (int n = 0; n < 8; ++n) {
         for (int r = 0; r < 8; ++r) {
             int dc = std::abs(n % 4 - r % 4);
@@ -489,6 +530,9 @@ TEST(Qwen38DataflowMeeting3, GroupAllGatherTwoPlanesUntouchedFrames) {
             }
             out << "; restart after the last arrival " << gap / 8 << " us\n";
         }
+        out << "  meeting time (own start -> last other half, 64 iterations): plane 0 mean " << r.gather_us[0]
+            << " us (slowest chip " << r.gather_max_us[0] << "), plane 1 mean " << r.gather_us[1] << " us (slowest chip "
+            << r.gather_max_us[1] << ")\n";
         out << "  relay: mean " << mean(r.relay) << " us (" << r.relay.size() << "): rx seen -> issued " << mean(r.st_rx)
             << ", issued -> tx sees " << mean(r.st_noc) << ", tx sees -> sent " << mean(r.st_tx) << "; loop pass tx "
             << mean(r.loop_tx) << " ns, rx " << mean(r.loop_rx) << " ns\n";
