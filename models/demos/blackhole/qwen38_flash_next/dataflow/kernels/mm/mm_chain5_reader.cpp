@@ -95,7 +95,7 @@ void kernel_main() {
     constexpr uint32_t sparse = get_compile_time_arg_val(3);
     constexpr uint32_t kChunk = 128, kFace1 = 1024;
     constexpr uint32_t cb_act = 0, cb_w = 1, cb_in_part = 2, cb_go = 3, cb_ready = 4, cb_out = 16, cb_part = 17, cb_stamp = 24;
-    constexpr auto act_args = TensorAccessorArgs<4>();
+    constexpr auto act_args = TensorAccessorArgs<5>();
     const auto act = TensorAccessor(act_args, act_addr);
     constexpr auto w_args = TensorAccessorArgs<act_args.next_compile_time_args_offset()>();
     const auto w = TensorAccessor(w_args, w_addr);
@@ -122,9 +122,19 @@ void kernel_main() {
             dst += w_tile;
         }
     }
+    // the owner's constant selector tile (sel x P adds the partial P in the matmul: kernels/mm/mm_chain5_compute.cpp)
+    const uint32_t sel_addr = get_compile_time_arg_val(4) ? get_arg_val<uint32_t>(a) : 0;
+    if (sel_addr != 0 && role == 0) {
+        constexpr uint32_t cb_sel = 5;
+        cb_reserve_back(cb_sel, 1);
+        noc_async_read(get_noc_addr_from_bank_id<true>(0, sel_addr), get_write_ptr(cb_sel), get_tile_size(cb_sel));
+    }
     noc_async_read_barrier();
     cb_push_back(cb_act, Kt);
     cb_push_back(cb_w, w_tiles);
+    if (sel_addr != 0 && role == 0) {
+        cb_push_back(5, 1);
+    }
     const uint32_t in_base = get_write_ptr(cb_in_part);
     if (role == 0) {
         for (uint32_t j = 0; j < 3; ++j) {

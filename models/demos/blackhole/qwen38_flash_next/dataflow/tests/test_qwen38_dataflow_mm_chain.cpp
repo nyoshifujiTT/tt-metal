@@ -101,7 +101,11 @@ std::vector<CorePlan> make_plan(uint32_t k_own) {
 // init once)
 // v 6: the v5 kernels with every tile full (32 rows): isolates the init / reconfig changes; v 7: v5 kernels, activation
 // and output 2-row, partials full 32-row tiles: isolates the tiny partial
-std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint32_t k_own, bool& ok, uint32_t v = 2) {
+// sel = 1 (v8 kernels): the owner adds the partials with the matmul against the 2-row selector tile (no add init, no
+// matmul re-init per round)
+std::string run_chain(
+    const std::shared_ptr<distributed::MeshDevice>& mesh, uint32_t k_own, bool& ok, uint32_t v = 2, uint32_t drain = 0,
+    uint32_t sel = 0) {
     const uint32_t rows = (v == 5 || v == 7 || v == 8) ? 2u : 32u;
     const tt::tt_metal::Tile tile({rows, 32});
     const tt::tt_metal::Tile ptile({v == 5 ? 2u : 32u, 32});
@@ -179,6 +183,27 @@ std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint
     auto buf_w = dram(kWTile, kNt * kKt * kWTile);
     auto buf_o = dram(out_tile, kNt * out_tile);
     auto buf_st = dram(512, 2 * kCores * 512);
+    // the 2-row selector (bf16, rows 0 / 1 = e_0 / e_1 over the K index 0..31) in the activation's tile shape, one
+    // tile in bank 0 (a single page)
+    const uint32_t sel_tile_bytes = tile.get_tile_size(tt::DataFormat::Float16_b);
+    auto buf_sel = distributed::MeshBuffer::create(
+        distributed::ReplicatedBufferConfig{.size = sel_tile_bytes},
+        distributed::DeviceLocalBufferConfig{.page_size = sel_tile_bytes, .buffer_type = tt::tt_metal::BufferType::DRAM},
+        mesh.get());
+    {
+        std::vector<bfloat16> sel_rm(static_cast<size_t>(rows) * 32, bfloat16(0.0f));
+        for (uint32_t r = 0; r < std::min<uint32_t>(rows, 2); ++r) {
+            sel_rm[r * 32 + r] = bfloat16(1.0f);
+        }
+        const auto sel_t = convert_layout<bfloat16>(
+            ttsl::Span<const bfloat16>(sel_rm),
+            {rows, 32},
+            TensorLayoutType::LIN_ROW_MAJOR,
+            TensorLayoutType::TILED_NFACES,
+            tile.get_tile_shape(),
+            tile.get_face_shape());
+        distributed::EnqueueWriteMeshBuffer(cq, buf_sel, sel_t, true);
+    }
     distributed::EnqueueWriteMeshBuffer(cq, buf_a, a_tiled, false);
     distributed::EnqueueWriteMeshBuffer(cq, buf_w, w_bf8, false);
     tt::tt_metal::Program program;
@@ -203,6 +228,7 @@ std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint
     cb(2, 3, part_page, tt::DataFormat::Float32, true);
     cb(3, 2, 32, tt::DataFormat::Float16_b, false);
     cb(4, 2, 32, tt::DataFormat::Float16_b, false);
+    cb(5, 1, act_tile, tt::DataFormat::Float16_b, true);
     cb(16, 2, out_tile, tt::DataFormat::Float16_b, true);
     cb(17, 2, part_page, tt::DataFormat::Float32, true);
     cb(24, 1, 512, tt::DataFormat::UInt32, false);
@@ -211,6 +237,7 @@ std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint
     if (v >= 5) {
         rd_ct.push_back(part_bytes);
         rd_ct.push_back(v == 8 ? 1u : 0u);  // v8: the 32-row partial with only its 2 valid rows sent (sparse)
+        rd_ct.push_back(sel);
     }
     tt::tt_metal::TensorAccessorArgs(*buf_a).append_to(rd_ct);
     tt::tt_metal::TensorAccessorArgs(*buf_w).append_to(rd_ct);
@@ -231,14 +258,14 @@ std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint
                : "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain_compute.cpp",
         owners_set,
         tt::tt_metal::ComputeConfig{
-            .math_fidelity = MathFidelity::HiFi2, .fp32_dest_acc_en = true, .compile_args = {0u, kKt, kRounds}});
+            .math_fidelity = MathFidelity::HiFi2, .fp32_dest_acc_en = true, .compile_args = {0u, kKt, kRounds, drain, sel}});
     auto comp_send = tt::tt_metal::CreateKernel(
         program,
         v >= 5 ? "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain5_compute.cpp"
                : "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain_compute.cpp",
         senders_set,
         tt::tt_metal::ComputeConfig{
-            .math_fidelity = MathFidelity::HiFi2, .fp32_dest_acc_en = true, .compile_args = {1u, kKt, kRounds}});
+            .math_fidelity = MathFidelity::HiFi2, .fp32_dest_acc_en = true, .compile_args = {1u, kKt, kRounds, drain, sel}});
     const auto go_phys = dev->worker_core_from_logical_core(tt::tt_metal::CoreCoord(0, 0));
     const auto mc1 = dev->worker_core_from_logical_core(tt::tt_metal::CoreCoord(kGridX - 1, kGridY - 1));
     for (uint32_t i = 0; i < kCores; ++i) {
@@ -270,6 +297,7 @@ std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint
         }
         ra.push_back(p.n_in);
         ra.push_back(p.col);
+        ra.push_back(static_cast<uint32_t>(buf_sel->address()));
         ca.push_back(p.n_in);
         tt::tt_metal::SetRuntimeArgs(program, rd, p.core, ra);
         tt::tt_metal::SetRuntimeArgs(program, p.role == 0 ? comp_own : comp_send, p.core, ca);
@@ -326,7 +354,7 @@ std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint
     // raw stamps (I-1c-3): per core its role, place and segments, then for rounds 8..15 the reader's (go, mid, end), the
     // unpack thread's (go seen, partials seen, segment issues 0..2) and the pack thread's (math done 0..2, packed 0..2)
     if (const char* raw_path = std::getenv("QWEN38_MM_RAW")) {
-        std::ofstream raw(std::string(raw_path) + "." + std::to_string(k_own));
+        std::ofstream raw(std::string(raw_path) + "." + std::to_string(k_own) + ".v" + std::to_string(v) + ".d" + std::to_string(drain));
         for (uint32_t i = 0; i < kCores; ++i) {
             const auto& p = plan[i];
             raw << "core " << i << " role " << p.role << " x " << p.core.x << " y " << p.core.y << " n_in " << p.n_in
@@ -382,7 +410,7 @@ std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint
         }
     }
     std::ostringstream os;
-    os << "v" << v << " (" << rows << "-row tiles, partial " << part_bytes << " B) k_own " << k_own << " (sender max " << max_send_k << " K tiles, max " << max_seg << " segments, owner max "
+    os << "v" << v << (sel ? " sel-add" : "") << " (" << rows << "-row tiles, partial " << part_bytes << " B) k_own " << k_own << " (sender max " << max_send_k << " K tiles, max " << max_seg << " segments, owner max "
        << max_in << " partials): round go -> last column mean " << sum_round / cnt << " us, best " << best_round
        << " us; owner end - own go max mean " << sum_span / cnt << " us (worst core " << worst_core << " "
        << worst_span / (kClockGHz * 1000.0) << " us); go spread mean " << sum_go_spread / cnt
@@ -410,10 +438,10 @@ TEST(Qwen38DataflowMm, InProjPoolChain) {
         k_owns = {static_cast<uint32_t>(std::atoi(e))};
     }
     for (uint32_t k_own : k_owns) {
-        for (uint32_t v : {2u, 7u, 8u}) {
-            out << run_chain(mesh, k_own, ok, v) << "\n";
-            out.flush();
-        }
+        out << run_chain(mesh, k_own, ok, 8, 0, 0) << "\n";
+        out << run_chain(mesh, k_own, ok, 8, 0, 1) << "\n";
+        out << "drain: " << run_chain(mesh, k_own, ok, 8, 1, 1) << "\n";
+        out.flush();
     }
     mesh->close();
     EXPECT_TRUE(ok);

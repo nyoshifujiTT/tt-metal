@@ -37,6 +37,14 @@ void kernel_main() {
     constexpr uint32_t role = get_compile_time_arg_val(0);
     constexpr uint32_t Kt = get_compile_time_arg_val(1);
     constexpr uint32_t rounds = get_compile_time_arg_val(2);
+    constexpr bool kDrain = get_compile_time_arg_val(3) != 0;  // measurement build: drain before every stamp
+    // the owner adds a partial P (fp32 32-row tile, rows 0..1 valid) with the matmul itself: sel x P, sel the constant
+    // 2-row selector (row r = e_r, bf16, CB 5) -> rows r of P into the DEST accumulator.  P sits in SrcA as tf32 and
+    // HiFi2's phases 0 and 1 consume its implicit bit + 9 of its 10 mantissa bits (tt-isa-documentation SrcASrcB.md,
+    // "Fidelity phases": the last SrcA bit is consumed by no phase), one bit less than the ELWADD path; sel in SrcB is
+    // exact (1.0).  The matmul MOP stays programmed, so neither the add's init nor the matmul's re-init is needed
+    constexpr bool kSelAdd = get_compile_time_arg_val(4) != 0;
+    constexpr uint32_t cb_sel = 5;
     constexpr uint32_t cb_act = 0, cb_w = 1, cb_in_part = 2, cb_go = 3, cb_ready = 4, cb_out = 16, cb_part = 17;
     constexpr uint32_t cb_dst = role == 1 ? cb_part : cb_out;
     constexpr uint32_t in_slots = 3;  // cb_in_part always moves by its 3 pages a round, so its slots stay at fixed addresses
@@ -54,6 +62,9 @@ void kernel_main() {
         w_tiles += seg_kt[s];
     }
     cb_wait_front(cb_w, w_tiles);
+    if constexpr (role == 0 && kSelAdd) {
+        cb_wait_front(cb_sel, 1);
+    }
     volatile tt_l1_ptr uint32_t* ts = nullptr;
     // the unpack thread has only the read side of its CB interfaces set up (trisc.cc: cb_init_write on the pack thread
     // alone), so it takes the page from the read pointer, which equals the write pointer of the unpushed CB
@@ -63,7 +74,7 @@ void kernel_main() {
     for (uint32_t r = 0; r < rounds; ++r) {
         const bool st = r >= kStamp0 && r < kStamp0 + kStampRounds;
         const uint32_t sr = (r - kStamp0) * 8;
-        if constexpr (role == 0) {
+        if constexpr (role == 0 && !kSelAdd) {
             if (r > 0) {
                 reconfig_data_format<SrcOrder::Reverse>(cb_act, cb_w);
                 matmul_block_init(cb_act, cb_w, 0, 1, 1, Kt);
@@ -78,11 +89,21 @@ void kernel_main() {
                 ts[sr] = clock_low();
             }
         });
+        if constexpr (kDrain) {
+            // measurement only: wait for the coprocessor to finish what this thread pushed, so the stamps below are
+            // execution times (the TRISC otherwise runs ahead of the Tensix pipeline, worklog 14 I-1c-3)
+            UNPACK(tensix_sync());
+            MATH(tensix_sync());
+            PACK(tensix_sync());
+        }
         uint32_t w0 = 0;
         for (uint32_t s = 0; s < n_seg; ++s) {
             tile_regs_acquire();
             for (uint32_t k = 0; k < seg_kt[s]; ++k) {
                 matmul_block(cb_act, cb_w, seg_k0[s] + k, w0 + k, 0, 0, 1, 1, Kt);
+            }
+            if constexpr (kDrain) {
+                UNPACK(tensix_sync());
             }
             UNPACK({
                 if (st) {
@@ -97,23 +118,37 @@ void kernel_main() {
                         ts[sr + 1] = clock_low();
                     }
                 });
+                if constexpr (kSelAdd) {
+                    reconfig_data_format_srca(cb_in_part);
+                    for (uint32_t j = 0; j < n_in; ++j) {
+                        matmul_block(cb_sel, cb_in_part, 0, j, 0, 0, 1, 1, Kt);
+                    }
+                    reconfig_data_format_srca(cb_w);
+                } else {
                 reconfig_data_format_srca(cb_in_part);
                 reconfig_data_format_srcb(cb_in_part);
                 add_reuse_dest_init<EltwiseBinaryReuseDestType::DEST_TO_SRCB>(cb_in_part);
                 for (uint32_t j = 0; j < n_in; ++j) {
                     add_reuse_dest_tiles<EltwiseBinaryReuseDestType::DEST_TO_SRCB>(cb_in_part, j, 0);
                 }
+                }
                 cb_pop_front(cb_in_part, in_slots);
             }
             tile_regs_commit();
             cb_reserve_back(cb_dst, 1);
             tile_regs_wait();
+            if constexpr (kDrain) {
+                PACK(tensix_sync());
+            }
             PACK({
                 if (st) {
                     ts[64 + sr + s] = clock_low();
                 }
             });
             pack_tile(0, cb_dst);
+            if constexpr (kDrain) {
+                PACK(tensix_sync());
+            }
             tile_regs_release();
             cb_push_back(cb_dst, 1);
             PACK({
