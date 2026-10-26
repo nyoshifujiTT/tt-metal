@@ -35,6 +35,24 @@ bool wait_min(volatile tt_l1_ptr uint32_t* p, uint32_t v) {
     }
     return false;
 }
+bool wait_landed4(uint32_t slot) {
+    volatile tt_l1_ptr uint32_t* w = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(slot);
+    for (uint32_t i = 0; i < kSpin; ++i) {
+        invalidate_l1_cache();
+        if (w[96 / 4] != 0x7FC0DEADu && w[112 / 4] != 0x7FC0DEADu && w[(1024 + 96) / 4] != 0x7FC0DEADu &&
+            w[(1024 + 112) / 4] != 0x7FC0DEADu) {
+            return true;
+        }
+    }
+    return false;
+}
+void arm4(uint32_t slot) {
+    volatile tt_l1_ptr uint32_t* w = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(slot);
+    w[96 / 4] = 0x7FC0DEADu;
+    w[112 / 4] = 0x7FC0DEADu;
+    w[(1024 + 96) / 4] = 0x7FC0DEADu;
+    w[(1024 + 112) / 4] = 0x7FC0DEADu;
+}
 bool wait_tag4(volatile tt_l1_ptr uint32_t* a, volatile tt_l1_ptr uint32_t* b, uint32_t tag) {
     for (uint32_t i = 0; i < kSpin; ++i) {
         invalidate_l1_cache();
@@ -93,6 +111,11 @@ void kernel_main() {
     // same face (bytes 128..159 / 1152..1183: rows the 2-row output never reads), so a chunk's two tag lines land after
     // its data (one packet, the NIU's two write streams in ascending order, tt-isa-documentation NoC/Ordering.md)
     constexpr uint32_t sparse = get_compile_time_arg_val(3);
+    // sparse 2 (v9): the sender packs a 2-row fp32 tile (face 0 rows 0..1 at +0, face 1 rows 0..1 at +128), sends the two
+    // 128 B chunks to rows 0..1 of faces 0 / 1 of the owner's 32-row slot; the owner sees them land by a sentinel in the
+    // last 16 B line of each write stream of each chunk (offsets 96 / 112: within a stream the writes of one packet
+    // land in ascending address order, 16 B atomic -- tt-isa-documentation NoC/Ordering.md), re-armed every round
+    constexpr uint32_t kSentinel = 0x7FC0DEADu;
     constexpr uint32_t kChunk = 128, kFace1 = 1024;
     constexpr uint32_t cb_act = 0, cb_w = 1, cb_in_part = 2, cb_go = 3, cb_ready = 4, cb_out = 16, cb_part = 17, cb_stamp = 24;
     constexpr auto act_args = TensorAccessorArgs<5>();
@@ -144,8 +167,11 @@ void kernel_main() {
             // sparse: the slot starts all zero (rows 2..31 are never sent; zero keeps them finite in the add)
             if constexpr (sparse) {
                 volatile tt_l1_ptr uint32_t* w = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(in_base + j * part_page);
-                for (uint32_t q = 0; q < part_bytes / 4; ++q) {
+                for (uint32_t q = 0; q < 4096 / 4; ++q) {
                     w[q] = 0;
+                }
+                if constexpr (sparse == 2) {
+                    arm4(in_base + j * part_page);
                 }
             }
         }
@@ -178,7 +204,10 @@ void kernel_main() {
                 t_mid = reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L);
                 const uint32_t src = get_read_ptr(cb_part);
                 const uint32_t slot = in_base + seg_slot[s] * part_page;
-                if constexpr (sparse) {
+                if constexpr (sparse == 2) {
+                    noc_async_write(src, get_noc_addr(seg_x[s], seg_y[s], slot), kChunk);
+                    noc_async_write(src + kChunk, get_noc_addr(seg_x[s], seg_y[s], slot + kFace1), kChunk);
+                } else if constexpr (sparse) {
                     volatile tt_l1_ptr uint32_t* t0 = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(src + kChunk);
                     volatile tt_l1_ptr uint32_t* t1 = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(src + kFace1 + kChunk);
                     t0[0] = tag;
@@ -203,7 +232,9 @@ void kernel_main() {
             t_end = reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L);
         } else {
             for (uint32_t j = 0; j < n_in; ++j) {
-                if constexpr (sparse) {
+                if constexpr (sparse == 2) {
+                    errors += wait_landed4(in_base + j * part_page) ? 0 : 0x10000;
+                } else if constexpr (sparse) {
                     const uint32_t slot = in_base + j * part_page;
                     errors += wait_tag4(
                                   reinterpret_cast<volatile tt_l1_ptr uint32_t*>(slot + kChunk),
@@ -221,6 +252,13 @@ void kernel_main() {
             cb_push_back(cb_in_part, 3);
             cb_wait_front(cb_out, 1);
             t_end = reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L);
+            if constexpr (sparse == 2) {
+                // the add has read the slots (the column is packed): re-arm for the next round, whose senders write only
+                // after the next go, which needs this core's done
+                for (uint32_t j = 0; j < n_in; ++j) {
+                    arm4(in_base + j * part_page);
+                }
+            }
             if (r + 1 == rounds) {
                 noc_async_write_page(out_page, out, get_read_ptr(cb_out));
                 noc_async_write_barrier();

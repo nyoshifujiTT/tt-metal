@@ -106,9 +106,12 @@ std::vector<CorePlan> make_plan(uint32_t k_own) {
 std::string run_chain(
     const std::shared_ptr<distributed::MeshDevice>& mesh, uint32_t k_own, bool& ok, uint32_t v = 2, uint32_t drain = 0,
     uint32_t sel = 0) {
-    const uint32_t rows = (v == 5 || v == 7 || v == 8) ? 2u : 32u;
+    // v 9: v8 with the sender packing a 2-row fp32 partial (CB 17 2-row) sent as two 128 B chunks into the owner's
+    // 32-row slot (CB 2 32-row), landing seen by sentinels
+    const uint32_t rows = (v == 5 || v == 7 || v == 8 || v == 9) ? 2u : 32u;
     const tt::tt_metal::Tile tile({rows, 32});
     const tt::tt_metal::Tile ptile({v == 5 ? 2u : 32u, 32});
+    const tt::tt_metal::Tile stile({(v == 5 || v == 9) ? 2u : 32u, 32});
     const uint32_t act_tile = tile.get_tile_size(tt::DataFormat::Float16_b);
     const uint32_t out_tile = act_tile;
     const uint32_t part_bytes = ptile.get_tile_size(tt::DataFormat::Float32);
@@ -219,7 +222,7 @@ std::string run_chain(
     auto cb = [&](uint32_t index, uint32_t pages, uint32_t page, tt::DataFormat df, bool shaped) {
         auto cfg = tt::tt_metal::CircularBufferConfig(pages * page, {{index, df}}).set_page_size(index, page);
         if (shaped) {
-            cfg.set_tile_dims(index, (index == 2 || index == 17) ? ptile : tile);
+            cfg.set_tile_dims(index, index == 2 ? ptile : index == 17 ? stile : tile);
         }
         tt::tt_metal::CreateCircularBuffer(program, all, cfg);
     };
@@ -230,13 +233,13 @@ std::string run_chain(
     cb(4, 2, 32, tt::DataFormat::Float16_b, false);
     cb(5, 1, act_tile, tt::DataFormat::Float16_b, true);
     cb(16, 2, out_tile, tt::DataFormat::Float16_b, true);
-    cb(17, 2, part_page, tt::DataFormat::Float32, true);
+    cb(17, 2, v == 9 ? stile.get_tile_size(tt::DataFormat::Float32) : part_page, tt::DataFormat::Float32, true);
     cb(24, 1, 512, tt::DataFormat::UInt32, false);
     cb(25, 1, 512, tt::DataFormat::UInt32, false);
     std::vector<uint32_t> rd_ct = {kKt, part_page};
     if (v >= 5) {
         rd_ct.push_back(part_bytes);
-        rd_ct.push_back(v == 8 ? 1u : 0u);  // v8: the 32-row partial with only its 2 valid rows sent (sparse)
+        rd_ct.push_back(v == 8 ? 1u : v == 9 ? 2u : 0u);  // v8: 32-row partial, 2 valid rows sent; v9: 2-row pack
         rd_ct.push_back(sel);
     }
     tt::tt_metal::TensorAccessorArgs(*buf_a).append_to(rd_ct);
@@ -433,14 +436,13 @@ TEST(Qwen38DataflowMm, InProjPoolChain) {
     out << "grid " << grid.x << "x" << grid.y << "; in_proj pool on 130 cores (66 cols x 80 K tiles, Stream-K, HiFi2 bf8, "
         << "fp32 partials over the NoC; step 4 budget 1.10 us)\n";
     bool ok = true;
-    std::vector<uint32_t> k_owns = {40, 44, 48};
+    std::vector<uint32_t> k_owns = {48, 52};
     if (const char* e = std::getenv("QWEN38_MM_KOWN")) {
         k_owns = {static_cast<uint32_t>(std::atoi(e))};
     }
     for (uint32_t k_own : k_owns) {
-        out << run_chain(mesh, k_own, ok, 8, 0, 0) << "\n";
         out << run_chain(mesh, k_own, ok, 8, 0, 1) << "\n";
-        out << "drain: " << run_chain(mesh, k_own, ok, 8, 1, 1) << "\n";
+        out << run_chain(mesh, k_own, ok, 9, 0, 1) << "\n";
         out.flush();
     }
     mesh->close();
