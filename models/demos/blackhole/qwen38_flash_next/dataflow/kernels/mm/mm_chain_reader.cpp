@@ -17,6 +17,7 @@
 //   owner:  polls the trailers of its n_in slots for the round's tags, pushes cb_in_part (always its 3 pages, so that
 //           the slots keep the addresses every core computes from its own cb_in_part base), waits for the finished
 //           column (cb_out) and stamps it; on the last round it writes the column to the output buffer.
+// The compute kernel's per-thread stamps (CB 25, kernels/mm/mm_chain_compute.cpp) go to page n_cores + core.
 // Stamps of the first 40 rounds (one 512 B page per core): go seen; sender: its last partial packed, owner: all its
 // partials landed; sender: its last partial sent, owner: its column packed.
 #include <cstdint>
@@ -175,6 +176,9 @@ void kernel_main() {
             stamps[3 * r + 2] = t_end;
         }
     }
+    constexpr uint32_t cb_tstamp = 25;
+    cb_wait_front(cb_tstamp, 1);
+    noc_async_write_page(n_cores + stamp_page, st, get_read_ptr(cb_tstamp));
     stamps[127] = 0x600d0000u | (errors & 0xFFFFu) | (errors >> 16 ? 0x8000u : 0u);
     noc_async_write_page(stamp_page, st, get_write_ptr(cb_stamp));
     noc_async_write_barrier();

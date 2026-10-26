@@ -160,7 +160,7 @@ std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint
     auto buf_a = dram(kActTile, kKt * kActTile);
     auto buf_w = dram(kWTile, kNt * kKt * kWTile);
     auto buf_o = dram(kOutTile, kNt * kOutTile);
-    auto buf_st = dram(512, kCores * 512);
+    auto buf_st = dram(512, 2 * kCores * 512);
     distributed::EnqueueWriteMeshBuffer(cq, buf_a, a_tiled, false);
     distributed::EnqueueWriteMeshBuffer(cq, buf_w, w_bf8, false);
     tt::tt_metal::Program program;
@@ -185,6 +185,7 @@ std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint
     cb(16, 2, kOutTile, tt::DataFormat::Float16_b);
     cb(17, 2, kPartPage, tt::DataFormat::Float32);
     cb(24, 1, 512, tt::DataFormat::UInt32);
+    cb(25, 1, 512, tt::DataFormat::UInt32);
     std::vector<uint32_t> rd_ct = {kKt, kPartPage};
     tt::tt_metal::TensorAccessorArgs(*buf_a).append_to(rd_ct);
     tt::tt_metal::TensorAccessorArgs(*buf_w).append_to(rd_ct);
@@ -293,6 +294,29 @@ std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint
         sum_send += send_max;
         sum_land += land_max;
         ++cnt;
+    }
+    // raw stamps (I-1c-3): per core its role, place and segments, then for rounds 8..15 the reader's (go, mid, end), the
+    // unpack thread's (go seen, partials seen, segment issues 0..2) and the pack thread's (math done 0..2, packed 0..2)
+    if (const char* raw_path = std::getenv("QWEN38_MM_RAW")) {
+        std::ofstream raw(std::string(raw_path) + "." + std::to_string(k_own));
+        for (uint32_t i = 0; i < kCores; ++i) {
+            const auto& p = plan[i];
+            raw << "core " << i << " role " << p.role << " x " << p.core.x << " y " << p.core.y << " n_in " << p.n_in
+                << " segs";
+            for (const auto& sg : p.segs) {
+                raw << " " << sg.col << ":" << sg.k0 << "+" << sg.kt;
+            }
+            raw << "\n";
+            const uint32_t* ct = &st[(kCores + i) * 128];
+            for (uint32_t r = 8; r < 16; ++r) {
+                const uint32_t* rs = &st[i * 128 + 3 * r];
+                const uint32_t* u = &ct[(r - 8) * 8];
+                const uint32_t* pk = &ct[64 + (r - 8) * 8];
+                raw << " r " << r << " rd " << rs[0] << " " << rs[1] << " " << rs[2] << " up " << u[0] << " " << u[1] << " "
+                    << u[2] << " " << u[3] << " " << u[4] << " pk " << pk[0] << " " << pk[1] << " " << pk[2] << " " << pk[4]
+                    << " " << pk[5] << " " << pk[6] << "\n";
+            }
+        }
     }
     // accuracy
     const auto out_rm = untilize_nfaces(out, kM, N);

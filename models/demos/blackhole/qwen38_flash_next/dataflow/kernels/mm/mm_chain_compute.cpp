@@ -22,6 +22,15 @@
 #include "api/compute/cb_api.h"
 #include "api/compute/reconfig_data_format.h"
 
+namespace {
+// the per-thread stamps of rounds kStamp0 .. kStamp0 + 7 (worklog 14 I-1c-3), in the one-page CB 25 that the pack thread
+// pushes at the end for the reader to copy: unpack words [8 r + 0] go seen, [+1] partials seen (owner), [+2 + s] the
+// segment's unpacks issued; pack words [64 + 8 r + s] the segment's math done (tile_regs_wait returned), [64 + 8 r + 4 + s]
+// the segment's tile packed and pushed
+constexpr uint32_t kStamp0 = 8, kStampRounds = 8, cb_tstamp = 25;
+inline uint32_t clock_low() { return *reinterpret_cast<volatile uint32_t tt_reg_ptr*>(RISCV_DEBUG_REG_WALL_CLOCK_L); }
+}  // namespace
+
 void kernel_main() {
     constexpr uint32_t role = get_compile_time_arg_val(0);
     constexpr uint32_t Kt = get_compile_time_arg_val(1);
@@ -43,7 +52,14 @@ void kernel_main() {
         w_tiles += seg_kt[s];
     }
     cb_wait_front(cb_w, w_tiles);
+    volatile tt_l1_ptr uint32_t* ts = nullptr;
+    // the unpack thread has only the read side of its CB interfaces set up (trisc.cc: cb_init_write on the pack thread
+    // alone), so it takes the page from the read pointer, which equals the write pointer of the unpushed CB
+    UNPACK({ ts = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_local_cb_interface(cb_tstamp).fifo_rd_ptr << cb_addr_shift); });
+    PACK({ ts = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_local_cb_interface(cb_tstamp).fifo_wr_ptr << cb_addr_shift); });
     for (uint32_t r = 0; r < rounds; ++r) {
+        const bool st = r >= kStamp0 && r < kStamp0 + kStampRounds;
+        const uint32_t sr = (r - kStamp0) * 8;
         if constexpr (role == 0) {
             reconfig_data_format<SrcOrder::Reverse>(cb_act, cb_w);
         }
@@ -52,15 +68,30 @@ void kernel_main() {
         cb_push_back(cb_ready, 1);
         cb_wait_front(cb_go, 1);
         cb_pop_front(cb_go, 1);
+        UNPACK({
+            if (st) {
+                ts[sr] = clock_low();
+            }
+        });
         uint32_t w0 = 0;
         for (uint32_t s = 0; s < n_seg; ++s) {
             tile_regs_acquire();
             for (uint32_t k = 0; k < seg_kt[s]; ++k) {
                 matmul_block(cb_act, cb_w, seg_k0[s] + k, w0 + k, 0, 0, 1, 1, Kt);
             }
+            UNPACK({
+                if (st) {
+                    ts[sr + 2 + s] = clock_low();
+                }
+            });
             w0 += seg_kt[s];
             if constexpr (role == 0) {
                 cb_wait_front(cb_in_part, in_slots);
+                UNPACK({
+                    if (st) {
+                        ts[sr + 1] = clock_low();
+                    }
+                });
                 reconfig_data_format_srca(cb_in_part);
                 reconfig_data_format_srcb(cb_in_part);
                 add_reuse_dest_init<EltwiseBinaryReuseDestType::DEST_TO_SRCB>(cb_in_part);
@@ -72,9 +103,21 @@ void kernel_main() {
             tile_regs_commit();
             cb_reserve_back(cb_dst, 1);
             tile_regs_wait();
+            PACK({
+                if (st) {
+                    ts[64 + sr + s] = clock_low();
+                }
+            });
             pack_tile(0, cb_dst);
             tile_regs_release();
             cb_push_back(cb_dst, 1);
+            PACK({
+                if (st) {
+                    ts[64 + sr + 4 + s] = clock_low();
+                }
+            });
         }
     }
+    cb_reserve_back(cb_tstamp, 1);
+    cb_push_back(cb_tstamp, 1);
 }
