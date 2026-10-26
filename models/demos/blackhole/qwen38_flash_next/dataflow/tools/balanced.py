@@ -61,6 +61,18 @@ res = linprog(c, A_ub=A.tocsr(), b_ub=np.zeros(len(rows)), A_eq=Aeq.tocsr(), b_e
 assert res.status == 0, res.message
 L = res.x[-1]
 print(f'S {S}: LP max link utilisation {L:.3f} at the bank bound (100%)')
+# stage 2 (optional, argv[4] = cap factor): keep every load <= cap x the optimum and minimise the total link load
+# (bytes x hops: shorter paths, fewer flows merging on a link)
+CAP = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0
+if CAP > 0:
+    hops = np.zeros(nv)
+    for vi, (ci, b, e, n) in enumerate(var):
+        hops[vi] = len(m.path(banks[b][e], w[cores[ci]], n))
+    bounds = [(0, None)] * (nv - 1) + [(0, L * CAP)]
+    res2 = linprog(hops, A_ub=A.tocsr(), b_ub=np.zeros(len(rows)), A_eq=Aeq.tocsr(), b_eq=beq, bounds=bounds, method='highs')
+    assert res2.status == 0, res2.message
+    print(f'stage 2: cap {CAP} x {L:.3f}; total hop-bytes {res.x[:-1] @ hops[:-1]:.3e} -> {res2.x[:-1] @ hops[:-1]:.3e}, max util {res2.x[-1]:.3f}')
+    res = res2
 per = collections.defaultdict(list)
 for vi, (ci, b, e, n) in enumerate(var):
     if res.x[vi] > 1e-6:
@@ -89,25 +101,50 @@ def bank_tot():
 for it in range(100000):
     t = bank_tot()
     over = max(t, key=lambda b: t[b] - target)
-    under = min(t, key=lambda b: t[b] - target)
-    if t[over] - target < G and target - t[under] < G:
+    if t[over] - target < G:
         break
-    moved = False
-    # a two-segment core with one segment in `over`: shift G to its other segment, preferring one in `under`
-    cands = [(ci, ss) for ci, ss in segs.items() if len(ss) == 2 and any(s_[0] == over and s_[3] > G for s_ in ss)]
-    cands.sort(key=lambda t_: 0 if any(s_[0] == under for s_ in t_[1]) else 1)
-    for ci, ss in cands:
-        i = 0 if ss[0][0] == over else 1
-        j = 1 - i
-        if t[ss[j][0]] - target >= 0 and ss[j][0] != under:
-            continue
-        a = list(ss[i]); b2 = list(ss[j])
-        a[3] -= G; b2[3] += G
-        segs[ci] = [tuple(a), tuple(b2)] if i == 0 else [tuple(b2), tuple(a)]
-        moved = True
+    # move G from `over` toward any bank below target along a chain of two-segment cores (an edge b1-b2 = a core
+    # holding segments in both: it can shift a granule from b1 to b2 keeping its own total), shortest chain first
+    edges = collections.defaultdict(list)
+    for ci, ss in segs.items():
+        if len(ss) == 2 and ss[0][0] != ss[1][0]:
+            edges[ss[0][0]].append((ss[1][0], ci))
+            edges[ss[1][0]].append((ss[0][0], ci))
+    prev = {over: None}
+    queue = collections.deque([over])
+    goal = None
+    while queue:
+        u = queue.popleft()
+        if u != over and t[u] - target <= -G:
+            goal = u
+            break
+        for v_, ci in edges[u]:
+            if v_ not in prev:
+                prev[v_] = (u, ci)
+                queue.append(v_)
+    if goal is None:
         break
-    if not moved:
+    v_ = goal
+    ok_ = True
+    path_ = []
+    while prev[v_] is not None:
+        u, ci = prev[v_]
+        path_.append((u, v_, ci))
+        v_ = u
+    for u, v_, ci in path_:
+        ss = segs[ci]
+        i_ = 0 if ss[0][0] == u else 1
+        if ss[i_][3] <= G:
+            ok_ = False
+            break
+    if not ok_:
         break
+    for u, v_, ci in path_:
+        ss = segs[ci]
+        i_ = 0 if ss[0][0] == u else 1
+        a_ = list(ss[i_]); b_ = list(ss[1 - i_])
+        a_[3] -= G; b_[3] += G
+        segs[ci] = [tuple(a_), tuple(b_)] if i_ == 0 else [tuple(b_), tuple(a_)]
 print('bank imbalance after balancing (bytes over target):', {b: v - target for b, v in sorted(bank_tot().items())})
 load = collections.Counter()
 bank = collections.Counter()

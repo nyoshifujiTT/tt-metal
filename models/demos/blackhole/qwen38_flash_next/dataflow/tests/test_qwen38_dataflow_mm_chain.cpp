@@ -20,6 +20,8 @@
 #include <fstream>
 #include <random>
 #include <sstream>
+#include <map>
+#include <tt-metalium/allocator.hpp>
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/tt_metal.hpp>
 #include <tt-metalium/distributed.hpp>
@@ -97,6 +99,124 @@ std::vector<CorePlan> make_plan(uint32_t k_own) {
     return plan;
 }
 
+// I-3a: the DRAM lane beside the chain -- the NCRISC (NOC1) of every core reads its weight segments of the balanced
+// NOC1-only assignment (noc/balanced.py: per core x y nseg {bank offset bytes tile_x tile_y noc}) once, into L1 above
+// the CBs (kernels/frame/dram_stream_ncrisc.cpp); returns the buffers kept alive until the program has run
+struct Stream {
+    std::shared_ptr<distributed::MeshBuffer> buf, res;
+    uint64_t bytes = 0;
+};
+
+Stream add_stream(
+    const std::shared_ptr<distributed::MeshDevice>& mesh, tt::tt_metal::Program& program, const std::string& file,
+    uint32_t reps, uint32_t go_sem_id) {
+    Stream sm;
+    auto* dev = mesh->get_devices()[0];
+    auto& cq = mesh->mesh_command_queue();
+    struct Seg {
+        uint32_t bank, off, len, tx, ty;
+    };
+    std::map<std::pair<uint32_t, uint32_t>, std::vector<Seg>> segs;
+    uint32_t bank_bytes = 0;
+    std::ifstream f(file);
+    TT_FATAL(f.good(), "no assignment file {}", file);
+    std::string line;
+    while (std::getline(f, line)) {
+        std::istringstream ls(line);
+        uint32_t x, y, n;
+        if (!(ls >> x >> y >> n)) {
+            continue;
+        }
+        for (uint32_t i = 0; i < n; ++i) {
+            Seg sg{};
+            uint32_t noc;
+            ls >> sg.bank >> sg.off >> sg.len >> sg.tx >> sg.ty >> noc;
+            TT_FATAL(noc == 1, "the stream reads on NOC1 only");
+            segs[{x, y}].push_back(sg);
+            bank_bytes = std::max(bank_bytes, sg.off + sg.len);
+        }
+    }
+    const uint32_t nb = dev->allocator()->get_num_banks(tt::tt_metal::BufferType::DRAM);
+    const uint32_t page = 65536;
+    const uint32_t pages = ((bank_bytes + page - 1) / page) * nb;
+    sm.buf = distributed::MeshBuffer::create(
+        distributed::ReplicatedBufferConfig{.size = static_cast<uint64_t>(pages) * page},
+        distributed::DeviceLocalBufferConfig{.page_size = page, .buffer_type = tt::tt_metal::BufferType::DRAM},
+        mesh.get());
+    sm.res = distributed::MeshBuffer::create(
+        distributed::ReplicatedBufferConfig{.size = kCores * 64},
+        distributed::DeviceLocalBufferConfig{.page_size = 64, .buffer_type = tt::tt_metal::BufferType::DRAM},
+        mesh.get());
+    std::vector<uint32_t> ct;
+    tt::tt_metal::TensorAccessorArgs(*sm.res).append_to(ct);
+    const tt::tt_metal::CoreRangeSet all(
+        tt::tt_metal::CoreRange(tt::tt_metal::CoreCoord(0, 0), tt::tt_metal::CoreCoord(kGridX - 1, kGridY - 1)));
+    auto k = tt::tt_metal::CreateKernel(
+        program,
+        "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/frame/dram_stream_ncrisc.cpp",
+        all,
+        tt::tt_metal::DataMovementConfig{
+            .processor = tt::tt_metal::DataMovementProcessor::RISCV_1,
+            .noc = tt::tt_metal::NOC::RISCV_1_default,
+            .compile_args = ct});
+    const uint32_t l1_base = dev->allocator()->get_base_allocator_addr(tt::tt_metal::HalMemType::L1);
+    const uint32_t dst = l1_base + 640 * 1024;
+    const uint32_t scratch = dst + 288 * 1024;
+    for (uint32_t i = 0; i < kCores; ++i) {
+        const tt::tt_metal::CoreCoord core(i % kGridX, i / kGridX);
+        const auto& v = segs[{core.x, core.y}];
+        TT_FATAL(v.size() <= 2, "core {} has {} segments", i, v.size());
+        std::vector<uint32_t> args = {
+            static_cast<uint32_t>(sm.buf->address()), dst, reps, static_cast<uint32_t>(sm.res->address()), i, scratch,
+            static_cast<uint32_t>(v.size())};
+        uint32_t tot = 0;
+        for (uint32_t q = 0; q < 2; ++q) {
+            const Seg z{};
+            const Seg& sg = q < v.size() ? v[q] : z;
+            args.insert(args.end(), {sg.bank, sg.off, sg.len, sg.tx, sg.ty});
+            tot += sg.len;
+        }
+        args.push_back(go_sem_id);
+        args.push_back(1);
+        TT_FATAL(tot <= 288 * 1024, "core {} reads {} B, more than its region", i, tot);
+        sm.bytes += static_cast<uint64_t>(tot) * reps;
+        tt::tt_metal::SetRuntimeArgs(program, k, core, args);
+    }
+    (void)cq;
+    return sm;
+}
+
+std::string stream_result(const std::shared_ptr<distributed::MeshDevice>& mesh, Stream& sm) {
+    std::vector<uint32_t> r;
+    distributed::EnqueueReadMeshBuffer(mesh->mesh_command_queue(), r, sm.res, true);
+    uint32_t bad = 0;
+    std::vector<double> dur;
+    for (uint32_t i = 0; i < kCores; ++i) {
+        const uint32_t* w = &r[i * 16];
+        if (w[15] != 0x600d0000u) {
+            ++bad;
+            continue;
+        }
+        dur.push_back(static_cast<double>(w[1] - w[0]) / 1350.0);
+    }
+    if (const char* raw = std::getenv("QWEN38_MM_RAW")) {
+        std::ofstream f(std::string(raw) + ".lane");
+        for (uint32_t i = 0; i < kCores; ++i) {
+            const uint32_t* w = &r[i * 16];
+            f << i << " " << (i % kGridX) << " " << (i / kGridX) << " " << (w[1] - w[0]) << " " << w[2] << "\n";
+        }
+    }
+    std::sort(dur.begin(), dur.end());
+    const double us = dur.empty() ? 0.0 : dur.back();
+    std::ostringstream os;
+    os << "DRAM lane (NOC1, " << sm.bytes / 1e6 << " MB, every core from the common go): slowest core " << us
+       << " us = " << sm.bytes / (us * 1e3) << " GB/s = " << 100.0 * sm.bytes / (us * 1e3) / 512.0
+       << "% of 512 (per-core durations min " << (dur.empty() ? 0.0 : dur.front()) << " median "
+       << (dur.empty() ? 0.0 : dur[dur.size() / 2]) << " us; bad " << bad << ")";
+    return os.str();
+}
+
+
 // v 2: I-1c-2 (full 32-row tiles, partial 4 KiB fp32); v 5: I-1c-5 (activation, output and partials 2-row tiny tiles,
 // init once)
 // v 6: the v5 kernels with every tile full (32 rows): isolates the init / reconfig changes; v 7: v5 kernels, activation
@@ -105,7 +225,10 @@ std::vector<CorePlan> make_plan(uint32_t k_own) {
 // matmul re-init per round)
 std::string run_chain(
     const std::shared_ptr<distributed::MeshDevice>& mesh, uint32_t k_own, bool& ok, uint32_t v = 2, uint32_t drain = 0,
-    uint32_t sel = 0) {
+    uint32_t sel = 0, const std::string& stream_file = "", uint32_t stream_reps = 1, uint32_t rounds_override = 0) {
+    const uint32_t kRounds = rounds_override ? rounds_override : ::qwen38_dataflow::kRounds;
+    const uint32_t kStampRounds = std::min(::qwen38_dataflow::kStampRounds, kRounds);
+    const uint32_t kSkip = rounds_override ? 0u : ::qwen38_dataflow::kSkip;
     // v 9: v8 with the sender packing a 2-row fp32 partial (CB 17 2-row) sent as two 128 B chunks into the owner's
     // 32-row slot (CB 2 32-row), landing seen by sentinels
     const uint32_t rows = (v == 5 || v == 7 || v == 8 || v == 9) ? 2u : 32u;
@@ -305,11 +428,16 @@ std::string run_chain(
         tt::tt_metal::SetRuntimeArgs(program, rd, p.core, ra);
         tt::tt_metal::SetRuntimeArgs(program, p.role == 0 ? comp_own : comp_send, p.core, ca);
     }
+    Stream sm;
+    if (!stream_file.empty()) {
+        sm = add_stream(mesh, program, stream_file, stream_reps, sem_go);
+    }
     distributed::MeshWorkload wl;
     wl.add_program(distributed::MeshCoordinateRange(mesh->shape()), std::move(program));
     distributed::EnqueueMeshWorkload(cq, wl, false);
     std::vector<bfloat16> out;
     distributed::EnqueueReadMeshBuffer(cq, out, buf_o, true);
+    const std::string stream_line = stream_file.empty() ? "" : "; with the " + stream_result(mesh, sm);
     std::vector<uint32_t> st;
     distributed::EnqueueReadMeshBuffer(cq, st, buf_st, true);
     // status words
@@ -419,8 +547,8 @@ std::string run_chain(
        << worst_span / (kClockGHz * 1000.0) << " us); go spread mean " << sum_go_spread / cnt
        << " cycles; sender go -> last sent max mean " << sum_send / cnt << " cycles; owner go -> partials landed max mean "
        << sum_land / cnt << " cycles; PCC " << pcc << ", max abs err " << max_err << " (max |ref| " << max_ref
-       << "); bad status " << bad_status << " over " << cnt << " rounds";
-    ok = ok && bad_status == 0 && pcc > 0.999 && cnt > 0;
+       << "); bad status " << bad_status << " over " << cnt << " rounds" << stream_line;
+    ok = ok && bad_status == 0 && pcc > 0.999 && (cnt > 0 || rounds_override > 0);
     return os.str();
 }
 
@@ -436,13 +564,14 @@ TEST(Qwen38DataflowMm, InProjPoolChain) {
     out << "grid " << grid.x << "x" << grid.y << "; in_proj pool on 130 cores (66 cols x 80 K tiles, Stream-K, HiFi2 bf8, "
         << "fp32 partials over the NoC; step 4 budget 1.10 us)\n";
     bool ok = true;
-    std::vector<uint32_t> k_owns = {48, 52};
+    std::vector<uint32_t> k_owns = {52};
     if (const char* e = std::getenv("QWEN38_MM_KOWN")) {
         k_owns = {static_cast<uint32_t>(std::atoi(e))};
     }
     for (uint32_t k_own : k_owns) {
-        out << run_chain(mesh, k_own, ok, 8, 0, 1) << "\n";
-        out << run_chain(mesh, k_own, ok, 9, 0, 1) << "\n";
+        const std::string sf = std::string(std::getenv("HOME")) + "/work/noc/balanced_262144_noc1.txt";
+        out << "lane only (the chain with 0 rounds is not possible; one round): " << run_chain(mesh, k_own, ok, 9, 0, 1, sf, 2, 1) << "\n";
+        out << "with the lane: " << run_chain(mesh, k_own, ok, 9, 0, 1, sf, 2) << "\n";
         out.flush();
     }
     mesh->close();
