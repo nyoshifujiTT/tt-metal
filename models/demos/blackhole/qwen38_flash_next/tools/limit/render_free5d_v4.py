@@ -762,7 +762,7 @@ hop 280 ns を 1 / 2 / 4 倍にしたときの最良は PP{bestsens(1.0)[0]}×TP
 ### 11.9 生成・検証・運用
 
 - 生成: `routing_census.py`（CPU oracle、34 item）→ `routing_stats.py` → `routing/stats.json`、`design/census_stage2_batches.py` → `routing/stats_stage2.json`；`run_free5d_v4.sh`（`free5d_v4.py routing/stats.json <ctx> <out> [k1]`: ctx 192 は 4 ケース × k 0/1、他の ctx は k=1、7 ctx 並列）→ `render_free5d_v4.py` → 本節；`install_free5d_v4.sh` が README の §11 を差し替える。
-- 検証: 同じ入力から最初から再生成し、stats・results・README が byte 一致（`sha256sum -c routing/H*.sha256`）、`git status` が空、本文を通読して訂正点ゼロになるまで周回する。訂正があれば最初から。
+- 検証: 同じ入力から最初から再生成し、stats・stats_stage2・results・design・README が byte 一致（`sha256sum -c routing/V4.sha256`、`scripts/cycle_v4.sh` が census → 列挙 → 設計 → 設置 → 検算を 1 周する）、`git status` が空、本文を通読して訂正点ゼロになるまで周回する。訂正があれば最初から。
 - 運用: 作業記録は追記専用・日本語・実時間 UTC、ユーザの発言と答え（誤答も）を 1 往復ごとに記録する。README は「現在の確定状態」だけを書き、誤りは上書きで直す。数値・順位は生成値だけ。限界に実測値を入れない。
 
 """
