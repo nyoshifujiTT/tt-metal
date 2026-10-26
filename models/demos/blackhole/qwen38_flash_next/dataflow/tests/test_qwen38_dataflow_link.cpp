@@ -9,6 +9,7 @@
 // over both cores of the link at once (kernels/link_stream_erisc.cpp), and reports each channel's sustained rate (the
 // receiver's first-to-last arrival) and the sum.  Accuracy: every packet's sequence word arrives in order.
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <map>
@@ -43,11 +44,12 @@ double run_stream(
     uint32_t n,
     uint32_t run_id,
     std::vector<double>& per_channel,
-    std::string& error) {
+    std::string& error,
+    uint32_t slots = 8,
+    std::vector<double>* ns_per_packet = nullptr) {
     const auto& hal = tt::tt_metal::MetalContext::instance().hal();
     const uint32_t base =
         hal.get_dev_addr(tt::tt_metal::HalProgrammableCoreType::ACTIVE_ETH, tt::tt_metal::HalL1MemAddrType::UNRESERVED);
-    const uint32_t slots = 8;
     std::map<int, tt::tt_metal::Program> programs;
     std::map<int, std::vector<std::pair<tt::tt_metal::CoreCoord, uint32_t>>> cores;
     for (const auto& c : active) {
@@ -77,8 +79,9 @@ double run_stream(
     }
     std::vector<std::thread> threads;
     for (auto& [ch, wl] : workloads) {
-        threads.emplace_back(
-            [&, ch] { distributed::EnqueueMeshWorkload(meshes.at(ch)->mesh_command_queue(), workloads.at(ch), true); });
+        threads.emplace_back([&, ch] {
+            distributed::EnqueueMeshWorkload(meshes.at(ch)->mesh_command_queue(), workloads.at(ch), true);
+        });
     }
     for (auto& th : threads) {
         th.join();
@@ -93,14 +96,17 @@ double run_stream(
         tt::tt_metal::detail::ReadFromDeviceL1(rdev, c.peer_core, base + kResult, 32, r, tt::CoreType::ETH);
         if (s[0] != 0x600d0000u || r[4] != 0x600d0000u) {
             error += "core (" + std::to_string(c.core.x) + "," + std::to_string(c.core.y) + ") sender state " +
-                     std::to_string(s[0]) + " at " + std::to_string(s[1]) + ", receiver state " + std::to_string(r[4]) +
-                     " at " + std::to_string(r[5]) + "; ";
+                     std::to_string(s[0]) + " at " + std::to_string(s[1]) + ", receiver state " +
+                     std::to_string(r[4]) + " at " + std::to_string(r[5]) + "; ";
             per_channel.push_back(0);
             continue;
         }
         const double cycles = static_cast<double>(r[6] - r[5]);
         const double gbps = (static_cast<double>(n - 1) * bytes) / (cycles / 1.35);
         per_channel.push_back(gbps);
+        if (ns_per_packet) {
+            ns_per_packet->push_back(cycles / 1.35 / (n - 1));
+        }
         total += gbps;
     }
     return total;
@@ -132,8 +138,7 @@ TEST(Qwen38DataflowLink, ChannelsPerDirection) {
     bool ok = true;
     for (auto& [peer, chans] : toward) {
         for (uint32_t bytes : {2048u + 32u, 4096u + 32u}) {
-            const uint32_t n =
-                100000;  // the stream register credit is 17 bits wide (REMOTE_DEST_WORDS_FREE_WIDTH): stay below 131072
+            const uint32_t n = 100000;  // the stream register credit is 17 bits wide (REMOTE_DEST_WORDS_FREE_WIDTH): stay below 131072
             std::vector<double> per;
             for (size_t i = 0; i < chans.size(); ++i) {
                 std::string err;
@@ -151,6 +156,54 @@ TEST(Qwen38DataflowLink, ChannelsPerDirection) {
                 out << v << " ";
             }
             out << ")" << (err.empty() ? "" : " ERROR " + err) << "\n";
+            out.flush();
+            ok = ok && err.empty();
+        }
+    }
+    for (auto& [id, m] : meshes) {
+        m->close();
+    }
+    EXPECT_TRUE(ok);
+}
+
+// the per-packet cost of one channel: packets of 256 .. 4,096 B of data (+ 32 B: the sequence word's 16 B line and 16
+// B of the frame) with a credit window of at least 64 KiB (so the window never limits); ns per packet = a + bytes / B
+// gives the line overhead per packet (a x B) and the channel rate B
+TEST(Qwen38DataflowLink, PacketSizes) {
+    std::vector<int> ids(32);
+    for (int i = 0; i < 32; ++i) {
+        ids[i] = i;
+    }
+    auto meshes = distributed::MeshDevice::create_unit_meshes(ids, DEFAULT_L1_SMALL_SIZE, DEFAULT_TRACE_REGION_SIZE, 1);
+    std::map<int, std::shared_ptr<distributed::MeshDevice>> by_id;
+    for (auto& [id, m] : meshes) {
+        by_id[id] = m;
+    }
+    const auto& cluster = tt::tt_metal::MetalContext::instance().get_cluster();
+    const int chip = 0;
+    std::map<int, std::vector<Channel>> toward;
+    for (const auto& [chan, remote] : cluster.get_ethernet_connections().at(chip)) {
+        const auto& [rchip, rchan] = remote;
+        const auto core = cluster.get_soc_desc(chip).get_eth_core_for_channel(chan, tt::CoordSystem::LOGICAL);
+        const auto rcore = cluster.get_soc_desc(rchip).get_eth_core_for_channel(rchan, tt::CoordSystem::LOGICAL);
+        toward[rchip].push_back(
+            {tt::tt_metal::CoreCoord(core.x, core.y), rchip, tt::tt_metal::CoreCoord(rcore.x, rcore.y)});
+    }
+    const char* out_path = std::getenv("QWEN38_LINK_OUT");
+    std::ofstream out(std::string(out_path ? out_path : "/tmp/qwen38_link.txt") + ".sizes");
+    uint32_t run_id = 0x11c50000;
+    bool ok = true;
+    for (auto& [peer, chans] : toward) {
+        for (uint32_t data : {256u, 512u, 1024u, 2048u, 4096u}) {
+            const uint32_t bytes = data + 32;
+            const uint32_t slots = std::max<uint32_t>(8, (65536 + bytes - 1) / bytes);
+            std::vector<double> per, ns;
+            std::string err;
+            run_stream(by_id, chip, {chans[0]}, bytes, 100000, ++run_id, per, err, slots, &ns);
+            out << "chip " << chip << " -> " << peer << " core (" << chans[0].core.x << "," << chans[0].core.y
+                << ") packet " << bytes << " B, window " << slots << " x " << bytes << " B: "
+                << (ns.empty() ? 0 : ns[0]) << " ns/packet, " << (per.empty() ? 0 : per[0]) << " GB/s"
+                << (err.empty() ? "" : " ERROR " + err) << "\n";
             out.flush();
             ok = ok && err.empty();
         }
