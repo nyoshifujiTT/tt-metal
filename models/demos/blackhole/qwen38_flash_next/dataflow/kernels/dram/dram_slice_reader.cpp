@@ -53,18 +53,25 @@ void kernel_main() {
     const uint32_t vc = get_arg_val<uint32_t>(a++);     // mode 1: the request VC
     // mode 2: the slice as up to 2 segments (bank, byte offset in the buffer's bank region, bytes), each read with one
     // noc_async_read (worklog 14 I-1b': the link-load LP's assignment of slices to banks)
+    // each segment can name its endpoint tile (translated coordinates; 0 = the bank's default NOC0 endpoint) and its
+    // NoC (the response path: NOC0 right then down, NOC1 up then left; translated coordinates address the same tile
+    // from both NoCs on Blackhole)
     const uint32_t nseg = get_arg_val<uint32_t>(a++);
-    uint32_t sb[2], so[2], sl[2];
+    constexpr uint32_t role = get_compile_time_arg_val(0);  // 0: BRISC (NOC0, the round sync), 1: NCRISC (NOC1 segments)
+    uint32_t sb[2], so[2], sl[2], sx[2], sy[2], sn[2];
     for (uint32_t i = 0; i < 2; ++i) {
         sb[i] = get_arg_val<uint32_t>(a++);
         so[i] = get_arg_val<uint32_t>(a++);
         sl[i] = get_arg_val<uint32_t>(a++);
+        sx[i] = get_arg_val<uint32_t>(a++);
+        sy[i] = get_arg_val<uint32_t>(a++);
+        sn[i] = get_arg_val<uint32_t>(a++);
     }
-    // mode 2 with an explicit endpoint tile (translated coordinates; 0 = the bank's default NOC0 endpoint): the
-    // row-local assignment reads every bank through the tile in the reader's own NOC0 row
-    const uint32_t ep_x = get_arg_val<uint32_t>(a++);
-    const uint32_t ep_y = get_arg_val<uint32_t>(a++);
-    constexpr auto out_args = TensorAccessorArgs<0>();
+    const uint32_t sem_local = get_semaphore(get_arg_val<uint32_t>(a++));
+    // reads of the slice per round, back to back without any sync between them (a round of `chain` reads after one go
+    // measures the stream without the per-round go / done cost)
+    const uint32_t chain = get_arg_val<uint32_t>(a++);
+    constexpr auto out_args = TensorAccessorArgs<1>();
     const auto out = TensorAccessor(out_args, out_addr);
     volatile tt_l1_ptr uint32_t* go = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(sem_go);
     volatile tt_l1_ptr uint32_t* done = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(sem_done);
@@ -79,6 +86,35 @@ void kernel_main() {
     uint32_t errors = 0;
     for (uint32_t i = 0; i < 64; ++i) {
         res[i] = 0;
+    }
+    // the NCRISC's per-round count of its NOC1 segments, a semaphore (host-initialised to 0) the BRISC polls locally
+    volatile tt_l1_ptr uint32_t* local_sync = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(sem_local);
+    if constexpr (role == 1) {
+        uint32_t has = 0;
+        for (uint32_t i = 0; i < nseg; ++i) {
+            has |= (sn[i] == 1) ? 1u : 0u;
+        }
+        for (uint32_t r = 0; r < rounds; ++r) {
+            wait_min(go, r + 1);
+            if (has && mode == 2) {
+                for (uint32_t q = 0; q < chain; ++q) {
+                    uint32_t d = dst;
+                    for (uint32_t i = 0; i < nseg; ++i) {
+                        if (sn[i] == 1) {
+                            uint64_t a64 = get_noc_addr_from_bank_id<true>(sb[i], buf_addr + so[i]);
+                            if (sx[i] != 0) {
+                                a64 = get_noc_addr(sx[i], sy[i], 0) | (a64 & ((1ull << NOC_ADDR_LOCAL_BITS) - 1));
+                            }
+                            noc_async_read(a64, d, sl[i]);
+                        }
+                        d += sl[i];
+                    }
+                }
+                noc_async_read_barrier();
+            }
+            *local_sync = r + 1;
+        }
+        return;
     }
     for (uint32_t r = 0; r < rounds; ++r) {
         if (go_core) {
@@ -97,15 +133,26 @@ void kernel_main() {
                 noc_async_read_barrier();
             } else if (mode == 2) {
                 uint32_t d = dst;
-                for (uint32_t i = 0; i < nseg; ++i) {
-                    uint64_t a64 = get_noc_addr_from_bank_id<true>(sb[i], buf_addr + so[i]);
-                    if (ep_x != 0) {
-                        a64 = get_noc_addr(ep_x, ep_y, 0) | (a64 & ((1ull << NOC_ADDR_LOCAL_BITS) - 1));
+                // this RISC reads its own NoC's segments (a RISC issues only on its dedicated NoC: the firmware sets up
+                // the counters of that NoC alone, brisc.cc noc_local_state_init(noc_index)); the other RISC reads the rest
+                for (uint32_t q = 0; q < chain; ++q) {
+                    d = dst;
+                    for (uint32_t i = 0; i < nseg; ++i) {
+                        if (sn[i] == role) {
+                            uint64_t a64 = get_noc_addr_from_bank_id<true>(sb[i], buf_addr + so[i]);
+                            if (sx[i] != 0) {
+                                a64 = get_noc_addr(sx[i], sy[i], 0) | (a64 & ((1ull << NOC_ADDR_LOCAL_BITS) - 1));
+                            }
+                            noc_async_read(a64, d, sl[i]);
+                        }
+                        d += sl[i];
                     }
-                    noc_async_read(a64, d, sl[i]);
-                    d += sl[i];
                 }
                 noc_async_read_barrier();
+                if (role == 0) {
+                    // wait for the NCRISC's NOC1 segments of this round (its count in the local sync word)
+                    errors += wait_min(local_sync, r + 1) ? 0 : 0x1000000;
+                }
             } else {
                 // 27B section 601's pipeline: maximum-burst pages issued with the stateful read on a fixed VC, a group
                 // of pages per transaction id, three ids in rotation, only the oldest id drained before reusing it

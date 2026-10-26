@@ -37,6 +37,7 @@ struct Case {
     std::string assign;  // mode 2: the LP's assignment file (per core: x y nseg {bank offset bytes})
     bool optimal;  // the 8 bank-adjacent cores of get_optimal_dram_bank_to_logical_worker_assignment (readers == banks)
     bool vc_spread;
+    uint32_t chain = 1;  // mode 2: reads of the slice per round (back to back, one go)
 };
 
 std::string run_case(const std::shared_ptr<distributed::MeshDevice>& mesh, const Case& c, bool& ok) {
@@ -48,7 +49,7 @@ std::string run_case(const std::shared_ptr<distributed::MeshDevice>& mesh, const
     // the banks), so bank b's region is the concatenation of its pages and a byte offset o in bank b is page
     // (o / page_bytes) * nb + b, at o % page_bytes
     struct Seg {
-        uint32_t bank, off, len, tx = 0, ty = 0;
+        uint32_t bank, off, len, tx = 0, ty = 0, noc = 0;
     };
     std::map<std::pair<uint32_t, uint32_t>, std::vector<Seg>> segs;
     uint32_t bank_bytes = 0;
@@ -62,17 +63,28 @@ std::string run_case(const std::shared_ptr<distributed::MeshDevice>& mesh, const
             if (!(ls >> x >> y >> n)) {
                 continue;
             }
+            // per segment: bank offset bytes [tx ty [noc]] (rowlocal: one segment with tx ty; balanced: all six)
             auto& v = segs[{x, y}];
+            std::vector<uint32_t> nums;
+            uint32_t t;
+            while (ls >> t) {
+                nums.push_back(t);
+            }
+            const uint32_t per = static_cast<uint32_t>(nums.size()) / n;
             for (uint32_t i = 0; i < n; ++i) {
                 Seg sg{};
-                ls >> sg.bank >> sg.off >> sg.len;
+                sg.bank = nums[i * per];
+                sg.off = nums[i * per + 1];
+                sg.len = nums[i * per + 2];
+                if (per >= 5) {
+                    sg.tx = nums[i * per + 3];
+                    sg.ty = nums[i * per + 4];
+                }
+                if (per >= 6) {
+                    sg.noc = nums[i * per + 5];
+                }
                 v.push_back(sg);
                 bank_bytes = std::max(bank_bytes, sg.off + sg.len);
-            }
-            uint32_t tx = 0, ty = 0;
-            if (ls >> tx >> ty) {
-                v.back().tx = tx;
-                v.back().ty = ty;
             }
         }
     }
@@ -97,6 +109,7 @@ std::string run_case(const std::shared_ptr<distributed::MeshDevice>& mesh, const
         tt::tt_metal::CoreRange(tt::tt_metal::CoreCoord(0, 0), tt::tt_metal::CoreCoord(kGridX - 1, kGridY - 1)));
     const uint32_t sem_go = tt::tt_metal::CreateSemaphore(program, all, 0);
     const uint32_t sem_done = tt::tt_metal::CreateSemaphore(program, all, 0);
+    const uint32_t sem_local = tt::tt_metal::CreateSemaphore(program, all, 0);
     const uint32_t l1_base = dev->allocator()->get_base_allocator_addr(tt::tt_metal::HalMemType::L1);
     const uint32_t dst = l1_base;
     // the largest slice any core reads (mode 2: from the assignment), then the result scratch
@@ -110,8 +123,9 @@ std::string run_case(const std::shared_ptr<distributed::MeshDevice>& mesh, const
     }
     TT_FATAL(l1_base + max_slice + 4096 < 1400 * 1024, "slice {} B does not fit the L1", max_slice);
     const uint32_t scratch = l1_base + ((max_slice + 1023) / 1024) * 1024;
-    std::vector<uint32_t> ct;
-    tt::tt_metal::TensorAccessorArgs(*out).append_to(ct);
+    std::vector<uint32_t> ct0 = {0}, ct1 = {1};
+    tt::tt_metal::TensorAccessorArgs(*out).append_to(ct0);
+    tt::tt_metal::TensorAccessorArgs(*out).append_to(ct1);
     auto k = tt::tt_metal::CreateKernel(
         program,
         "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/dram/dram_slice_reader.cpp",
@@ -119,7 +133,15 @@ std::string run_case(const std::shared_ptr<distributed::MeshDevice>& mesh, const
         tt::tt_metal::DataMovementConfig{
             .processor = tt::tt_metal::DataMovementProcessor::RISCV_0,
             .noc = tt::tt_metal::NOC::RISCV_0_default,
-            .compile_args = ct});
+            .compile_args = ct0});
+    auto k1 = tt::tt_metal::CreateKernel(
+        program,
+        "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/dram/dram_slice_reader.cpp",
+        all,
+        tt::tt_metal::DataMovementConfig{
+            .processor = tt::tt_metal::DataMovementProcessor::RISCV_1,
+            .noc = tt::tt_metal::NOC::RISCV_1_default,
+            .compile_args = ct1});
     const auto go_phys = dev->worker_core_from_logical_core(tt::tt_metal::CoreCoord(0, 0));
     const auto mc1 = dev->worker_core_from_logical_core(tt::tt_metal::CoreCoord(kGridX - 1, kGridY - 1));
     std::vector<uint32_t> expect(kCores, 0);
@@ -176,11 +198,8 @@ std::string run_case(const std::shared_ptr<distributed::MeshDevice>& mesh, const
         }
         TT_FATAL(my.size() <= 2, "core {} has {} segments", i, my.size());
 
-        SetRuntimeArgs(
-            program,
-            k,
-            core,
-            {static_cast<uint32_t>(buf->address()),
+        std::vector<uint32_t> args = {
+             static_cast<uint32_t>(buf->address()),
              j == UINT32_MAX ? 0u : j % nb,
              j == UINT32_MAX ? 0u : (j / nb) * slice,
              s,
@@ -203,15 +222,16 @@ std::string run_case(const std::shared_ptr<distributed::MeshDevice>& mesh, const
              c.page,
              c.group,
              j == UINT32_MAX ? 0u : (c.vc_spread ? j % 4 : 0u),
-             static_cast<uint32_t>(my.size()),
-             my.size() > 0 ? my[0].bank : 0u,
-             my.size() > 0 ? my[0].off : 0u,
-             my.size() > 0 ? my[0].len : 0u,
-             my.size() > 1 ? my[1].bank : 0u,
-             my.size() > 1 ? my[1].off : 0u,
-             my.size() > 1 ? my[1].len : 0u,
-             my.size() == 1 ? my[0].tx : 0u,
-             my.size() == 1 ? my[0].ty : 0u});
+             static_cast<uint32_t>(my.size())};
+        for (uint32_t q = 0; q < 2; ++q) {
+            const Seg z{};
+            const Seg& sg = q < my.size() ? my[q] : z;
+            args.insert(args.end(), {sg.bank, sg.off, sg.len, sg.tx, sg.ty, sg.noc});
+        }
+        args.push_back(sem_local);
+        args.push_back(c.chain);
+        SetRuntimeArgs(program, k, core, args);
+        SetRuntimeArgs(program, k1, core, args);
     }
     distributed::MeshWorkload wl;
     wl.add_program(distributed::MeshCoordinateRange(mesh->shape()), std::move(program));
@@ -239,8 +259,9 @@ std::string run_case(const std::shared_ptr<distributed::MeshDevice>& mesh, const
         ++n;
     }
     const double mean = sum / n;
-    const double bytes = c.mode == 2 ? static_cast<double>(total_bytes) : static_cast<double>(readers) * slice;
+    const double bytes = c.mode == 2 ? static_cast<double>(total_bytes) * c.chain : static_cast<double>(readers) * slice;
     std::ostringstream os;
+    os << "chain " << c.chain << ": ";
     os << (c.mode ? "TRID pipeline (page " + std::to_string(c.page) + ", " + std::to_string(c.group) + " a trid)" : "one read")
        << (c.optimal ? ", bank-adjacent" : ", spread") << (c.vc_spread ? ", VC j%4" : ", VC 0") << ": readers " << readers << " x slice " << slice << " B = " << bytes / 1e6 << " MB: round mean " << mean
        << " us (best " << best << ", worst " << worst << ") = " << bytes / (mean * 1e3) << " GB/s = "
@@ -257,15 +278,16 @@ TEST(Qwen38DataflowDram, SliceLane) {
     const char* out_path = std::getenv("QWEN38_DRAM_OUT");
     std::ofstream out(out_path ? out_path : "/tmp/qwen38_dram.txt");
     bool ok = true;
-    constexpr uint32_t P = 16384;
+    [[maybe_unused]] constexpr uint32_t P = 16384;
     const std::string A = std::string(std::getenv("HOME")) + "/work/noc/";
-    const std::vector<Case> cases = {
-        {130, 0, 2, 0, 0, A + "rowlocal_516096.txt", false, false},   // row-local, 4.1 MB in all
-        {130, 0, 2, 0, 0, A + "rowlocal_2064384.txt", false, false},  // 16.5 MB
-        {130, 0, 2, 0, 0, A + "rowlocal_4128768.txt", false, false},  // 33.0 MB
-        {130, 16 * P, 0, P, 4, "", false, false},                     // control: bank = core mod 8, one read (run 1)
-        {8, 64 * P, 1, P, 4, "", true, true},                         // control: 27B section 601's form
+    std::vector<Case> cases = {
+        {130, 0, 2, 0, 0, A + "balanced_262144.txt", false, false},  // balanced, exact banks, 256 KiB a core
+        {130, 0, 2, 0, 0, A + "balanced_131072.txt", false, false},  // 128 KiB
+        {130, 0, 2, 0, 0, A + "balanced_131072.txt", false, false},  // 128 KiB x 8 back to back (the stream)
+        {130, 0, 2, 0, 0, A + "balanced_262144.txt", false, false},  // 256 KiB x 4 back to back
     };
+    cases[2].chain = 8;
+    cases[3].chain = 4;
     for (const auto& c : cases) {
         out << run_case(mesh, c, ok) << "\n";
         out.flush();
