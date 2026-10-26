@@ -8,6 +8,8 @@
 #   test_qwen38_dataflow_meeting5 I-1b v5: every group collective (AG, RS direct) on one table-driven kernel
 #   test_qwen38_dataflow_link     I-1d: the sustained rate of one and of both channels of a link (channels per direction)
 #   test_qwen38_dataflow_costs    I-1e: the cycle costs of the relay steps on an Ethernet core RISC
+#   test_qwen38_dataflow_mm       I-1c: the Tensix matmul unit cost (HiFi2, bf8 weights, fp32 DEST) on one core
+#   test_qwen38_dataflow_mm_chain I-1c-2: one chip's in_proj pool on 130 cores (Stream-K, fp32 partials over the NoC)
 # Built with the tt_metal tests (TT_METAL_BUILD_TESTS); executables in build/test/models/demos/blackhole/qwen38_flash_next/.
 
 set(QWEN38_DATAFLOW_INCLUDE_DIRS
@@ -19,7 +21,7 @@ set(QWEN38_DATAFLOW_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/..
 )
 
-foreach(GTEST_TARGET test_qwen38_dataflow_probe test_qwen38_dataflow_meeting test_qwen38_dataflow_meeting2 test_qwen38_dataflow_meeting3 test_qwen38_dataflow_meeting4 test_qwen38_dataflow_meeting5 test_qwen38_dataflow_link test_qwen38_dataflow_costs)
+foreach(GTEST_TARGET test_qwen38_dataflow_probe test_qwen38_dataflow_meeting test_qwen38_dataflow_meeting2 test_qwen38_dataflow_meeting3 test_qwen38_dataflow_meeting4 test_qwen38_dataflow_meeting5 test_qwen38_dataflow_link test_qwen38_dataflow_costs test_qwen38_dataflow_mm test_qwen38_dataflow_mm_chain)
     add_executable(${GTEST_TARGET} ${GTEST_TARGET}.cpp)
     target_precompile_headers(${GTEST_TARGET} REUSE_FROM metal_common_pch)
     target_link_libraries(${GTEST_TARGET} PRIVATE test_metal_common_libs)
