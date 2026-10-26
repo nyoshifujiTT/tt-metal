@@ -36,7 +36,7 @@ namespace distributed = tt::tt_metal::distributed;
 
 constexpr uint32_t kNt = 66, kKt = 80, kM = 32, kCores = 130, kGridX = 13, kGridY = 10;
 constexpr uint32_t kRounds = 48, kStampRounds = 40, kSkip = 8;
-constexpr uint32_t kActTile = 2048, kWTile = 1088, kOutTile = 2048, kPartPage = 4096 + 32;
+constexpr uint32_t kWTile = 1088;
 constexpr double kClockGHz = 1.35;
 
 struct Segment {
@@ -97,7 +97,18 @@ std::vector<CorePlan> make_plan(uint32_t k_own) {
     return plan;
 }
 
-std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint32_t k_own, bool& ok) {
+// v 2: I-1c-2 (full 32-row tiles, partial 4 KiB fp32); v 5: I-1c-5 (activation, output and partials 2-row tiny tiles,
+// init once)
+// v 6: the v5 kernels with every tile full (32 rows): isolates the init / reconfig changes; v 7: v5 kernels, activation
+// and output 2-row, partials full 32-row tiles: isolates the tiny partial
+std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint32_t k_own, bool& ok, uint32_t v = 2) {
+    const uint32_t rows = (v == 5 || v == 7 || v == 8) ? 2u : 32u;
+    const tt::tt_metal::Tile tile({rows, 32});
+    const tt::tt_metal::Tile ptile({v == 5 ? 2u : 32u, 32});
+    const uint32_t act_tile = tile.get_tile_size(tt::DataFormat::Float16_b);
+    const uint32_t out_tile = act_tile;
+    const uint32_t part_bytes = ptile.get_tile_size(tt::DataFormat::Float32);
+    const uint32_t part_page = part_bytes + 32;
     auto* dev = mesh->get_devices()[0];
     auto& cq = mesh->mesh_command_queue();
     const auto plan = make_plan(k_own);
@@ -122,7 +133,14 @@ std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint
     for (size_t i = 0; i < a.size(); ++i) {
         a_bf[i] = bfloat16(a[i]);
     }
-    const auto a_tiled = tilize_nfaces(a_bf, kM, K);
+    std::vector<bfloat16> a_rows(a_bf.begin(), a_bf.begin() + static_cast<size_t>(rows) * K);
+    const auto a_tiled = convert_layout<bfloat16>(
+        ttsl::Span<const bfloat16>(a_rows),
+        {rows, K},
+        TensorLayoutType::LIN_ROW_MAJOR,
+        TensorLayoutType::TILED_NFACES,
+        tile.get_tile_shape(),
+        tile.get_face_shape());
     // weight tiles column-major: tile (k, c) at c * kKt + k, every tile row-major inside
     std::vector<float> w_tiles;
     w_tiles.reserve(static_cast<size_t>(K) * N);
@@ -157,9 +175,9 @@ std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint
             distributed::DeviceLocalBufferConfig{.page_size = page, .buffer_type = tt::tt_metal::BufferType::DRAM},
             mesh.get());
     };
-    auto buf_a = dram(kActTile, kKt * kActTile);
+    auto buf_a = dram(act_tile, kKt * act_tile);
     auto buf_w = dram(kWTile, kNt * kKt * kWTile);
-    auto buf_o = dram(kOutTile, kNt * kOutTile);
+    auto buf_o = dram(out_tile, kNt * out_tile);
     auto buf_st = dram(512, 2 * kCores * 512);
     distributed::EnqueueWriteMeshBuffer(cq, buf_a, a_tiled, false);
     distributed::EnqueueWriteMeshBuffer(cq, buf_w, w_bf8, false);
@@ -173,27 +191,35 @@ std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint
     const tt::tt_metal::CoreRangeSet owners_set(own_r), senders_set(send_r);
     const uint32_t sem_go = tt::tt_metal::CreateSemaphore(program, all, 0);
     const uint32_t sem_done = tt::tt_metal::CreateSemaphore(program, all, 0);
-    auto cb = [&](uint32_t index, uint32_t pages, uint32_t page, tt::DataFormat df) {
-        tt::tt_metal::CreateCircularBuffer(
-            program, all, tt::tt_metal::CircularBufferConfig(pages * page, {{index, df}}).set_page_size(index, page));
+    auto cb = [&](uint32_t index, uint32_t pages, uint32_t page, tt::DataFormat df, bool shaped) {
+        auto cfg = tt::tt_metal::CircularBufferConfig(pages * page, {{index, df}}).set_page_size(index, page);
+        if (shaped) {
+            cfg.set_tile_dims(index, (index == 2 || index == 17) ? ptile : tile);
+        }
+        tt::tt_metal::CreateCircularBuffer(program, all, cfg);
     };
-    cb(0, kKt, kActTile, tt::DataFormat::Float16_b);
-    cb(1, std::max(k_own, 48u), kWTile, tt::DataFormat::Bfp8_b);
-    cb(2, 3, kPartPage, tt::DataFormat::Float32);
-    cb(3, 2, 32, tt::DataFormat::Float16_b);
-    cb(4, 2, 32, tt::DataFormat::Float16_b);
-    cb(16, 2, kOutTile, tt::DataFormat::Float16_b);
-    cb(17, 2, kPartPage, tt::DataFormat::Float32);
-    cb(24, 1, 512, tt::DataFormat::UInt32);
-    cb(25, 1, 512, tt::DataFormat::UInt32);
-    std::vector<uint32_t> rd_ct = {kKt, kPartPage};
+    cb(0, kKt, act_tile, tt::DataFormat::Float16_b, true);
+    cb(1, std::max(k_own, 48u), kWTile, tt::DataFormat::Bfp8_b, false);
+    cb(2, 3, part_page, tt::DataFormat::Float32, true);
+    cb(3, 2, 32, tt::DataFormat::Float16_b, false);
+    cb(4, 2, 32, tt::DataFormat::Float16_b, false);
+    cb(16, 2, out_tile, tt::DataFormat::Float16_b, true);
+    cb(17, 2, part_page, tt::DataFormat::Float32, true);
+    cb(24, 1, 512, tt::DataFormat::UInt32, false);
+    cb(25, 1, 512, tt::DataFormat::UInt32, false);
+    std::vector<uint32_t> rd_ct = {kKt, part_page};
+    if (v >= 5) {
+        rd_ct.push_back(part_bytes);
+        rd_ct.push_back(v == 8 ? 1u : 0u);  // v8: the 32-row partial with only its 2 valid rows sent (sparse)
+    }
     tt::tt_metal::TensorAccessorArgs(*buf_a).append_to(rd_ct);
     tt::tt_metal::TensorAccessorArgs(*buf_w).append_to(rd_ct);
     tt::tt_metal::TensorAccessorArgs(*buf_o).append_to(rd_ct);
     tt::tt_metal::TensorAccessorArgs(*buf_st).append_to(rd_ct);
     auto rd = tt::tt_metal::CreateKernel(
         program,
-        "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain_reader.cpp",
+        v >= 5 ? "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain5_reader.cpp"
+               : "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain_reader.cpp",
         all,
         tt::tt_metal::DataMovementConfig{
             .processor = tt::tt_metal::DataMovementProcessor::RISCV_0,
@@ -201,13 +227,15 @@ std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint
             .compile_args = rd_ct});
     auto comp_own = tt::tt_metal::CreateKernel(
         program,
-        "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain_compute.cpp",
+        v >= 5 ? "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain5_compute.cpp"
+               : "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain_compute.cpp",
         owners_set,
         tt::tt_metal::ComputeConfig{
             .math_fidelity = MathFidelity::HiFi2, .fp32_dest_acc_en = true, .compile_args = {0u, kKt, kRounds}});
     auto comp_send = tt::tt_metal::CreateKernel(
         program,
-        "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain_compute.cpp",
+        v >= 5 ? "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain5_compute.cpp"
+               : "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain_compute.cpp",
         senders_set,
         tt::tt_metal::ComputeConfig{
             .math_fidelity = MathFidelity::HiFi2, .fp32_dest_acc_en = true, .compile_args = {1u, kKt, kRounds}});
@@ -319,7 +347,13 @@ std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint
         }
     }
     // accuracy
-    const auto out_rm = untilize_nfaces(out, kM, N);
+    const auto out_rm = convert_layout<bfloat16>(
+        ttsl::Span<const bfloat16>(out),
+        {rows, N},
+        TensorLayoutType::TILED_NFACES,
+        TensorLayoutType::LIN_ROW_MAJOR,
+        tile.get_tile_shape(),
+        tile.get_face_shape());
     double sxy = 0, sxx = 0, syy = 0, sx = 0, sy = 0, max_err = 0, max_ref = 0;
     const uint32_t n = 2 * N;
     for (uint32_t r = 0; r < 2; ++r) {
@@ -348,7 +382,7 @@ std::string run_chain(const std::shared_ptr<distributed::MeshDevice>& mesh, uint
         }
     }
     std::ostringstream os;
-    os << "k_own " << k_own << " (sender max " << max_send_k << " K tiles, max " << max_seg << " segments, owner max "
+    os << "v" << v << " (" << rows << "-row tiles, partial " << part_bytes << " B) k_own " << k_own << " (sender max " << max_send_k << " K tiles, max " << max_seg << " segments, owner max "
        << max_in << " partials): round go -> last column mean " << sum_round / cnt << " us, best " << best_round
        << " us; owner end - own go max mean " << sum_span / cnt << " us (worst core " << worst_core << " "
        << worst_span / (kClockGHz * 1000.0) << " us); go spread mean " << sum_go_spread / cnt
@@ -376,8 +410,10 @@ TEST(Qwen38DataflowMm, InProjPoolChain) {
         k_owns = {static_cast<uint32_t>(std::atoi(e))};
     }
     for (uint32_t k_own : k_owns) {
-        out << run_chain(mesh, k_own, ok) << "\n";
-        out.flush();
+        for (uint32_t v : {2u, 7u, 8u}) {
+            out << run_chain(mesh, k_own, ok, v) << "\n";
+            out.flush();
+        }
     }
     mesh->close();
     EXPECT_TRUE(ok);
