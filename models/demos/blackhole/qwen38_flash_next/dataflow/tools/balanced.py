@@ -13,7 +13,8 @@ from scipy.sparse import lil_matrix
 import noc_lp as m
 
 S = int(sys.argv[1]) if len(sys.argv) > 1 else 262144
-out = sys.argv[2] if len(sys.argv) > 2 else f'/tmp/q38/noc/balanced_{S}.txt'
+NOCS = tuple(int(x) for x in sys.argv[3].split(',')) if len(sys.argv) > 3 else (0, 1)
+out = sys.argv[2] if len(sys.argv) > 2 else f'/tmp/q38/noc/balanced_{S}' + ('' if NOCS == (0, 1) else '_noc' + ''.join(map(str, NOCS))) + '.txt'
 w, banks = m.load_map('/tmp/q38/dram_map.txt')
 tr = {}
 for line in open('/tmp/q38/dram_map.txt'):
@@ -26,7 +27,7 @@ for line in open('/tmp/q38/dram_map.txt'):
 cores = sorted(w, key=lambda c: (c[1], c[0]))
 NC = len(cores)
 NB = len(banks)
-var = [(ci, b, e, n) for ci in range(NC) for b in range(NB) for e in range(len(banks[b])) for n in (0, 1)]
+var = [(ci, b, e, n) for ci in range(NC) for b in range(NB) for e in range(len(banks[b])) for n in NOCS]
 nv = len(var) + 1
 rows = {}
 def row(k):

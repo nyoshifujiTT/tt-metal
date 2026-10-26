@@ -281,13 +281,10 @@ TEST(Qwen38DataflowDram, SliceLane) {
     [[maybe_unused]] constexpr uint32_t P = 16384;
     const std::string A = std::string(std::getenv("HOME")) + "/work/noc/";
     std::vector<Case> cases = {
-        {130, 0, 2, 0, 0, A + "balanced_262144.txt", false, false},  // balanced, exact banks, 256 KiB a core
-        {130, 0, 2, 0, 0, A + "balanced_131072.txt", false, false},  // 128 KiB
-        {130, 0, 2, 0, 0, A + "balanced_131072.txt", false, false},  // 128 KiB x 8 back to back (the stream)
-        {130, 0, 2, 0, 0, A + "balanced_262144.txt", false, false},  // 256 KiB x 4 back to back
+        {130, 0, 2, 0, 0, A + "balanced_262144.txt", false, false},       // balanced, both NoCs (run 7)
+        {130, 0, 2, 0, 0, A + "balanced_262144_noc0.txt", false, false},  // balanced, NOC0 only (BRISC reads all)
+        {130, 0, 2, 0, 0, A + "balanced_262144_noc1.txt", false, false},  // balanced, NOC1 only (NCRISC reads all)
     };
-    cases[2].chain = 8;
-    cases[3].chain = 4;
     for (const auto& c : cases) {
         out << run_case(mesh, c, ok) << "\n";
         out.flush();
