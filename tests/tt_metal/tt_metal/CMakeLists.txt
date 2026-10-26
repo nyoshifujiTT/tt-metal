@@ -70,6 +70,10 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/noc_debugging)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/lightmetal)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/sfpi)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/misc)
+add_subdirectory(
+    ${PROJECT_SOURCE_DIR}/models/demos/blackhole/qwen38_flash_next/dataflow/tests
+    ${CMAKE_CURRENT_BINARY_DIR}/models_qwen38_flash_next_dataflow
+)
 
 add_custom_target(
     metal_tests
