@@ -272,18 +272,29 @@ void kernel_main() {
         const uint32_t t0 = clock_low();
         while (received < rx_total && !g_broken) {
             ++passes;
-            if (need_fence) {
-                invalidate_l1_cache();
-            }
-            const uint32_t w0 = load(head + trailer);
-            const uint32_t w1 = load(head + trailer + 16);
-            if ((w0 != w1) | (w0 == head_prev) | ((w0 & kTagBit) == 0)) {
-                if (++idle == kStallLimit) {
+            // wait for the head slot's next frame: a tight poll (two loads, the compare), bounded
+            uint32_t w0 = 0;
+            const uint32_t at = head + trailer;
+            const uint32_t prev = head_prev;
+            uint32_t spin = 0;
+            for (;;) {
+                if (need_fence) {
+                    invalidate_l1_cache();
+                }
+                w0 = load(at);
+                const uint32_t w1 = load(at + 16);
+                if ((w0 == w1) & (w0 != prev) & ((w0 & kTagBit) != 0)) {
                     break;
                 }
-                continue;
+                if (++spin == kStallLimit) {
+                    break;
+                }
             }
-            idle = 0;
+            if (spin == kStallLimit) {
+                idle = kStallLimit;
+                break;
+            }
+            passes += spin;
             const uint32_t it = w0 & 0xffff;
             const uint32_t flow = (w0 >> 24) & 0x7f;
             const uint32_t pk = (w0 >> 16) & 0xff;
@@ -389,8 +400,50 @@ void kernel_main() {
         const uint32_t t0 = clock_low();
         while (remaining && !g_broken) {
             ++passes;
-            if (need_fence) {
-                invalidate_l1_cache();
+            // while the own half is mid-flight (packets left in this iteration) the loop must keep sending; otherwise
+            // wait in a tight poll for a new staging frame or the next input-flow arrival (bounded)
+            if (own_sent == own_total || (own_i == 0 && own_pk == 0 && own_it > 0)) {
+                const bool s0 = src_count[0] != src_expected[0];
+                const bool s1 = src_count[1] != src_expected[1];
+                const bool own_wait = own_sent != own_total && wait_i < n_inputs;
+                const uint32_t in_addr = own_wait ? base + kArriveTab + 16 * input_flow[wait_i] : base;
+                const uint32_t need_it = own_it;
+                uint32_t spin = 0;
+                for (;; ++spin) {
+                    if (need_fence) {
+                        invalidate_l1_cache();
+                    }
+                    if (s0) {
+                        const uint32_t a = load(head0 + trailer);
+                        const uint32_t b = load(head0 + trailer + 16);
+                        if ((a == b) & (a != prev0) & ((a & kTagBit) != 0)) {
+                            break;
+                        }
+                    }
+                    if (s1) {
+                        const uint32_t a = load(head1 + trailer);
+                        const uint32_t b = load(head1 + trailer + 16);
+                        if ((a == b) & (a != prev1) & ((a & kTagBit) != 0)) {
+                            break;
+                        }
+                    }
+                    if (own_wait) {
+                        const uint32_t e = load(in_addr);
+                        if ((e & kTagBit) && (e & 0xffff) + 1 >= need_it) {
+                            break;
+                        }
+                    } else if (own_sent != own_total) {
+                        break;
+                    }
+                    if (spin == kStallLimit) {
+                        break;
+                    }
+                }
+                passes += spin;
+                if (spin == kStallLimit) {
+                    idle = kStallLimit;
+                    break;
+                }
             }
             bool moved = false;
             if (src_count[0] != src_expected[0]) {
