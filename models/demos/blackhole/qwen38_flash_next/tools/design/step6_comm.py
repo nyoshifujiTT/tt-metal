@@ -26,6 +26,7 @@ import sys
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0] if "/" in __file__ else ".")
 import comm_model as cm
+import mm_cost
 
 MiB = 1024**2
 KiB = 1024
@@ -53,13 +54,21 @@ P_f = row(HC * HC_LOW)
 P_ids = ROWS * 10 * 2
 P_tok = ROWS * 4
 P_arg = ROWS * 8 * TP
-MM_PROJ_GDN = 1.102
-MM_PROJ_QSA = 1.365
-MM_ROUTER = 0.724
-MM_OUT = 0.489
-MM_DOWN_EXP = 0.686
-MM_LOW = 0.637  # the router pool's matmul part only (the top-10 cannot overlap the all-gather: it needs the logits)
-TREE = (92 + 64 + 32) / CLK * 1e6 * 2
+# the matmul times that hide a meeting: read from step 4 (one source for every unit cost, revision 6)
+T4 = json.load(open(sys.argv[2] if len(sys.argv) > 2 else "/tmp/q38/design/step4_item_time.json"))
+
+
+def t4(prefix, field="mm_us"):
+    return next(r[field] for r in T4 if r["unit"].startswith(prefix))
+
+
+MM_PROJ_GDN = t4("L00.gdn.in_proj_qkv")
+MM_PROJ_QSA = t4("L03.qsa.indexer qk")
+MM_ROUTER = t4("L00.moe.router")
+MM_OUT = t4("L00.gdn.out_proj")
+MM_DOWN_EXP = t4("L00.moe.routed expert e: down")
+MM_LOW = t4("L00.gdn.gr.down")  # the router pool's matmul part only (the top-10 cannot overlap the all-gather: it needs the logits)
+TREE = mm_cost.tree_level(ROWS) / CLK * 1e6 * 2
 WAVES = 10
 out = {}
 
@@ -109,37 +118,13 @@ def wave_exposure(kind, P, t_mm):
     return max(0.0, done - t_mm), form
 
 
-# ---- compute of the hyper-connection read's matmuls per split (step 4's chain model) ----
-CORES = 130
-MM = 32
-TILE = 32
-NOC_RELAY = 92
-NOC_FLIT = 64
-FP32T = 32
-
-
-def mm_chain(out, kt, work):
-    if out >= CORES:
-        return work / CORES * MM
-    cpo = min(math.ceil(CORES / max(out, 1)), kt)
-    levels = math.ceil(math.log2(cpo)) if cpo > 1 else 0
-    return min(kt * MM, work / CORES * MM + levels * (NOC_RELAY + 4096 / NOC_FLIT + FP32T))
-
-
-def mm_c(M, N, K):
-    out = math.ceil(M / TILE) * math.ceil(N / TILE)
-    kt = math.ceil(K / TILE)
-    return mm_chain(out, kt, out * kt) / CLK * 1e6
+# ---- compute of the hyper-connection read's matmuls per split (step 4's cost model, mm_cost.py) ----
+def mm_c(M, N, K, fmt="bf16"):
+    return mm_cost.one(M, N, K, fmt) / CLK * 1e6
 
 
 def mm_pool(*mms):
-    out = sum(math.ceil(m / TILE) * math.ceil(n / TILE) for m, n, k in mms)
-    kt = max(math.ceil(k / TILE) for m, n, k in mms)
-    return (
-        mm_chain(out, kt, sum(math.ceil(m / TILE) * math.ceil(n / TILE) * math.ceil(k / TILE) for m, n, k in mms))
-        / CLK
-        * 1e6
-    )
+    return mm_cost.pool(*[(x[0], x[1], x[2], x[3] if len(x) > 3 else "bf16") for x in mms]) / CLK * 1e6
 
 
 DOWN_K = mm_pool((ROWS, HC_LOW, HCD / TP), (ROWS, HC, HCD / TP))  # A: D K-split 1/8 (+ inject K-split, same input)
@@ -149,9 +134,9 @@ DOWN_N = mm_pool(
 DOWN_R = mm_pool((ROWS, HC_LOW, HCD), (ROWS, HC, HCD))  # D replicated
 UP_N = mm_c(ROWS, HCD / TP, HC_LOW)
 UP_R = mm_c(ROWS, HCD, HC_LOW)
-OUT_PLAIN = mm_c(ROWS, H, 6 * 128)
+OUT_PLAIN = mm_c(ROWS, H, 6 * 128, "bf8")
 OUT_FOLD = mm_pool(
-    (ROWS, H, 6 * 128), (ROWS, HC * HC_LOW, 6 * 128)
+    (ROWS, H, 6 * 128, "bf8"), (ROWS, HC * HC_LOW, 6 * 128, "bf16")
 )  # out_proj K-split 6 heads, with the fold F_i h_i pooled
 
 

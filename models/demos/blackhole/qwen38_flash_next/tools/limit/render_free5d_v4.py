@@ -1,556 +1,228 @@
 #!/usr/bin/env python
 """Render README section 11 (revision 4) from routing/free5d_v4_results*.json and the census. Every number is computed; deterministic."""
-import json
-import math
-import sys
-
-_argv = list(sys.argv)
-sys.argv = ["render"]
-sys.argv = ["/data/yoshifuji/qwen38/scripts/free5d_v4.py"]
-exec(
-    open("/data/yoshifuji/qwen38/scripts/free5d_v4.py")
-    .read()
-    .replace('if __name__=="__main__": main(*sys.argv[1:])', "")
-)
-R = json.load(open("/data/yoshifuji/qwen38/routing/free5d_v4_results.json"))
-CTXS = (1, 128, 8192, 32768, 262144, 1000000)
-RC = {
-    c: json.load(open(f"/data/yoshifuji/qwen38/routing/free5d_v4_results_ctx{c}.json")) for c in CTXS
-}  # H-26: the context sweep (k=1)
-cfgdict_axes = {r["cfg"]: r["axes"] for v in R.values() for r in v}
-S = json.load(open("/data/yoshifuji/qwen38/routing/stats.json"))
-routing = Routing("/data/yoshifuji/qwen38/routing/stats.json", "/data/yoshifuji/qwen38/routing/stats_stage2.json")
-S2 = json.load(open("/data/yoshifuji/qwen38/routing/stats_stage2.json"))
-CASES = [
-    ("hit", "全ヒット: routed を router の前に読み終える（2 段先読みが全部当たる）"),
-    ("census", "census ヒット率: 2 段先読み（2 ブロック早い予測 P2、1 ブロック早い予測 P1、外れは router 後）の実測集合、無駄読み込み"),
-    ("miss", "全ミス: router の後に読む（今の runtime の形）"),
-    ("all", "全 expert 読み: 毎 step 512 expert 全部を読み router に依存しない"),
-]
-
-
-def rs(case, k):
-    return R[f"{case}|k={k}"]
-
-
-def feas(l):
-    return [r for r in l if r["feasible"]]
-
-
-def best(case, k, key):
-    return max(feas(rs(case, k)), key=lambda r: r[key])
-
-
-def get(case, k, **ax):
-    ax = {"DP": 1, "PP": 1, "DP_a": 1, "CP": 1, "n_mb": 1, **ax}
-    ax.setdefault("EP", 1)
-    ax.setdefault("TP_x", ax["TP_a"] * ax["DP_a"] // ax["EP"])
-    return next(r for r in rs(case, k) if all(A(r)[key] == val for key, val in ax.items()))
-
-
-def A(r):
-    return r["axes"]
-
-
-def impl(r, k):
-    a = A(r)
-    base = a["PP"] == 1 and a["DP_a"] == 1 and a["TP_a"] in (4, 8) and a["EP"] == a["TP_a"] and a["CP"] == 1
-    return base and (a["b"] == 1 if k == 0 else a["b"] * (k + 1) <= 32)
-
-
-def bestimpl(case, k, key):
-    return max([r for r in feas(rs(case, k)) if impl(r, k)], key=lambda r: r[key])
-
-
-def par(case, k):
-    return pareto(rs(case, k))
-
-
-def bval(c):
-    return int(c.split("b=")[1].split()[0])
-
-
-def rsc(ctx, case, k=1):
-    return RC[ctx][f"{case}|k={k}"]
-
-
-def bestc(ctx, case, key):
-    return max([r for r in rsc(ctx, case) if r["feasible"]], key=lambda r: r[key])
-
-
-def parc(ctx, case):
-    return pareto(rsc(ctx, case))
-
-
-def bestbc(ctx, b, case="hit"):
-    l = [r for r in rsc(ctx, case) if r["feasible"] and A(r)["b"] == b]
-    return max(l, key=lambda r: r["tsu"]) if l else None
-
-
+import json, sys, math
+_argv=list(sys.argv); sys.argv=["render"]
+sys.argv=["/data/yoshifuji/qwen38/scripts/free5d_v4.py"]
+exec(open("/data/yoshifuji/qwen38/scripts/free5d_v4.py").read().replace('if __name__=="__main__": main(*sys.argv[1:])',''))
+R=json.load(open("/data/yoshifuji/qwen38/routing/free5d_v4_results.json"))
+CTXS=(1,128,8192,32768,262144,1000000)
+RC={c: json.load(open(f"/data/yoshifuji/qwen38/routing/free5d_v4_results_ctx{c}.json")) for c in CTXS}   # H-26: the context sweep (k=1)
+cfgdict_axes={r["cfg"]:r["axes"] for v in R.values() for r in v}
+S=json.load(open("/data/yoshifuji/qwen38/routing/stats.json"))
+routing=Routing("/data/yoshifuji/qwen38/routing/stats.json","/data/yoshifuji/qwen38/routing/stats_stage2.json")
+S2=json.load(open("/data/yoshifuji/qwen38/routing/stats_stage2.json"))
+CASES=[("hit","全ヒット: routed を router の前に読み終える（2 段先読みが全部当たる）"),("census","census ヒット率: 2 段先読み（2 ブロック早い予測 P2、1 ブロック早い予測 P1、外れは router 後）の実測集合、無駄読み込み"),("miss","全ミス: router の後に読む（今の runtime の形）"),("all","全 expert 読み: 毎 step 512 expert 全部を読み router に依存しない")]
+def rs(case,k): return R[f"{case}|k={k}"]
+def feas(l): return [r for r in l if r["feasible"]]
+def best(case,k,key): return max(feas(rs(case,k)),key=lambda r:r[key])
+def get(case,k,**ax):
+    ax={"DP":1,"PP":1,"DP_a":1,"CP":1,"n_mb":1,**ax}; ax.setdefault("EP",1); ax.setdefault("TP_x",ax["TP_a"]*ax["DP_a"]//ax["EP"])
+    return next(r for r in rs(case,k) if all(A(r)[key]==val for key,val in ax.items()))
+def A(r): return r["axes"]
+def impl(r,k):
+    a=A(r); base=a["PP"]==1 and a["DP_a"]==1 and a["TP_a"] in (4,8) and a["EP"]==a["TP_a"] and a["CP"]==1
+    return base and (a["b"]==1 if k==0 else a["b"]*(k+1)<=32)
+def bestimpl(case,k,key): return max([r for r in feas(rs(case,k)) if impl(r,k)],key=lambda r:r[key])
+def par(case,k): return pareto(rs(case,k))
+def bval(c): return int(c.split("b=")[1].split()[0])
+def rsc(ctx,case,k=1): return RC[ctx][f"{case}|k={k}"]
+def bestc(ctx,case,key): return max([r for r in rsc(ctx,case) if r["feasible"]],key=lambda r:r[key])
+def parc(ctx,case): return pareto(rsc(ctx,case))
+def bestbc(ctx,b,case="hit"):
+    l=[r for r in rsc(ctx,case) if r["feasible"] and A(r)["b"]==b]; return max(l,key=lambda r:r["tsu"]) if l else None
 def table_ctx():
-    o = [
-        "| ctx | tsu 最大（全ヒット） | 構成 | T_tok [ms]; DRAM/pass / 演算 / 通信 | tsu 最大（census / 全ミス） | agg 最大（全ヒット） | 構成 | users | T_pass [ms] | agg 最大（census / 全ミス） | DP1 で容量に入る最大 b |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
-    ]
+    o=["| ctx | tsu 最大（全ヒット） | 構成 | T_tok [ms]; DRAM/pass / 演算 / 通信 | tsu 最大（census / 全ミス） | agg 最大（全ヒット） | 構成 | users | T_pass [ms] | agg 最大（census / 全ミス） | DP1 で容量に入る最大 b |","|---|---|---|---|---|---|---|---|---|---|---|"]
     for c in CTXS:
-        t = bestc(c, "hit", "tsu")
-        m = bestc(c, "miss", "tsu")
-        cs = bestc(c, "census", "tsu")
-        a = bestc(c, "hit", "agg")
-        am = bestc(c, "miss", "agg")
-        ac = bestc(c, "census", "agg")
-        bmax = max(A(r)["b"] for r in rsc(c, "hit") if r["feasible"] and A(r)["DP"] == 1)
-        o.append(
-            f"| {c:,} | {t['tsu']:,.0f} | `{t['cfg']}` | {t['T_tok_ms']:.3f}; {t['dram_ms']:.3f} / {t['comp_ms']:.3f} / {t['comm_ms']:.3f} | {cs['tsu']:,.0f} / {m['tsu']:,.0f} | {a['agg']:,.0f} | `{a['cfg']}` | {a['users']} | {a['slot_ms']:.1f} | {ac['agg']:,.0f} / {am['agg']:,.0f} | {bmax:,} |"
-        )
+        t=bestc(c,"hit","tsu"); m=bestc(c,"miss","tsu"); cs=bestc(c,"census","tsu"); a=bestc(c,"hit","agg"); am=bestc(c,"miss","agg"); ac=bestc(c,"census","agg")
+        bmax=max(A(r)["b"] for r in rsc(c,"hit") if r["feasible"] and A(r)["DP"]==1)
+        o.append(f"| {c:,} | {t['tsu']:,.0f} | `{t['cfg']}` | {t['T_tok_ms']:.3f}; {t['dram_ms']:.3f} / {t['comp_ms']:.3f} / {t['comm_ms']:.3f} | {cs['tsu']:,.0f} / {m['tsu']:,.0f} | {a['agg']:,.0f} | `{a['cfg']}` | {a['users']} | {a['slot_ms']:.1f} | {ac['agg']:,.0f} / {am['agg']:,.0f} | {bmax:,} |")
     return "\n".join(o)
-
-
 def table_ctx_b():
-    bs = (1, 4, 16, 64, 256, 1024)
-    o = ["| ctx \\ b | " + " | ".join(str(b) for b in bs) + " |", "|---|" + "---|" * len(bs)]
+    bs=(1,4,16,64,256,1024)
+    o=["| ctx \\ b | "+" | ".join(str(b) for b in bs)+" |","|---|"+"---|"*len(bs)]
     for c in CTXS:
-        cells = []
+        cells=[]
         for b in bs:
-            x = bestbc(c, b)
-            cells.append(f"{x['tsu']:,.0f} `{x['cfg'].split(' b=')[0]}`" if x else "容量超過")
-        o.append(f"| {c:,} | " + " | ".join(cells) + " |")
+            x=bestbc(c,b); cells.append(f"{x['tsu']:,.0f} `{x['cfg'].split(' b=')[0]}`" if x else "容量超過")
+        o.append(f"| {c:,} | "+" | ".join(cells)+" |")
     return "\n".join(o)
-
-
-def cfgdict(s):
-    return dict(cfgdict_axes[s])
-
-
+def cfgdict(s): return dict(cfgdict_axes[s])
 def tp_rows(b, case="hit", k=1):
-    out = []
-    for TP in (4, 8, 16, 32):
-        cands = [r for r in feas(rs(case, k)) if A(r)["TP_a"] == TP and A(r)["b"] == b and A(r)["DP_a"] == 1]
-        ep1 = [r for r in cands if A(r)["EP"] == 1 and A(r)["CP"] == 1 and A(r)["PP"] == 1][0]
-        bt = max(cands, key=lambda r: r["tsu"])
-        out.append((TP, ep1, bt))
+    out=[]
+    for TP in (4,8,16,32):
+        cands=[r for r in feas(rs(case,k)) if A(r)["TP_a"]==TP and A(r)["b"]==b and A(r)["DP_a"]==1]
+        ep1=[r for r in cands if A(r)["EP"]==1 and A(r)["CP"]==1 and A(r)["PP"]==1][0]
+        bt=max(cands,key=lambda r:r["tsu"])
+        out.append((TP,ep1,bt))
     return out
-
-
-def ppb1(PP, TP, R=None):
+def ppb1(PP,TP,R=None):
     if R is None:
-        return max(
-            [
-                r
-                for r in feas(rs("hit", 1))
-                if A(r)["DP"] == 1 and A(r)["PP"] == PP and A(r)["TP_a"] == TP and A(r)["b"] == 1
-            ],
-            key=lambda r: r["tsu"],
-        )
+        return max([r for r in feas(rs("hit",1)) if A(r)["DP"]==1 and A(r)["PP"]==PP and A(r)["TP_a"]==TP and A(r)["b"]==1],key=lambda r:r["tsu"])
     # the results keep only the winning round count per configuration: evaluate the fixed-R form directly (all other choices free)
-    cfg = dict(DP=1, PP=PP, TP_a=TP, DP_a=1, EP=1, TP_x=TP, CP=1, b=1, n_mb=1)
-    S = TP
-    best = None
-    layouts = [((4, 4), 3), ((8, 2), 1)] if (PP == 2 and S == 16) else [(SUBMESH[S], HAND_HOPS[PP])]
-    for sub, hh in layouts:
-        keep = SUBMESH[S]
-        SUBMESH[S] = sub
-        for rep in (0, 1):
-            for bal in ("bytes", "chain"):
-                for buf in (0, 1, 2, 3):
-                    for xf in ("slice", "tiles") if TP >= 8 else ("slice",):
-                        for hf in ("A", "B", "Bn", "B+D") if TP > 1 else ("A",):
-                            HC_FORM[0] = hf
-                            x = evaluate_form(cfg, routing, 192, 1, "hit", rep, bal, hh, buf, xf, R)
-                            if best is None or (x["T_tok_ms"], x["dram_ms"]) < (best["T_tok_ms"], best["dram_ms"]):
-                                best = x
-        SUBMESH[S] = keep
-    HC_FORM[0] = "A"
+    cfg=dict(DP=1,PP=PP,TP_a=TP,DP_a=1,EP=1,TP_x=TP,CP=1,b=1,n_mb=1); S=TP; best=None
+    layouts=[((4,4),3),((8,2),1)] if (PP==2 and S==16) else [(SUBMESH[S],HAND_HOPS[PP])]
+    for sub,hh in layouts:
+        keep=SUBMESH[S]; SUBMESH[S]=sub
+        for rep in (0,1):
+            for bal in ("bytes","chain"):
+                for buf in (0,1,2,3):
+                    for xf in (("slice","tiles") if TP>=8 else ("slice",)):
+                        for hf in (("A","B","Bn","B+D") if TP>1 else ("A",)):
+                            HC_FORM[0]=hf
+                            x=evaluate_form(cfg,routing,192,1,"hit",rep,bal,hh,buf,xf,R)
+                            if best is None or (x["T_tok_ms"],x["dram_ms"])<(best["T_tok_ms"],best["dram_ms"]): best=x
+        SUBMESH[S]=keep
+    HC_FORM[0]="A"
     return best
-
-
-hb1 = best("hit", 1, "tsu")
-hagg = best("hit", 1, "agg")
-cb1 = best("census", 1, "tsu")
-cagg = best("census", 1, "agg")
-mb1 = best("miss", 1, "tsu")
-magg = best("miss", 1, "agg")
-ab1 = best("all", 1, "tsu")
-aagg = best("all", 1, "agg")
-hb1_0 = best("hit", 0, "tsu")
-hagg_0 = best("hit", 0, "agg")
-cur = get("miss", 1, DP=8, TP_a=4, EP=4, b=16)
-curh = get("hit", 1, DP=8, TP_a=4, EP=4, b=16)
-ia = bestimpl("hit", 1, "agg")
-it = bestimpl("hit", 1, "tsu")
-ima = bestimpl("miss", 1, "agg")
-imt = bestimpl("miss", 1, "tsu")
-tp32 = get("hit", 1, TP_a=32, EP=1, b=1)
-pp_tp = [(1, 32), (2, 16), (4, 8), (8, 4), (16, 2), (32, 1)]
-ladder = [(PP, TP, ppb1(PP, TP)) for PP, TP in pp_tp]
-
-
+hb1=best("hit",1,"tsu"); hagg=best("hit",1,"agg"); cb1=best("census",1,"tsu"); cagg=best("census",1,"agg"); mb1=best("miss",1,"tsu"); magg=best("miss",1,"agg"); ab1=best("all",1,"tsu"); aagg=best("all",1,"agg")
+hb1_0=best("hit",0,"tsu"); hagg_0=best("hit",0,"agg")
+cur=get("miss",1,DP=8,TP_a=4,EP=4,b=16); curh=get("hit",1,DP=8,TP_a=4,EP=4,b=16)
+ia=bestimpl("hit",1,"agg"); it=bestimpl("hit",1,"tsu"); ima=bestimpl("miss",1,"agg"); imt=bestimpl("miss",1,"tsu")
+tp32=get("hit",1,TP_a=32,EP=1,b=1)
+pp_tp=[(1,32),(2,16),(4,8),(8,4),(16,2),(32,1)]
+ladder=[(PP,TP,ppb1(PP,TP)) for PP,TP in pp_tp]
 def with_hop(mult, cfg, case="hit", k=1):
     global HOP
-    h0 = HOP
-    HOP = h0 * mult
-    r = evaluate(cfg, routing, 192, k, case)
-    HOP = h0
-    return r
-
-
-sens = {PP: {m: with_hop(m, cfgdict(r["cfg"]))["tsu"] for m in (1.0, 2.0, 4.0)} for PP, TP, r in ladder}
-
-
+    h0=HOP; HOP=h0*mult; r=evaluate(cfg,routing,192,k,case); HOP=h0; return r
+sens={PP: {m: with_hop(m, cfgdict(r["cfg"]))["tsu"] for m in (1.0,2.0,4.0)} for PP,TP,r in ladder}
 def with_stream(mult, cfg, case="hit", k=1):
     global L1_STREAM
-    s0 = L1_STREAM
-    L1_STREAM = s0 * mult
-    r = evaluate(cfg, routing, 192, k, case)
-    L1_STREAM = s0
-    return r
-
-
-sens_stream = [with_stream(m, cfgdict(hb1["cfg"]))["tsu"] for m in (0.0, 2.0)]
-
-
-def bestsens(m):
-    return max(ladder, key=lambda x: sens[x[0]][m])
-
-
-asym = 32 * BW_DRAM / (L_GDN * S_USER_LAYER * 2 + L_QSA * (kv_read_row(192, 1) + kv_write_row()))
-
-
-def table_pareto(case, k):
-    o = [
-        "| agg [t/s] | tsu | users | 構成 | router / expert / hc | T_pass [ms] | 段 DRAM/pass | 演算 | 隠れない通信 | router 後の routed 読み | L1: 常駐 / バッファ [MB]（段の dense） | 最繁忙 expert/層（tiles は tile/20） | routing |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
-    ]
-    for r in par(case, k):
-        o.append(
-            f"| {r['agg']:,.0f} | {r['tsu']:.1f} | {r['users']} | `{r['cfg']}` | {r['router']} / {r['xform']} / {r['hc_form']} | {r['slot_ms']:.3f} | {r['dram_ms']:.3f} | {r['comp_ms']:.3f} | {r['comm_ms']:.3f} | {r['routed_exposed_ms']:.3f} | {r['resident_MB']:.0f} / {r['buf_MB']:.1f} ({r['dense_chip_MB']:.0f}) | {r['busiest']:.1f} | {r['src']} |"
-        )
+    s0=L1_STREAM; L1_STREAM=s0*mult; r=evaluate(cfg,routing,192,k,case); L1_STREAM=s0; return r
+sens_stream=[with_stream(m, cfgdict(hb1["cfg"]))["tsu"] for m in (0.0,2.0)]
+def bestsens(m): return max(ladder,key=lambda x:sens[x[0]][m])
+asym=32*BW_DRAM/(L_GDN*S_USER_LAYER*2+L_QSA*(kv_read_row(192,1)+kv_write_row()))
+def table_pareto(case,k):
+    o=["| agg [t/s] | tsu | users | 構成 | router / expert / hc | T_pass [ms] | 段 DRAM/pass | 演算 | 隠れない通信 | router 後の routed 読み | L1: 常駐 / バッファ [MB]（段の dense） | 最繁忙 expert/層（tiles は tile/20） | routing |","|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for r in par(case,k): o.append(f"| {r['agg']:,.0f} | {r['tsu']:.1f} | {r['users']} | `{r['cfg']}` | {r['router']} / {r['xform']} / {r['hc_form']} | {r['slot_ms']:.3f} | {r['dram_ms']:.3f} | {r['comp_ms']:.3f} | {r['comm_ms']:.3f} | {r['routed_exposed_ms']:.3f} | {r['resident_MB']:.0f} / {r['buf_MB']:.1f} ({r['dense_chip_MB']:.0f}) | {r['busiest']:.1f} | {r['src']} |")
     return "\n".join(o)
-
-
 def table_tp(b):
-    o = [
-        "| TP_a | PP1, EP1×TPx=TP（列等分）, DCP1 tsu | agg (users) | tsu 最良の構成（PP/EP/DCP/n_mb 自由） | router / expert | tsu | agg (users) | T_tok [ms]; 段 DRAM/pass / 演算 / 通信 |",
-        "|---|---|---|---|---|---|---|---|",
-    ]
-    for TP, ep1, bt in tp_rows(b):
-        o.append(
-            f"| {TP} | {ep1['tsu']:.0f} | {ep1['agg']:,.0f} ({ep1['users']}) | `{bt['cfg']}` | {bt['router']} / {bt['xform']} | {bt['tsu']:.0f} | {bt['agg']:,.0f} ({bt['users']}) | {bt['T_tok_ms']:.3f}; {bt['dram_ms']:.3f} / {bt['comp_ms']:.3f} / {bt['comm_ms']:.3f} |"
-        )
+    o=["| TP_a | PP1, EP1×TPx=TP（列等分）, DCP1 tsu | agg (users) | tsu 最良の構成（PP/EP/DCP/n_mb 自由） | router / expert | tsu | agg (users) | T_tok [ms]; 段 DRAM/pass / 演算 / 通信 |","|---|---|---|---|---|---|---|---|"]
+    for TP,ep1,bt in tp_rows(b): o.append(f"| {TP} | {ep1['tsu']:.0f} | {ep1['agg']:,.0f} ({ep1['users']}) | `{bt['cfg']}` | {bt['router']} / {bt['xform']} | {bt['tsu']:.0f} | {bt['agg']:,.0f} ({bt['users']}) | {bt['T_tok_ms']:.3f}; {bt['dram_ms']:.3f} / {bt['comp_ms']:.3f} / {bt['comm_ms']:.3f} |")
     return "\n".join(o)
-
-
 def table_ladder():
-    o = [
-        "| PP × TP_a（b=1 の最良、EP/DCP/周/hc 形 自由） | 構成 | router / expert / 段の切り方 / 段の形 / hc | tsu | T_tok [ms] | 段 DRAM/pass | 演算 | 隠れない通信 | L1: 常駐 dense / 先読みバッファ / 空き時間の先読み [MB]（段の dense） | hop ×1 / ×2 / ×4 |",
-        "|---|---|---|---|---|---|---|---|---|---|",
-    ]
-    for PP, TP, r in ladder:
-        o.append(
-            f"| PP{PP} × TP{TP} | `{r['cfg']}` | {r['router']} / {r['xform']} / {r['balance']} / {r['layout']} / {r['hc_form']} | {r['tsu']:.0f} | {r['T_tok_ms']:.3f} | {r['dram_ms']:.3f} | {r['comp_ms']:.3f} | {r['comm_ms']:.3f} | {r['resident_MB']:.0f} / {r['buf_MB']:.1f} / {r['prefetch_MB']:.0f} ({r['dense_chip_MB']:.0f}) | {sens[PP][1.0]:.0f} / {sens[PP][2.0]:.0f} / {sens[PP][4.0]:.0f} |"
-        )
+    o=["| PP × TP_a（b=1 の最良、EP/DCP/周/hc 形 自由） | 構成 | router / expert / 段の切り方 / 段の形 / hc | tsu | T_tok [ms] | 段 DRAM/pass | 演算 | 隠れない通信 | L1: 常駐 dense / 先読みバッファ / 空き時間の先読み [MB]（段の dense） | hop ×1 / ×2 / ×4 |","|---|---|---|---|---|---|---|---|---|---|"]
+    for PP,TP,r in ladder: o.append(f"| PP{PP} × TP{TP} | `{r['cfg']}` | {r['router']} / {r['xform']} / {r['balance']} / {r['layout']} / {r['hc_form']} | {r['tsu']:.0f} | {r['T_tok_ms']:.3f} | {r['dram_ms']:.3f} | {r['comp_ms']:.3f} | {r['comm_ms']:.3f} | {r['resident_MB']:.0f} / {r['buf_MB']:.1f} / {r['prefetch_MB']:.0f} ({r['dense_chip_MB']:.0f}) | {sens[PP][1.0]:.0f} / {sens[PP][2.0]:.0f} / {sens[PP][4.0]:.0f} |")
     return "\n".join(o)
-
-
 def table_best():
-    o = ["| ケース | k | agg 最大 | その tsu | users | 構成 | tsu 最大 | その agg | 構成 |", "|---|---|---|---|---|---|---|---|---|"]
-    for case, _ in CASES:
-        for k in (0, 1):
-            a = best(case, k, "agg")
-            t = best(case, k, "tsu")
-            o.append(
-                f"| {case} | {k} | {a['agg']:,.0f} | {a['tsu']:.1f} | {a['users']} | `{a['cfg']}` | {t['tsu']:.0f} | {t['agg']:,.0f} | `{t['cfg']}` |"
-            )
+    o=["| ケース | k | agg 最大 | その tsu | users | 構成 | tsu 最大 | その agg | 構成 |","|---|---|---|---|---|---|---|---|---|"]
+    for case,_ in CASES:
+        for k in (0,1):
+            a=best(case,k,"agg"); t=best(case,k,"tsu")
+            o.append(f"| {case} | {k} | {a['agg']:,.0f} | {a['tsu']:.1f} | {a['users']} | `{a['cfg']}` | {t['tsu']:.0f} | {t['agg']:,.0f} | `{t['cfg']}` |")
     return "\n".join(o)
-
-
 def table_impl():
-    o = ["| ケース | k | agg 最大 | 構成 | tsu 最大 | 構成 |", "|---|---|---|---|---|---|"]
-    for case, _ in CASES:
-        for k in (0, 1):
-            a = bestimpl(case, k, "agg")
-            t = bestimpl(case, k, "tsu")
-            o.append(
-                f"| {case} | {k} | {a['agg']:,.0f} ({a['tsu']:.0f} tsu) | `{a['cfg']}` | {t['tsu']:.0f} ({t['agg']:,.0f} agg) | `{t['cfg']}` |"
-            )
+    o=["| ケース | k | agg 最大 | 構成 | tsu 最大 | 構成 |","|---|---|---|---|---|---|"]
+    for case,_ in CASES:
+        for k in (0,1):
+            a=bestimpl(case,k,"agg"); t=bestimpl(case,k,"tsu")
+            o.append(f"| {case} | {k} | {a['agg']:,.0f} ({a['tsu']:.0f} tsu) | `{a['cfg']}` | {t['tsu']:.0f} ({t['agg']:,.0f} agg) | `{t['cfg']}` |")
     return "\n".join(o)
-
-
-def bestb(b, case="hit", k=1):
-    return max([r for r in feas(rs(case, k)) if A(r)["b"] == b], key=lambda r: r["tsu"])
-
-
-def first_b_pp1():
-    return next(b for b in (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048) if A(bestb(b))["PP"] == 1)
-
-
-def first_b_dcp():
-    return next(
-        b
-        for b in (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048)
-        if all(A(r)["CP"] > 1 for r in par("hit", 1) if A(r)["b"] >= b)
-    )
-
-
+def bestb(b,case="hit",k=1): return max([r for r in feas(rs(case,k)) if A(r)["b"]==b],key=lambda r:r["tsu"])
+def first_b_pp1(): return next(b for b in (1,2,4,8,16,32,64,128,256,512,1024,2048) if A(bestb(b))["PP"]==1)
+def first_b_dcp(): return next(b for b in (1,2,4,8,16,32,64,128,256,512,1024,2048) if all(A(r)["CP"]>1 for r in par('hit',1) if A(r)["b"]>=b))
 def dcpb1(c):
-    a = A(hb1)
-    return max(
-        [
-            r
-            for r in feas(rs("hit", 1))
-            if A(r)["DP"] == a["DP"]
-            and A(r)["PP"] == a["PP"]
-            and A(r)["TP_a"] == a["TP_a"]
-            and A(r)["EP"] == a["EP"]
-            and A(r)["b"] == 1
-            and A(r)["CP"] == c
-        ],
-        key=lambda r: r["tsu"],
-    )
-
-
-b1 = S["batches"]["1"]
-b16 = S["batches"]["16x2"]
-b256 = S["batches"]["256"]
-lat = {n: last_tile(diameter(n)) * 1e6 for n in (4, 8, 16, 32)}
-ncoll = 6
-dense_chip32 = DENSE_TOTAL / 32 / 1e6
-l1_total = L1_CHIP / 2**20
-l1_stream = L1_STREAM / 2**20
-l1_free_b1 = (L1_CHIP - L1_STREAM - 4 * 2 * H * BF16 - 2 * EXPERT / 8) / 2**20
+    a=A(hb1); return max([r for r in feas(rs("hit",1)) if A(r)["DP"]==a["DP"] and A(r)["PP"]==a["PP"] and A(r)["TP_a"]==a["TP_a"] and A(r)["EP"]==a["EP"] and A(r)["b"]==1 and A(r)["CP"]==c],key=lambda r:r["tsu"])
+b1=S["batches"]["1"]; b16=S["batches"]["16x2"]; b256=S["batches"]["256"]
+lat={n: last_tile(diameter(n))*1e6 for n in (4,8,16,32)}
+ncoll=6
+dense_chip32=DENSE_TOTAL/32/1e6; l1_total=L1_CHIP/2**20; l1_stream=L1_STREAM/2**20; l1_free_b1=(L1_CHIP-L1_STREAM-4*2*H*BF16-2*EXPERT/8)/2**20
 
 
 def frames_of(cfgax, ctx=192, case="hit"):
     """the chosen form's winning options and its per-frame numbers (FRAMES_SINK)"""
     global FRAMES_SINK
-    a = dict(cfgax)
-    R = a.pop("rounds", 1)
-    best = None
-    S = a["TP_a"] * a["DP_a"]
-    PP = a["PP"]
-    layouts = [((4, 4), 3), ((8, 2), 1)] if (PP == 2 and S == 16) else [(SUBMESH[S], HAND_HOPS[PP])]
-    FRAMES_SINK = None
-    for sub, hh in layouts:
-        keep = SUBMESH[S]
-        SUBMESH[S] = sub
-        for rep in (0, 1):
-            for bal in ("bytes", "chain") if PP > 1 else ("bytes",):
-                for buf in (0,) if case == "miss" else (0, 1, 2, 3):
-                    for xf in ("slice", "tiles") if a["TP_x"] >= 8 else ("slice",):
-                        for hf in ("A", "B", "Bn", "B+D") if a["TP_a"] > 1 else ("A",):
-                            HC_FORM[0] = hf
-                            x = evaluate_form(a, routing, ctx, 1, case, rep, bal, hh, buf, xf, R)
-                            if best is None or (x["T_tok_ms"], x["dram_ms"]) < (
-                                best[0]["T_tok_ms"],
-                                best[0]["dram_ms"],
-                            ):
-                                best = (x, rep, bal, hh, buf, xf, sub, hf)
-        SUBMESH[S] = keep
-    x, rep, bal, hh, buf, xf, sub, hf = best
-    keep = SUBMESH[S]
-    SUBMESH[S] = sub
-    FRAMES_SINK = {}
-    HC_FORM[0] = hf
-    evaluate_form(a, routing, ctx, 1, case, rep, bal, hh, buf, xf, R)
-    fr = dict(FRAMES_SINK)
-    FRAMES_SINK = None
-    SUBMESH[S] = keep
-    HC_FORM[0] = "A"
-    return x, fr, dict(rep=rep, bal=bal, hh=hh, buf=buf, xf=xf, sub=sub, R=R, hf=hf)
-
-
-T1 = frames_of(dict(A(hb1), rounds=hb1["rounds"]))
-T1x, T1f, T1o = T1
-AG1 = frames_of(dict(A(hagg), rounds=hagg["rounds"]))
-AGx, AGf, AGo = AG1
-assert abs(T1x["tsu"] - hb1["tsu"]) < 0.5 and abs(AGx["agg"] - hagg["agg"]) < 1, (
-    T1x["tsu"],
-    hb1["tsu"],
-    AGx["agg"],
-    hagg["agg"],
-)
-
-
+    a=dict(cfgax); R=a.pop("rounds",1); best=None
+    S=a["TP_a"]*a["DP_a"]; PP=a["PP"]
+    layouts=[((4,4),3),((8,2),1)] if (PP==2 and S==16) else [(SUBMESH[S],HAND_HOPS[PP])]
+    FRAMES_SINK=None
+    for sub,hh in layouts:
+        keep=SUBMESH[S]; SUBMESH[S]=sub
+        for rep in (0,1):
+            for bal in (("bytes","chain") if PP>1 else ("bytes",)):
+                for buf in ((0,) if case=="miss" else (0,1,2,3)):
+                    for xf in (("slice","tiles") if a["TP_x"]>=8 else ("slice",)):
+                        for hf in (("A","B","Bn","B+D") if a["TP_a"]>1 else ("A",)):
+                            HC_FORM[0]=hf
+                            x=evaluate_form(a,routing,ctx,1,case,rep,bal,hh,buf,xf,R)
+                            if best is None or (x["T_tok_ms"],x["dram_ms"])<(best[0]["T_tok_ms"],best[0]["dram_ms"]): best=(x,rep,bal,hh,buf,xf,sub,hf)
+        SUBMESH[S]=keep
+    x,rep,bal,hh,buf,xf,sub,hf=best
+    keep=SUBMESH[S]; SUBMESH[S]=sub; FRAMES_SINK={}; HC_FORM[0]=hf
+    evaluate_form(a,routing,ctx,1,case,rep,bal,hh,buf,xf,R); fr=dict(FRAMES_SINK); FRAMES_SINK=None; SUBMESH[S]=keep; HC_FORM[0]="A"
+    return x,fr,dict(rep=rep,bal=bal,hh=hh,buf=buf,xf=xf,sub=sub,R=R,hf=hf)
+T1=frames_of(dict(A(hb1),rounds=hb1["rounds"])); T1x,T1f,T1o=T1
+AG1=frames_of(dict(A(hagg),rounds=hagg["rounds"])); AGx,AGf,AGo=AG1
+assert abs(T1x["tsu"]-hb1["tsu"])<0.5 and abs(AGx["agg"]-hagg["agg"])<1, (T1x["tsu"],hb1["tsu"],AGx["agg"],hagg["agg"])
 def table_frames(fr, PP):
-    o = [
-        "| 枠 | chip 群 | 層 | dense [MB] | 状態+KV [MB] | routed [MB] | 鎖 [ms] | 占有 [ms] | 空き時間の先読み [MB] |",
-        "|---|---|---|---|---|---|---|---|---|",
-    ]
-    for f, (a, z) in enumerate(fr["cuts"]):
-        lay = f"L{a}〜L{min(z,L)-1}" + ("+tail" if z > L else "") if a < L else "tail"
-        o.append(
-            f"| {f} | {f%PP} | {lay} | {fr['dense'][f]/1e6:.1f} | {fr['state'][f]/1e6:.1f} | {fr['routed'][f]/1e6:.1f} | {fr['chain'][f]*1e3:.3f} | {fr['occ'][f]*1e3:.3f} | {fr['pre'][f]/1e6:.1f} |"
-        )
+    o=["| 枠 | chip 群 | 層 | dense [MB] | 状態+KV [MB] | routed [MB] | 鎖 [ms] | 占有 [ms] | 空き時間の先読み [MB] |","|---|---|---|---|---|---|---|---|---|"]
+    for f,(a,z) in enumerate(fr["cuts"]):
+        lay=f"L{a}〜L{min(z,L)-1}"+("+tail" if z>L else "") if a<L else "tail"
+        o.append(f"| {f} | {f%PP} | {lay} | {fr['dense'][f]/1e6:.1f} | {fr['state'][f]/1e6:.1f} | {fr['routed'][f]/1e6:.1f} | {fr['chain'][f]*1e3:.3f} | {fr['occ'][f]*1e3:.3f} | {fr['pre'][f]/1e6:.1f} |")
     return "\n".join(o)
-
-
 def table_units():
-    MiB = 2**20
-    rows = [
-        ("GDN 層（36 層）: in_proj qkv [2·16·128+48·128, H] bf8", W_GDN["qkv"]),
-        ("GDN: in_proj z [48·128, H] bf8", W_GDN["z"]),
-        ("GDN: out_proj [H, 48·128] bf8", W_GDN["out"]),
-        ("GDN: a/b 射影 [48, H]×2 bf8 + conv/norm/A_log/dt_bias", W_GDN["ab"] + W_GDN["small"]),
-        ("QSA 層（12 層）: q+gate 射影 [2·24·256, H] bf8", W_QSA["qg"]),
-        ("QSA: k/v 射影 [2·256, H]×2 bf8", W_QSA["kv"]),
-        ("QSA: o_proj [H, 24·256] bf8", W_QSA["o"]),
-        ("QSA: indexer 射影 [4·128+128, H] bf8 + norm", W_QSA["idx"] + W_QSA["small"]),
-        ("MoE（全 48 層 + MTP）: shared expert up/gate/down [640, H]×3 bf8 + gate", W_MOE["shared"]),
-        ("MoE: router [512, H] bf16", W_MOE["router"]),
-        ("MoE: routed expert 1 個 up/gate [2·640, H] + down [H, 640] BF4（× 512 × 49 層）", EXPERT),
-        ("hyper-connection（層ごとに 2 ブロック）: down [320, 4H] + up [4H, 320] bf16 + inject + norm", hc_block),
-        ("層の残り: hc 2 ブロック + norm 2 本", W_OTHER),
-        ("PLE（層 2 の後）: [4H, H] + [H, H] bf16 + 表", PLE),
-        ("final mixer [320, 4H]×2 bf8 + norm", FINAL),
-        ("lm_head [248320, H] bf8", LM_HEAD),
-        ("MTP 層（QSA + MoE + 射影 2 本 + mixer 2 本 + hc）", MTP),
-    ]
-    o = ["| 単品（HF 定義） | バイト [MiB] |", "|---|---|"] + [f"| {n} | {v/MiB:,.2f} |" for n, v in rows]
-    o += [
-        f"| **dense 合計（GDN 36 × {(sum(W_GDN.values())+sum(W_MOE.values())+W_OTHER)/MiB:.1f} + QSA 12 × {(sum(W_QSA.values())+sum(W_MOE.values())+W_OTHER)/MiB:.1f} + PLE + final + lm_head + MTP）** | **{DENSE_TOTAL/MiB:,.0f}（{DENSE_TOTAL/GB:.3f} GB）** |",
+    MiB=2**20
+    rows=[("GDN 層（36 層）: in_proj qkv [2·16·128+48·128, H] bf8",W_GDN["qkv"]),("GDN: in_proj z [48·128, H] bf8",W_GDN["z"]),("GDN: out_proj [H, 48·128] bf8",W_GDN["out"]),("GDN: a/b 射影 [48, H]×2 bf8 + conv/norm/A_log/dt_bias",W_GDN["ab"]+W_GDN["small"]),
+          ("QSA 層（12 層）: q+gate 射影 [2·24·256, H] bf8",W_QSA["qg"]),("QSA: k/v 射影 [2·256, H]×2 bf8",W_QSA["kv"]),("QSA: o_proj [H, 24·256] bf8",W_QSA["o"]),("QSA: indexer 射影 [4·128+128, H] bf8 + norm",W_QSA["idx"]+W_QSA["small"]),
+          ("MoE（全 48 層 + MTP）: shared expert up/gate/down [640, H]×3 bf8 + gate",W_MOE["shared"]),("MoE: router [512, H] bf16",W_MOE["router"]),("MoE: routed expert 1 個 up/gate [2·640, H] + down [H, 640] BF4（× 512 × 49 層）",EXPERT),
+          ("hyper-connection（層ごとに 2 ブロック）: down [320, 4H] + up [4H, 320] bf16 + inject + norm",hc_block),("層の残り: hc 2 ブロック + norm 2 本",W_OTHER),
+          ("PLE（層 2 の後）: [4H, H] + [H, H] bf16 + 表",PLE),("final mixer [320, 4H]×2 bf8 + norm",FINAL),("lm_head [248320, H] bf8",LM_HEAD),("MTP 層（QSA + MoE + 射影 2 本 + mixer 2 本 + hc）",MTP)]
+    o=["| 単品（HF 定義） | バイト [MiB] |","|---|---|"]+[f"| {n} | {v/MiB:,.2f} |" for n,v in rows]
+    o+=[f"| **dense 合計（GDN 36 × {(sum(W_GDN.values())+sum(W_MOE.values())+W_OTHER)/MiB:.1f} + QSA 12 × {(sum(W_QSA.values())+sum(W_MOE.values())+W_OTHER)/MiB:.1f} + PLE + final + lm_head + MTP）** | **{DENSE_TOTAL/MiB:,.0f}（{DENSE_TOTAL/GB:.3f} GB）** |",
         f"| **routed expert 合計（512 × 49 層 × {EXPERT/MiB:.2f}）** | **{EXPERTS_TOTAL/MiB:,.0f}（{EXPERTS_TOTAL/GB:.2f} GB）** |",
         f"| ユーザ状態: GDN 状態 S [48,128,128] fp32 × 36 層（+ conv tap 3 行 bf16） | {36*S_USER_LAYER/MiB:.1f}/user 常駐、1 pass 読み+書き {36*S_USER_LAYER*2/MiB:.1f} |",
-        f"| ユーザ KV: QSA 1 層 1 token K/V 2 head × 256 × 2 × bf16 + index key 128/4 | {kv_write_row()/1024:.2f} KiB/token/層 = ctx 192 で {12*kv_resident(192)/MiB:.1f}、262k で {12*kv_resident(262144)/MiB:,.0f}、1M で {12*kv_resident(1000000)/MiB:,.0f} MiB/user |",
-    ]
+        f"| ユーザ KV: QSA 1 層 1 token K/V 2 head × 256 × 2 × bf16 + index key 128/4 | {kv_write_row()/1024:.2f} KiB/token/層 = ctx 192 で {12*kv_resident(192)/MiB:.1f}、262k で {12*kv_resident(262144)/MiB:,.0f}、1M で {12*kv_resident(1000000)/MiB:,.0f} MiB/user |"]
     return "\n".join(o)
-
-
 def table_census():
-    o = [
-        "| B（行） | 実 distinct expert/層（一様仮定） | 2 段先読みのヒット率 h2 / h12 | 最繁忙 group（EP2 / EP4 / EP8、expert 数） | 最繁忙 chip（tiles 形 TPx8 / TPx16 / TPx32、tile 数; 均等なら distinct×20/TPx） | tiles TPx8 の集合（P2 / P1−P2 / 外れ / 無駄読み、tile） |",
-        "|---|---|---|---|---|---|",
-    ]
-    for key in ("1", "1x2", "16x2", "32x2", "128x2", "256"):
-        b = S["batches"][key]
-        t = b.get("busiest_tiles", {})
-        s2 = S2[key]
-        t8 = s2["tiles"]["1x8"]
-        o.append(
-            f"| {key} | {b['distinct_mean']:.1f}（{b['distinct_uniform']:.1f}） | {s2['hit2']:.2f} / {s2['hit12']:.2f} | {b['busiest']['2']['actual']:.1f} / {b['busiest']['4']['actual']:.1f} / {b['busiest']['8']['actual']:.1f} | {t['1x8']['actual']:.0f} / {t['1x16']['actual']:.0f} / {t['1x32']['actual']:.0f}（{b['distinct_mean']*20/8:.0f} / {b['distinct_mean']*20/16:.0f} / {b['distinct_mean']*20/32:.0f}） | {t8['P2']:.1f} / {t8['P1mP2']:.1f} / {t8['miss']:.1f} / {t8['wasted']:.1f} |"
-        )
+    o=["| B（行） | 実 distinct expert/層（一様仮定） | 2 段先読みのヒット率 h2 / h12 | 最繁忙 group（EP2 / EP4 / EP8、expert 数） | 最繁忙 chip（tiles 形 TPx8 / TPx16 / TPx32、tile 数; 均等なら distinct×20/TPx） | tiles TPx8 の集合（P2 / P1−P2 / 外れ / 無駄読み、tile） |","|---|---|---|---|---|---|"]
+    for key in ("1","1x2","16x2","32x2","128x2","256"):
+        b=S["batches"][key]; t=b.get("busiest_tiles",{}); s2=S2[key]; t8=s2["tiles"]["1x8"]
+        o.append(f"| {key} | {b['distinct_mean']:.1f}（{b['distinct_uniform']:.1f}） | {s2['hit2']:.2f} / {s2['hit12']:.2f} | {b['busiest']['2']['actual']:.1f} / {b['busiest']['4']['actual']:.1f} / {b['busiest']['8']['actual']:.1f} | {t['1x8']['actual']:.0f} / {t['1x16']['actual']:.0f} / {t['1x32']['actual']:.0f}（{b['distinct_mean']*20/8:.0f} / {b['distinct_mean']*20/16:.0f} / {b['distinct_mean']*20/32:.0f}） | {t8['P2']:.1f} / {t8['P1mP2']:.1f} / {t8['miss']:.1f} / {t8['wasted']:.1f} |")
     return "\n".join(o)
-
-
-a1 = A(hb1)
-S1 = a1["TP_a"] * a1["DP_a"]
-aa = A(hagg)
-SA = aa["TP_a"] * aa["DP_a"]
-P1 = T1x
-next_frame = max(T1f["dense"]) / 1e6
-routed_layer = T1f["routed"][0] / max(1, T1f["cuts"][0][1] - T1f["cuts"][0][0]) / 1e6
-dram_items = None
-hand_us = T1f["hand"] * 1e6
-comm_gdn = T1f["comm"][0] * 1e6
-comm_qsa = T1f["comm"][3] * 1e6
-comm_tail = T1f["comm"][48] * 1e6
-dram_items = dict(dense=sum(T1f["nonres"]) / 1e6, state=sum(T1f["state"]) / 1e6, routed=sum(T1f["routed"]) / 1e6)
-heads_v = GDN_V_HEADS // a1["TP_a"]
-heads_qk = GDN_QK_HEADS // a1["TP_a"]
-heads_q = QSA_HEADS // a1["TP_a"]
-kvrep = max(1, a1["TP_a"] // QSA_KV_HEADS)
-agg_dram = dict(dense=sum(AGf["nonres"]) / 1e6, state=sum(AGf["state"]) / 1e6, routed=sum(AGf["routed"]) / 1e6)
-
-
+a1=A(hb1); S1=a1["TP_a"]*a1["DP_a"]; aa=A(hagg); SA=aa["TP_a"]*aa["DP_a"]
+P1=T1x; next_frame=max(T1f["dense"])/1e6; routed_layer=T1f["routed"][0]/max(1,T1f["cuts"][0][1]-T1f["cuts"][0][0])/1e6
+dram_items=None
+hand_us=T1f["hand"]*1e6; comm_gdn=T1f["comm"][0]*1e6; comm_qsa=T1f["comm"][3]*1e6; comm_tail=T1f["comm"][48]*1e6
+dram_items=dict(dense=sum(T1f["nonres"])/1e6, state=sum(T1f["state"])/1e6, routed=sum(T1f["routed"])/1e6)
+heads_v=GDN_V_HEADS//a1["TP_a"]; heads_qk=GDN_QK_HEADS//a1["TP_a"]; heads_q=QSA_HEADS//a1["TP_a"]; kvrep=max(1,a1["TP_a"]//QSA_KV_HEADS)
+agg_dram=dict(dense=sum(AGf["nonres"])/1e6, state=sum(AGf["state"])/1e6, routed=sum(AGf["routed"])/1e6)
 def steps():
     """from the served form to the limit, each step's number (ctx 192, k=1)"""
-    o = []
+    o=[]
     o.append(("今の配備の形（DP8 × TP4、lanes 16、k=1、router 後に expert を読む）の実測", f"{1186.9:,.1f} tok/s（14.6 tok/s/user）"))
-    o.append(
-        (
-            "同じ形の限界（全ミス）: T_pass {:.2f} ms は段の DRAM/pass で、うち router 後の routed 読み {:.2f} ms、1 chip の dense {:,.0f} MB のうち常駐 {:.0f} MB（残りを pass ごとに読む）".format(
-                cur["slot_ms"], cur["routed_exposed_ms"], cur["dense_chip_MB"], cur["resident_MB"]
-            ),
-            f"{cur['agg']:,.0f} tok/s（効率 {1186.9/cur['agg']*100:.1f}%）",
-        )
-    )
+    o.append(("同じ形の限界（全ミス）: T_pass {:.2f} ms は段の DRAM/pass で、うち router 後の routed 読み {:.2f} ms、1 chip の dense {:,.0f} MB のうち常駐 {:.0f} MB（残りを pass ごとに読む）".format(cur['slot_ms'],cur['routed_exposed_ms'],cur['dense_chip_MB'],cur['resident_MB']), f"{cur['agg']:,.0f} tok/s（効率 {1186.9/cur['agg']*100:.1f}%）"))
     o.append(("同じ形で routed を先読みしても（全ヒット）", f"{curh['agg']:,.0f}（DRAM/pass 支配で不変）"))
-    o.append(
-        (
-            "今日の実装拘束内（TP∈{4,8}, EP=TP, PP=DCP=1, lanes×2 ≤ 32）の最良: agg / tsu",
-            f"{ia['agg']:,.0f}（`{ia['cfg']}`）/ {it['tsu']:,.0f}（`{it['cfg']}`）",
-        )
-    )
-    b16 = max([r for r in feas(rs("hit", 1)) if A(r)["b"] == 16], key=lambda r: r["tsu"])
-
+    o.append(("今日の実装拘束内（TP∈{4,8}, EP=TP, PP=DCP=1, lanes×2 ≤ 32）の最良: agg / tsu", f"{ia['agg']:,.0f}（`{ia['cfg']}`）/ {it['tsu']:,.0f}（`{it['cfg']}`）"))
+    b16=max([r for r in feas(rs('hit',1)) if A(r)['b']==16],key=lambda r:r['tsu'])
     def axes_desc(r):
-        a = A(r)
-        return (
-            f"TP{a['TP_a']}"
-            + (f" × DPa{a['DP_a']}" if a["DP_a"] > 1 else "")
-            + (f" + DCP{a['CP']}" if a["CP"] > 1 else "")
-            + (f"、PP{a['PP']}" + (f" の {r['rounds']} 周" if r.get("rounds", 1) > 1 else "") if a["PP"] > 1 else "")
-            + f"、expert {r['xform']}（EP{a['EP']} × TPx{a['TP_x']}）、router {'複製' if r['router']=='replicated' else '列分割'}、hc {r['hc_form']}"
-        )
-
-    o.append(
-        (
-            f"拘束を外した b=16（同じ 16 users/instance）: {axes_desc(b16)}",
-            f"tsu {b16['tsu']:,.0f}、agg {b16['agg']:,.0f}（`{b16['cfg']}`）",
-        )
-    )
+        a=A(r); return f"TP{a['TP_a']}" + (f" × DPa{a['DP_a']}" if a['DP_a']>1 else "") + (f" + DCP{a['CP']}" if a['CP']>1 else "") + (f"、PP{a['PP']}" + (f" の {r['rounds']} 周" if r.get('rounds',1)>1 else "") if a['PP']>1 else "") + f"、expert {r['xform']}（EP{a['EP']} × TPx{a['TP_x']}）、router {'複製' if r['router']=='replicated' else '列分割'}、hc {r['hc_form']}"
+    o.append((f"拘束を外した b=16（同じ 16 users/instance）: {axes_desc(b16)}", f"tsu {b16['tsu']:,.0f}、agg {b16['agg']:,.0f}（`{b16['cfg']}`）"))
     o.append((f"b=1 の tsu 最大: {axes_desc(hb1)}、L1 に次の枠を先読み", f"{hb1['tsu']:,.0f}（`{hb1['cfg']}`）"))
-    o.append(
-        (
-            f"agg 最大: DP{A(hagg)['DP']} × {A(hagg)['TP_a']*A(hagg)['DP_a']}chip、{axes_desc(hagg)}、b={A(hagg)['b']}（{hagg['users']:,} users）",
-            f"{hagg['agg']:,.0f}（漸近 {asym*1.376:,.0f} の {hagg['agg']/(asym*1.376)*100:.0f}%）",
-        )
-    )
-    return "\n".join(f"| {k} | {v} |" for k, v in o)
-
-
-def short(cfg):
-    return cfg.split(" b=")[0]
-
-
+    o.append((f"agg 最大: DP{A(hagg)['DP']} × {A(hagg)['TP_a']*A(hagg)['DP_a']}chip、{axes_desc(hagg)}、b={A(hagg)['b']}（{hagg['users']:,} users）", f"{hagg['agg']:,.0f}（漸近 {asym*1.376:,.0f} の {hagg['agg']/(asym*1.376)*100:.0f}%）"))
+    return "\n".join(f"| {k} | {v} |" for k,v in o)
+def short(cfg): return cfg.split(" b=")[0]
 def ctx_forms_tsu():
-    parts = []
+    parts=[]
     for c in CTXS:
-        r = bestc(c, "hit", "tsu")
-        parts.append(f"{c:,} → `{short(r['cfg'])}`（{r['tsu']:,.0f}）")
-    return "、".join(parts) + f"。1M は常駐 KV {12*kv_resident(1000000)/1e9:.0f} GB/user が DCP の枚数に分かれないと DRAM に入らない。"
-
-
+        r=bestc(c,"hit","tsu"); parts.append(f"{c:,} → `{short(r['cfg'])}`（{r['tsu']:,.0f}）")
+    return "、".join(parts)+f"。1M は常駐 KV {12*kv_resident(1000000)/1e9:.0f} GB/user が DCP の枚数に分かれないと DRAM に入らない。"
 def ctx_forms_agg():
-    parts = []
+    parts=[]
     for c in CTXS:
-        r = bestc(c, "hit", "agg")
-        parts.append(
-            f"{c:,} → `{r['cfg']}`（{r['agg']:,.0f} t/s、DP1 で入る最大 b {max(A(x)['b'] for x in rsc(c,'hit') if x['feasible'] and A(x)['DP']==1):,}）"
-        )
-    return "、".join(parts) + "。"
-
-
+        r=bestc(c,"hit","agg"); parts.append(f"{c:,} → `{r['cfg']}`（{r['agg']:,.0f} t/s、DP1 で入る最大 b {max(A(x)['b'] for x in rsc(c,'hit') if x['feasible'] and A(x)['DP']==1):,}）")
+    return "、".join(parts)+"。"
 def reading_ctx():
-    forms = {c: short(bestc(c, "hit", "tsu")["cfg"]) for c in CTXS}
-    same = [c for c in CTXS if forms[c].startswith(forms[1].split(" |")[0])]
-    dcp = [(c, A(bestc(c, "hit", "tsu"))["CP"]) for c in CTXS]
-    bmax = " / ".join(
-        "{:,}".format(max(A(r)["b"] for r in rsc(c, "hit") if r["feasible"] and A(r)["DP"] == 1)) for c in CTXS
-    )
-    missv = " / ".join("{:,.0f}".format(bestc(c, "miss", "tsu")["tsu"]) for c in CTXS)
-    dcp1_262 = max(r["tsu"] for r in rsc(262144, "hit") if r["feasible"] and A(r)["b"] == 1 and A(r)["CP"] == 1)
-    others = (
-        ""
-        if len(same) == len(CTXS)
-        else "、" + "、".join("{:,} で `{}`".format(c, forms[c]) for c in CTXS if c not in same)
-    )
-    return "tsu 最大の形は ctx {:,}〜{:,} で `{}` の系（DCP が {} と増える: index block の走査が分かれる; 262k で DCP4 {:,.0f} vs DCP1 {:,.0f}）{}。agg 最大は常駐 KV が b を縛るので系列長とともに落ちる（DP1 で入る最大 b: {}）。全ミス（今の runtime の形）の tsu は系列長に鈍感（{}）。".format(
-        min(same),
-        max(same),
-        forms[1],
-        " → ".join(str(d) for c, d in dcp),
-        bestbc(262144, 1)["tsu"],
-        dcp1_262,
-        others,
-        bmax,
-        missv,
-    )
-
-
-b1s = S["batches"]["1"]
-b16s = S["batches"]["16x2"]
-C7T = json.load(open("/data/yoshifuji/qwen38/routing/design_step7_chain_hit_A.json"))["T_steady"]
-out = f"""## 11. Decode limit on one Blackhole Galaxy: 5 軸（DP, PP, TP, EP, DCP）の限界性能と、そこから採る形
+    forms={c:short(bestc(c,"hit","tsu")["cfg"]) for c in CTXS}
+    same=[c for c in CTXS if forms[c].startswith(forms[1].split(" |")[0])]
+    dcp=[(c,A(bestc(c,"hit","tsu"))["CP"]) for c in CTXS]
+    bmax=" / ".join("{:,}".format(max(A(r)["b"] for r in rsc(c,"hit") if r["feasible"] and A(r)["DP"]==1)) for c in CTXS)
+    missv=" / ".join("{:,.0f}".format(bestc(c,"miss","tsu")["tsu"]) for c in CTXS)
+    dcp1_262=max(r["tsu"] for r in rsc(262144,"hit") if r["feasible"] and A(r)["b"]==1 and A(r)["CP"]==1)
+    others="" if len(same)==len(CTXS) else "、"+"、".join("{:,} で `{}`".format(c,forms[c]) for c in CTXS if c not in same)
+    return ("tsu 最大の形は ctx {:,}〜{:,} で `{}` の系（DCP が {} と増える: index block の走査が分かれる; 262k で DCP4 {:,.0f} vs DCP1 {:,.0f}）{}。agg 最大は常駐 KV が b を縛るので系列長とともに落ちる（DP1 で入る最大 b: {}）。全ミス（今の runtime の形）の tsu は系列長に鈍感（{}）。"
+            .format(min(same),max(same),forms[1]," → ".join(str(d) for c,d in dcp),bestbc(262144,1)["tsu"],dcp1_262,others,bmax,missv))
+b1s=S["batches"]["1"]; b16s=S["batches"]["16x2"]
+C7T=json.load(open("/data/yoshifuji/qwen38/routing/design_step7_chain_hit_A.json"))["T_steady"]
+out=f"""## 11. Decode limit on one Blackhole Galaxy: 5 軸（DP, PP, TP, EP, DCP）の限界性能と、そこから採る形
 
 この節は、32 chip の BH Galaxy で本モデルの decode を回すときの**限界性能**（物理値と HF 定義だけから出る 1 token の時間と機械全体の tokens/s）と、その限界を出す**形**（5 軸の分け方、chip の中身、1 token の時間線）を、詳細設計と実装がそのまま使える粒度で書く。並び: §11.1 目標と指標 → §11.2 設計の入力（モデル・routing の実態・機械の物理値・系列長） → §11.3 確定原則（設計規則） → §11.4 解析モデル（時間の式） → §11.5 限界性能の答え（系列長別、ctx 192 の詳細） → §11.6 採る形の詳細設計（tsu 側 / agg 側） → §11.7 今の実装との差と近づける順番 → §11.8 未確定と決着方法 → §11.9 生成・検証・運用。本文の数値・順位は全て生成器 `render_free5d_v4.py` が `free5d_v4.py` の結果と census から決定的に生成する（手書きの数値は無い）。第 4 版は §12 の詳細設計で見つかった 8 点（§12.8）を取り込んだもの: 会合（collective）は packet 模型、routed は 2 段先読み、tail の全単品、受け渡しは生きている行、hyper-connection の形の軸、先読み容量。経緯・指摘・撤回は作業記録 `/opt/codex/shared-with-lxd-containers/BH-GLX_Qwen3.8-Flash-Next_SC1_handoff_worklog_20261023.md` §9.4〜§13（追記専用）、生成器と census は同じ共有ディレクトリ（`BH-GLX_Qwen3.8-Flash-Next_free5d_v4_20261026.py`、`..._render_free5d_v4_20261026.py`、`..._design_comm_model_20261026.py`、`..._design_census_stage2_batches_20261026.py`、`..._routing_census_20261023.py`、`..._routing_stats_20261023.py`）。README と食い違ったら新しい方の作業記録が正しい。
 
@@ -579,18 +251,18 @@ routed の分子は一様仮定ではなく census の実測: 同時 B 行の実
 
 - DRAM {BW_DRAM/1e9:.0f} GB/s/chip（読み書きの和）、容量 31.9 GiB の 90% = {DRAM_CHIP/GB:.1f} GB を使う（runtime・trace・CB に 10%）。
 - chip 間 link {BW_LINK/1e9:.0f} GB/s × 2 本/方向 × 4 方向（8 × 4 torus、submesh の直径: {'、'.join(f'{SUBMESH[n][0]}×{SUBMESH[n][1]} で {diameter(n)}' for n in (4,8,16,32))} hop）、1 hop {HOP*1e9:.0f} ns（EthernetSsDesignSpec Table 16）+ 蓄積転送 2 KiB/(96 B/cycle) = {saf(PKT)*1e9:.0f} ns、中継 NoC 92 cycle + 32 flit、1 packet 4,096 B + 56 B。
-- Tensix 130 core × 1.35 GHz: 行列積 HiFi2 {MM} cycle/32×32 tile-MAC、要素演算 16 cycle/bf16 tile・32 cycle/fp32 tile、gated delta rule 1 組 (value head, user) 4,224 cycle（27B §9）→ 32 列 4 単位に分け 1 単位 256 + 800 × 行 cycle、router top-10 は logit tile ごと 10 pass × 32 cycle → NoC 集約 92 cycle → 10 pass。op 固定費は数えない（27B §9 と同じ）。
+- Tensix 130 core × 1.35 GHz: 行列積の 32×32 tile-MAC = max(MVMUL の命令数, 重み tile の SrcA への unpack)（MVMUL.md / MatrixUnit.md: MVMUL は SrcB 8 行 × SrcA 16×16 を 1 cycle に 1 本、fidelity の phase ごとに 1 本; UNPACR_Regular.md: SrcA へ 8 行/cycle（8・4 bit）、4 行/cycle（16 bit））、fidelity は配備の重みの形式どおり（bf8 HiFi2、BF4 LoFi、bf16 HiFi4）→ 行 ≤ 8 で bf8 8 / BF4 8 / bf16 16 cycle、32 行で 32 / 16 / 64 cycle（`mm_cost.py`。改訂 5 までは全形式一律 HiFi2 32 cycle で、b=1 の 2 行には過大だった誤り）。attention / indexer の行列積は bf16 の K/V を HiFi4 で 64 cycle/tile、要素演算 16 cycle/bf16 tile・32 cycle/fp32 tile、gated delta rule 1 組 (value head, user) 4,224 cycle（27B §9）→ 32 列 4 単位に分け 1 単位 256 + 800 × 行 cycle、router top-10 は logit tile ごと 10 pass × 32 cycle → NoC 集約 92 cycle → 10 pass。op 固定費は数えない（27B §9 と同じ）。
 - L1 1,536 KiB/core − 固定専有 140 KiB/core（firmware 40 + kernel 100）= {L1_CHIP/2**20:.1f} MiB/chip。ストリームバッファ 1 core {(L1_MM+L1_GDR+L1_KVC)//1024} KiB（行列積 tile 2 面 + 部分和 {L1_MM//1024}、GDR 状態単位 2 面 + 出力 {L1_GDR//1024}、KV/index チャンク 2 面 {L1_KVC//1024}）= {L1_STREAM/2**20:.1f} MiB/chip。
 
 #### 11.2.4 系列長で変わるもの
 
-QSA 1 行 1 層の KV 読み = 選択 K/V min(ctx, 2048) 行 × 2 head × 256 × 2 × bf16 + index block ctx/4 × 128 × bf16（indexer は全 block を採点する）: 1 user 1 pass で ctx 1: 0、128: {12*kv_read_row(128,1)/1e6:.1f} MB、8k: {12*kv_read_row(8192,1)/1e6:.0f}、32k: {12*kv_read_row(32768,1)/1e6:.0f}、262k: {12*kv_read_row(262144,1)/1e6:.0f}、1M: {12*kv_read_row(1000000,1)/1e6:.0f} MB。index 走査の演算（1 行 1 層、1 chip）: 262k {4*math.ceil(262144/4/32)*(128/32)*MM/32/CLK*1e6:.0f} µs、1M {4*math.ceil(1000000/4/32)*(128/32)*MM/32/CLK*1e6:.0f} µs。常駐 KV: 1 user で 262k {12*kv_resident(262144)/1e9:.1f} GB、1M {12*kv_resident(1000000)/1e9:.1f} GB（1 chip の DRAM の {12*kv_resident(1000000)/DRAM_CHIP*100:.0f}% → DCP が容量のためにも要る）。YaRN は RoPE の周波数を変えるだけで decode のバイト・演算を変えない。GDN 状態は系列長に依らない。
+QSA 1 行 1 層の KV 読み = 選択 K/V min(ctx, 2048) 行 × 2 head × 256 × 2 × bf16 + index block ctx/4 × 128 × bf16（indexer は全 block を採点する）: 1 user 1 pass で ctx 1: 0、128: {12*kv_read_row(128,1)/1e6:.1f} MB、8k: {12*kv_read_row(8192,1)/1e6:.0f}、32k: {12*kv_read_row(32768,1)/1e6:.0f}、262k: {12*kv_read_row(262144,1)/1e6:.0f}、1M: {12*kv_read_row(1000000,1)/1e6:.0f} MB。index 走査の演算（1 行 1 層、1 chip）: 262k {4*math.ceil(262144/4/32)*(128/32)*MM_ATT/32/CLK*1e6:.0f} µs、1M {4*math.ceil(1000000/4/32)*(128/32)*MM_ATT/32/CLK*1e6:.0f} µs。常駐 KV: 1 user で 262k {12*kv_resident(262144)/1e9:.1f} GB、1M {12*kv_resident(1000000)/1e9:.1f} GB（1 chip の DRAM の {12*kv_resident(1000000)/DRAM_CHIP*100:.0f}% → DCP が容量のためにも要る）。YaRN は RoPE の周波数を変えるだけで decode のバイト・演算を変えない。GDN 状態は系列長に依らない。
 
 ### 11.3 確定原則（本件の設計規則。詳細設計と実装はこれに従い、外れるときは本節を先に直す）
 
 **A. 限界と分母**
 1. 限界は物理値（§11.2.3）と HF 定義（§11.2.1）だけから立てる。実装の実測値（collective の時間、expert の実効帯域、fabric の α、packet 固定費、τ）を限界に入れない。実測は効率の分子にだけ使う。
-2. 単価は出典のあるものだけを使う（行列積 HiFi2 {MM} cycle、GDR 4,224 cycle/組、tile 読み 32 cycle、op 固定費なし）。出典の無い単価は置かない。
+2. 単価は出典のあるものだけを使う（行列積は一次資料の命令数と unpack の速さから形式別・行数別に、GDR 4,224 cycle/組、tile 読み 32 cycle、op 固定費なし）。実測値は限界に入れない（実測は実装の評価にだけ使う）。出典の無い単価は置かない。
 3. 設計原則（「DRAM を止めない」等）を条件として課さない。構成は token 時間と agg だけで比べ、寝る chip があっても速ければ採る。27B の設計選択（TP4 × PP8 × 7 周）を写さないが、その形（周、空いている群が次の枠を L1 に読む）は候補として列挙する。
 4. 仮定は「この場合には」で断り、代表が置けない所は並列列挙する（routed 4 ケース、系列長 6 点、hop ×1/×2/×4、ストリームバッファ ×0/×1/×2）。
 5. README の数値・順位は全て生成値。同じ入力から再生成して results・README が byte 一致し `git status` が空になるまで周回し、周回ごとに本文を通読する。
@@ -613,9 +285,9 @@ QSA 1 行 1 層の KV 読み = 選択 K/V min(ctx, 2048) 行 × 2 head × 256 ×
 16. 残差は L1 に入らなければ DRAM に置き、層ごとの往復を DRAM 車線に加える。容量は expert 分 + 段の dense 分 + ユーザの状態/KV ≤ {DRAM_CHIP/GB:.1f} GB/chip（PP > 1 では自段の層分だけ）。
 
 **E. 通信と演算**
-17. 通信（会合 = collective 1 回）は packet 模型で数える（`comm_model.py`: link 25 GB/s/方向、hop 280 ns、送り手の蓄積転送 16 ns/2 KiB packet、中継 92 cycle + 32 flit、packet 2 KiB + 56 B、link は FIFO、経路は縦 → 環の短い向き、形は BFS 木の multicast / 直送 / 木の reduce の速いもの、all-reduce は AG+局所 と RS+AG の速い方）。鎖に乗る露出: 入力 x の all-gather は届いた K chunk から次の射影が追いかける（露出 = 最後の chunk + 残りの仕事 − 射影）、部分和の reduce-scatter / all-reduce は 10 波で行列積の間に流す（露出 = 行列積を超えた分）、hc 読みの部分和の all-reduce も down の間に波で流す。投機 router の会合は鎖の外。
+17. 通信（会合 = collective 1 回）は packet 模型で数える（`comm_model.py`: 隣の chip へ 1 方向 2 チャネル × 25 GB/s（チャネルごとに FIFO、packet は先に空くチャネルへ、chunk は最少 packet 数と 2 の倍数の等分の速い方）、hop 280 ns、送り手の蓄積転送 16 ns/2 KiB packet、中継 92 cycle + 32 flit、packet 2 KiB + 56 B、経路は縦 → 環の短い向き、形は BFS 木の multicast / 直送 / 木の reduce の速いもの、all-reduce は AG+局所 と RS+AG の速い方）。鎖に乗る露出: 入力 x の all-gather は届いた K chunk から次の射影が追いかける（露出 = 最後の chunk + 残りの仕事 − 射影）、部分和の reduce-scatter / all-reduce は 10 波で行列積の間に流す（露出 = 行列積を超えた分）、hc 読みの部分和の all-reduce も down の間に波で流す。投機 router の会合は鎖の外。
 18. 層の会合は hyper-connection の形から数え、形は軸として列挙する: **A**（配備 `read_tp4`: 残差を列で TP_a 分割、down K 分割 → 部分和 AR（波）、up N 分割 → x の AG、出力 RS（波））、**B**（残差を複製: 出力 AR（波）に attention 出力の折り畳み F_i h_i（[1280, 768] bf16/chip/ブロック）を相乗りさせ MoE 読みの low-rank を局所に）、**Bn**（B + attention 読みの D を N 分割 + low-rank の AG）、**B+D**（B + D を複製）。B 系は受け渡しで残差の AG が 1 本増える。router は複製（会合無し、dense +{W_MOE['router']*48/1e6:.0f} MB/chip）と列分割（候補の AG 1 本）の両形、DP_a > 1 なら a2a 2 本、DCP > 1 なら merge 1 本（QSA 層）。
-19. b=1 の演算は行列積の鎖で決まる: 出力 tile が core 数より少なければ K を分けて部分和を NoC の木で足し（1 段 92 cycle + 64 flit + 32 cycle）、同じ入力を読む行列積は並べて走る（27B §9「和でなく max」）。GDR の単位は core に 1 つずつ乗り、verify 行は再帰で直列。
+19. b=1 の演算は行列積の鎖で決まる: 出力 tile が core 数より少なければ K を分けて部分和を NoC の木で足し（1 段 = 中継 92 cycle + 部分和の flit + その unpack と加算、2 行で 98 cycle）、各単品の入力（前の単品の出力）を K 片を持つ core へ配る 1 段（同じ 98 cycle、改訂 7）、同じ入力を読む行列積は並べて走る（27B §9「和でなく max」）。GDR の単位は core に 1 つずつ乗り、verify 行は再帰で直列。
 
 **F. 条件と結論の出し方**
 20. 系列長は今の配備の計測条件（192）を設計条件にせず、§11.1 の 6 点を並べる。
@@ -650,7 +322,7 @@ L1 {L1_CHIP/2**20:.1f} MiB − ストリームバッファ {L1_STREAM/2**20:.1f}
 
 #### 11.4.4 通信と演算の単価
 
-会合（packet 模型、b=1 の行、submesh 4 / 8 / 16 / 32 chip）: x の AG {meet('AG',4,2*H*BF16/4)*1e6:.2f} / {meet('AG',8,2*H*BF16/8)*1e6:.2f} / {meet('AG',16,2*H*BF16/16)*1e6:.2f} / {meet('AG',32,2*H*BF16/32)*1e6:.2f} µs、hc 部分和の AR（枝ごと [2, 4×325] fp32）{meet('AR',4,2*HC*(HC_LOW+HC+1)*FP32)*1e6:.2f} / {meet('AR',8,2*HC*(HC_LOW+HC+1)*FP32)*1e6:.2f} / {meet('AR',16,2*HC*(HC_LOW+HC+1)*FP32)*1e6:.2f} / {meet('AR',32,2*HC*(HC_LOW+HC+1)*FP32)*1e6:.2f}、出力部分和 [2, H] bf16 の RS {meet('RS',4,2*H*BF16)*1e6:.2f} / {meet('RS',8,2*H*BF16)*1e6:.2f} / {meet('RS',16,2*H*BF16)*1e6:.2f} / {meet('RS',32,2*H*BF16)*1e6:.2f}（鎖に乗る露出はこれより短い: TP8 で AG_x {ag_exposure(8,2*H*BF16/8,mm_c(2,(2*16*128+2*48*128)/8+64,H)/CLK)*1e6:.2f}、RS の波 {wave_exposure('RS',8,2*H*BF16,mm_c(2,H,48*128/8)/CLK)*1e6:.2f}、AR の波 {wave_exposure('AR',8,2*HC*(HC_LOW+HC+1)*FP32,mm_pool((2,HC_LOW,HC_DIM/8),(2,HC,HC_DIM/8))/CLK)*1e6:.2f} µs）。行列積の鎖（1 chip、b=1、K 分割の木込み）: GDN qkv/z/a/b pool TP8 {mm_c(2,(2*16*128+2*48*128)/8+64,H)/CLK*1e6:.2f} µs、TP32 {mm_c(2,(2*16*128+2*48*128)/32+64,H)/CLK*1e6:.2f} µs。GDR 1 単位 {256+800*2:,} cycle（k=1）。tile padding: expert 640 列を TPx 分割 → TPx16 {tile_pad(640,16):.1f} 倍、TPx32 {tile_pad(640,32):.1f} 倍（slice 形のみ）。
+会合（packet 模型、b=1 の行、submesh 4 / 8 / 16 / 32 chip）: x の AG {meet('AG',4,2*H*BF16/4)*1e6:.2f} / {meet('AG',8,2*H*BF16/8)*1e6:.2f} / {meet('AG',16,2*H*BF16/16)*1e6:.2f} / {meet('AG',32,2*H*BF16/32)*1e6:.2f} µs、hc 部分和の AR（枝ごと [2, 4×325] fp32）{meet('AR',4,2*HC*(HC_LOW+HC+1)*FP32)*1e6:.2f} / {meet('AR',8,2*HC*(HC_LOW+HC+1)*FP32)*1e6:.2f} / {meet('AR',16,2*HC*(HC_LOW+HC+1)*FP32)*1e6:.2f} / {meet('AR',32,2*HC*(HC_LOW+HC+1)*FP32)*1e6:.2f}、出力部分和 [2, H] bf16 の RS {meet('RS',4,2*H*BF16)*1e6:.2f} / {meet('RS',8,2*H*BF16)*1e6:.2f} / {meet('RS',16,2*H*BF16)*1e6:.2f} / {meet('RS',32,2*H*BF16)*1e6:.2f}（鎖に乗る露出はこれより短い: TP8 で AG_x {ag_exposure(8,2*H*BF16/8,mm_c(2,(2*16*128+2*48*128)/8+64,H,"bf8")/CLK)*1e6:.2f}、RS の波 {wave_exposure('RS',8,2*H*BF16,mm_c(2,H,48*128/8,"bf8")/CLK)*1e6:.2f}、AR の波 {wave_exposure('AR',8,2*HC*(HC_LOW+HC+1)*FP32,mm_pool((2,HC_LOW,HC_DIM/8,"bf16"),(2,HC,HC_DIM/8,"bf16"))/CLK)*1e6:.2f} µs）。行列積の鎖（1 chip、b=1、K 分割の木込み）: GDN qkv/z/a/b pool TP8 {mm_c(2,(2*16*128+2*48*128)/8+64,H,"bf8")/CLK*1e6:.2f} µs、TP32 {mm_c(2,(2*16*128+2*48*128)/32+64,H,"bf8")/CLK*1e6:.2f} µs。GDR 1 単位 {256+800*2:,} cycle（k=1）。tile padding: expert 640 列を TPx 分割 → TPx16 {tile_pad(640,16):.1f} 倍、TPx32 {tile_pad(640,32):.1f} 倍（slice 形のみ）。
 
 #### 11.4.5 routed の 4 ケース（代表仮定が置けないので並列列挙）
 

@@ -531,9 +531,9 @@ def ple():
 def tail(k=1):
     u = [
         dict(
-            unit="final hyper_connection_mixer: gr.norm [4H] + down [320, 4H] + up [4H, 320] bf16 -> [rows, H]",
-            w=2 * mm(HC_LOW, HCD, BF16) + HCD * BF16,
-            w_fmt="bf16",
+            unit="final hyper_connection_mixer: gr.norm [4H] bf16 + down [320, 4H] + up [4H, 320] bf8 (dense plan final_mixer) -> [rows, H]",
+            w=2 * mm(HC_LOW, HCD, BF8) + HCD * BF16,
+            w_fmt="bf8",
             in_=row(HCD),
             out=row(H),
             work=row(HC_LOW, FP32),
@@ -567,9 +567,9 @@ def tail(k=1):
     if k:
         u += [
             dict(
-                unit="mtp.hyper_connection_mixer: gr.norm [4H] + down [320, 4H] + up [4H, 320] bf16 on the backbone residual -> [rows, H]; pre_fc_norm_hidden [4H]",
-                w=2 * mm(HC_LOW, HCD, BF16) + 2 * HCD * BF16,
-                w_fmt="bf16",
+                unit="mtp.hyper_connection_mixer: gr.norm [4H] bf16 + down [320, 4H] + up [4H, 320] bf8 (dense plan final_mixer) on the backbone residual -> [rows, H]; pre_fc_norm_hidden [4H]",
+                w=2 * mm(HC_LOW, HCD, BF8) + 2 * HCD * BF16,
+                w_fmt="bf8",
                 in_=row(HCD),
                 out=row(H),
                 work=row(HC_LOW, FP32),

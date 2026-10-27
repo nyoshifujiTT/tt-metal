@@ -107,7 +107,7 @@ for a, b, c in rows:
     P(f"| {a} | {b} | {c} |")
 P("")
 P(
-    "数値形式: dense bf8（1,088 B/tile）、hc・router・norm・mixer bf16、routed expert BF4（576 B/tile）、活性 bf16、S fp32、行列積の部分和 fp32 DEST、線上の部分和 bf16、行列積 HiFi2。合格線は `docs/NUMERICS.md` の acceptance（pinned 表、`json` 96/96）。K 分割の足す順・hc 統計の reduce の順・GDR の 4 単位分割は bf16 丸めの回数を変えるので、実装時に PCC と発散 index で判定する（机上で決めない）。\n"
+    "数値形式（配備の `ttnn/decode_matmul.py` の dense plan と同じ）: dense（GDN・QSA・shared・lm_head・final / MTP の mixer（改訂 6 までは bf16 と数えていた誤り）・MTP の fc）bf8（1,088 B/tile）、各層の hc mixer・router・norm・PLE bf16、routed expert BF4（576 B/tile）、活性 bf16、S fp32、行列積の部分和 fp32 DEST、線上の部分和 bf16。行列積の fidelity は配備どおり重みの形式で決まる（bf8 HiFi2、BF4 LoFi、bf16 HiFi4）。合格線は `docs/NUMERICS.md` の acceptance（pinned 表、`json` 96/96）。K 分割の足す順・hc 統計の reduce の順・GDR の 4 単位分割は bf16 丸めの回数を変えるので、実装時に PCC と発散 index で判定する（机上で決めない）。\n"
 )
 P("### 12.2 1 chip の L1 と DRAM の会計（手順 2）\n")
 P(
@@ -140,19 +140,21 @@ t_qsa = layer_sum("L03")
 t_ple = sum(t["t_us"] for i, t in enumerate(T4) if ".ple." in U[i]["unit"])
 t_tail = sum(t["t_us"] for i, t in enumerate(T4) if not t["spec"] and not U[i]["layer"].startswith("L"))
 t_pass = sum(t["t_us"] for t in T4 if not t["spec"])
+t_spec = next(t["t_us"] for i, t in enumerate(T4) if U[i]["unit"].startswith("L00.moe.speculative router"))
+t_hcr = next(t["t_us"] for i, t in enumerate(T4) if U[i]["unit"].startswith("L00.moe.gr.down")) + next(t["t_us"] for i, t in enumerate(T4) if U[i]["unit"].startswith("L00.moe.gr.up"))
 by = {}
 for i, t in enumerate(T4):
     if U[i]["layer"] == "L00" and not t["spec"] and t["t_us"] > 0.05:
         by[U[i]["unit"].split(" ")[0]] = t["t_us"]
 P(
-    f"単価: 行列積 HiFi2 32 cycle/tile-MAC（出力 tile が 130 core より少なければ K を分けて fp32 部分和を NoC の木で足す: 1 段 92 cycle + 64 flit + 32 cycle）、同じ入力を読む行列積は pool、GDR 1 単位 256 + 800 × 行 cycle（core に 1 つ）、top-10 は tile ごと 10 pass × 32 cycle + NoC 集約、要素演算 16 cycle/bf16 tile、argmax は局所（7.5 tile/core）+ 集約。1 chip の鎖: **GDN 層 {t_gdn:.1f} µs**（"
+    f"単価: 行列積の tile-MAC = max(MVMUL の命令数, 重み tile の SrcA への unpack)（一次資料 MVMUL.md・MatrixUnit.md: MVMUL は SrcB 8 行 × SrcA 16×16 を 1 cycle に 1 本、fidelity の phase ごとに 1 本; UNPACR_Regular.md: SrcA への書き 8 行/cycle（8 bit・4 bit）・4 行/cycle（16 bit））→ 行 ≤ 8（本件 2 行）で bf8 HiFi2 8、BF4 LoFi 8、bf16 HiFi4 16 cycle（`mm_cost.py`。改訂 5 までは全形式一律 HiFi2 32 cycle = 32 行の tile の値で、2 行には過大だった誤り）。出力 tile が 130 core より少なければ K を分けて fp32 部分和を NoC の木で足す: 1 段 = 中継 92 cycle + 部分和の flit + その unpack と加算（2 行で 98 cycle）、各単品の入力（前の単品の出力の 2 行）を次の単品の K 片を持つ core へ配る 1 段（同じ 98 cycle; 届く順に消費するので残りは MAC の下に隠れる。改訂 6 までは数えていなかった）、同じ入力を読む行列積は pool、GDR 1 単位 256 + 800 × 行 cycle（core に 1 つ）、top-10 は tile ごと 10 pass × 32 cycle + NoC 集約、要素演算 16 cycle/bf16 tile、argmax は局所（7.5 tile/core）+ 集約。1 chip の鎖: **GDN 層 {t_gdn:.1f} µs**（"
     + "、".join(f"{k} {v:.2f}" for k, v in by.items())
-    + f"）、**QSA 層 {t_qsa:.1f} µs**、PLE {t_ple:.1f}、tail（mixer + lm_head × 2 + argmax + MTP の fc）{t_tail:.1f} → **1 pass の鎖 {t_pass:.1f} µs**。投機 router 1.33 µs/本（鎖の外）。単品ごとの表は `routing/design_step4_item_time.md`。\n"
+    + f"）、**QSA 層 {t_qsa:.1f} µs**、PLE {t_ple:.1f}、tail（mixer + lm_head × 2 + argmax + MTP の fc）{t_tail:.1f} → **1 pass の鎖 {t_pass:.1f} µs**。投機 router {t_spec:.2f} µs/本（鎖の外）。単品ごとの表は `routing/design_step4_item_time.md`。\n"
 )
 # ---------- 12.5 communication ----------
 P("### 12.5 通信（手順 6）\n")
 P(
-    "通信の時間は packet 模型（`comm_model.py`: link 25 GB/s/方向、hop 280 ns、送り手の蓄積転送 16 ns/2 KiB packet、中継 92 cycle + 32 flit、packet 2 KiB + 56 B、link は FIFO、経路は縦 → 環の短い向き、collective は BFS 木の multicast / 直送 / 木の reduce の速い形）。群 = 2×4 ブロック、群間は 2 hop（列の 2 chip が群間 link を共有）。\n"
+    "通信の時間は packet 模型（`comm_model.py`: 隣の chip へ 1 方向 2 チャネル × 25 GB/s（チャネルごとに FIFO、packet は先に空くチャネルへ、chunk は最少 packet 数と 2 の倍数の等分の速い方）、hop 280 ns、送り手の蓄積転送 16 ns/2 KiB packet、中継 92 cycle + 32 flit、packet 2 KiB + 56 B、経路は縦 → 環の短い向き、collective は BFS 木の multicast / 直送 / 木の reduce の速い形）。群 = 2×4 ブロック、群間は 2 hop（列の 2 chip が群間 link を共有）。\n"
 )
 P("| 会合 | 中身 | payload/chip [B] | 速い形 | 時間 [µs] |")
 P("|---|---|---|---|---|")
@@ -199,7 +201,7 @@ P(
 # ---------- 12.6 steady state ----------
 P("### 12.6 鎖を追った定常状態 = 到達目標（手順 7）\n")
 P(
-    "`step7_chain.py`（離散事象、12 pass 流して後半 6 pass の平均）: 単品を HF 順に、前の単品の終わり + 会合の露出（+ 枠の境の受け渡し）から始め、読みが届くまで待つ（届いた分から消費、最後の片の後 t/8）。群ごとの DRAM 車線（512 GB/s）は 512 KiB の片を消費順に発行し、routed は投機 router のトリガ後、L1 は積み上げ（先の routed 3 層分の余地を取り置く = 27B 大原則 1 の本件版）。routed の発行時刻: P2 = 層 l−1 の attention 開始 + 自前の hc 読み 0.88 + 会合 + router 1.33 + 発行 0.16（群をまたげば + 残差 hop）、P1 = 同じく層 l、外れ = router 後 + 0.16。L00 は pass 開始 + 2.7 µs（確定）、MTP 層は自分の attention 開始（予測不可）。\n"
+    f"`step7_chain.py`（離散事象、12 pass 流して後半 6 pass の平均）: 単品を HF 順に、前の単品の終わり + 会合の露出（+ 枠の境の受け渡し）から始め、読みが届くまで待つ（届いた分から消費、最後の片の後 t/8）。群ごとの DRAM 車線（512 GB/s）は 512 KiB の片を消費順に発行し、routed は投機 router のトリガ後、L1 は積み上げ（先の routed 3 層分の余地を取り置く = 27B 大原則 1 の本件版）。routed の発行時刻: P2 = 層 l−1 の attention 開始 + 自前の hc 読み {t_hcr:.2f} + 会合 + router {t_spec:.2f} + 発行 0.16（群をまたげば + 残差 hop）、P1 = 同じく層 l、外れ = router 後 + 0.16。L00 は pass 開始 + {S6['parts']['down_r'] + S6['parts']['up_r'] + t_spec + 0.16:.1f} µs（確定: 全行の hc 読み + router + 発行）、MTP 層は自分の attention 開始（予測不可）。\n"
 )
 P("| ケース / hc 形 | T_pass [µs] | tsu | 演算 | 会合の露出 | 読み待ち（dense / routed） | 受け渡し | 車線 | L1 高水位 [MiB] |")
 P("|---|---|---|---|---|---|---|---|---|")
@@ -234,18 +236,26 @@ P(
 )
 # ---------- 12.8 diff to the limit ----------
 P("### 12.8 限界モデル §11 との整合\n")
+
+
+def same_form(r):
+    """the chosen form PP4 x 8chip[TP8 | EP1 x TPx8] b=1, whatever round count the enumeration picked for the case"""
+    a = r["axes"]
+    return a["DP"] == 1 and a["PP"] == 4 and a["TP_a"] == 8 and a["EP"] == 1 and a["CP"] == 1 and a["b"] == 1 and a["n_mb"] == 1
+
+
 V4 = json.load(open(f"{D}/free5d_v4_results_ctx1.json"))["hit|k=1"]
-v4 = next(r for r in V4 if r["cfg"] == "DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1")
+v4 = next(r for r in V4 if same_form(r))
 V4c = json.load(open(f"{D}/free5d_v4_results_ctx1.json"))["census|k=1"]
-v4c = next(r for r in V4c if r["cfg"] == "DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1")
+v4c = next(r for r in V4c if same_form(r))
 V4m = json.load(open(f"{D}/free5d_v4_results_ctx1.json"))["miss|k=1"]
-v4m = next(r for r in V4m if r["cfg"] == "DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8] b=1")
+v4m = next(r for r in V4m if same_form(r))
 v4T = v4["slot_ms"] * 1e3
 P(
     f"§11（第 4 版）は本節の 8 つの知見（会合の packet 模型と重なり、2 段先読みと L00 / MTP 層の構造的露出、tail の全単品、受け渡しの生きている行、hc の形の軸、先読み容量、argmax 局所化、投機 router の会合は鎖の外）を取り込んだもので、同じ形（`{v4['cfg']}`、ctx 1）の値は §11 {v4T:.1f} µs（{1e6/v4T*R_EFF:,.0f} tsu）= 演算 {v4['comp_ms']*1e3:.1f} + 会合 {v4['comm_ms']*1e3:.1f} + 受け渡し・窓 {v4T-v4['comp_ms']*1e3-v4['comm_ms']*1e3:.1f}、本節 {T:.1f} µs（{tsu:,.0f} tsu）: 差 {T-v4T:+.1f} µs（{(T/v4T-1)*100:+.1f}%、§11 は会合の payload を 256 B・行列積時間を 50 ns に量子化して表引きする分）。"
 )
 P(
-    f"census と全ミスでは §11 が短い（census §11 {v4c['slot_ms']*1e3:.1f} / 本節 {C7['census_A']['T_steady']:.1f} µs、全ミス {v4m['slot_ms']*1e3:.1f} / {C7['miss_A']['T_steady']:.1f}）: §11 は層の中で DRAM 車線を平滑化する上限（層 = max(鎖, routed/BW)）、本節は車線を時間軸で追うので routed の読みが層境を越えて積み上がる分だけ長い（§11.3 原則 24）。設計の到達値は本節、§11 は形の比較と上限。"
+    f"census と全ミスでは §11 が短い（census §11 {v4c['slot_ms']*1e3:.1f}（`{v4c['cfg']}`）/ 本節 {C7['census_A']['T_steady']:.1f} µs、全ミス {v4m['slot_ms']*1e3:.1f} / {C7['miss_A']['T_steady']:.1f}）: §11 は層の中で DRAM 車線を平滑化する上限（層 = max(鎖, routed/BW)）、本節は車線を時間軸で追うので routed の読みが層境を越えて積み上がる分だけ長い（§11.3 原則 24）。設計の到達値は本節、§11 は形の比較と上限。"
 )
 P("§11 の全列挙（6,510 構成 × 形）でも b=1 の tsu 最大は本節の形のままで（§11.5.1）、hc 形は A（§11 の列挙でも B 系は DRAM 車線を増やすだけで勝たない）。\n")
 P("### 12.9 生成と検証\n")

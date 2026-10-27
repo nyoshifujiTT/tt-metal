@@ -60,8 +60,11 @@ AGARG = C6["AG_argmax"]["us"]
 HAND = {h["cut"]: h["us"] + (C6["hand_B_extra"] if FORM != "A" else 0.0) for h in C6["hand"]}
 HOP_RES = PARTS["res_hop"]
 ISSUE = 0.16
-SPEC = 1.33
-HC_READ = 0.88
+# the speculative router and its hc read (the down + up matmuls of the hyper-connection read), from step 4 (revision 6)
+SPEC = next(t["t_us"] for t in T4 if t["unit"].startswith("L00.moe.speculative router"))
+HC_READ = next(t["t_us"] for t in T4 if t["unit"].startswith("L00.moe.gr.down")) + next(
+    t["t_us"] for t in T4 if t["unit"].startswith("L00.moe.gr.up")
+)
 SPEC_MEET = PARTS["spec_meet_A"] if FORM == "A" else PARTS["spec_meet_B"]
 SPEC_LOCAL = HC_READ + SPEC_MEET + SPEC
 SPEC_REMOTE = HOP_RES + SPEC_LOCAL
@@ -453,8 +456,8 @@ for p in range(NPASS):
     busy0 = [lane.busy for lane in lanes]
     if "L00" in STAGES:
         set_trig(
-            p, "L00", "P2", T_start + 1.2 + SPEC + ISSUE
-        )  # the embedding row is on every chip: whole-row hc read 1.2 us + router, no meeting
+            p, "L00", "P2", T_start + PARTS["down_r"] + PARTS["up_r"] + SPEC + ISSUE
+        )  # the embedding row is on every chip: whole-row hc read (D and U replicated, step 6) + router, no meeting
     for f in FR:
         f_start = None
         comp = 0.0

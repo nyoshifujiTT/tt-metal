@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 r"""Step 4 of the detailed design (worklog 12.4): the time of every unit on one chip of the chosen form (rows 2, TP8,
 tiles-form experts), from the physical values (README 11.2.3) only.
-  matmul [M, K] x [K, N] on the chip's share: HiFi2 32 cycles per 32x32 tile-MAC.  Output tiles go to the 130 cores;
+  matmul [M, K] x [K, N] on the chip's share: the per-format, per-row-count tile-MAC of mm_cost.py (revision 6: bf8
+    HiFi2 / BF4 LoFi 8 cycles and bf16 HiFi4 16 cycles at rows <= 8; revision 5 used HiFi2 32 for every format).  Output tiles go to the 130 cores;
     when there are fewer output tiles than cores (every projection at rows 2 -> 1 row-tile) the K dimension is split over
     cores_per_tile = ceil(130 / out) cores so every core carries work/130 tile-MACs, and the fp32 partial tiles are
     tree-reduced over the NoC (per level: 92 cycles + 64 flits of a 4 KiB tile + a 32-cycle DEST accumulate).
@@ -23,6 +24,9 @@ Outputs: the per-unit table (markdown) and step4_item_time.json."""
 import json
 import math
 import sys
+
+sys.path.insert(0, __file__.rsplit("/", 1)[0] if "/" in __file__ else ".")
+import mm_cost
 
 A = json.load(open(sys.argv[1] if len(sys.argv) > 1 else "/tmp/q38/design/step2_account.json"))
 U = A["units"]
@@ -54,24 +58,12 @@ IDX_Q = 4
 IDX_HD = 128
 
 
-def mm_chain(out, kt, work):
-    if out >= CORES:
-        return work / CORES * MM
-    cpo = min(math.ceil(CORES / max(out, 1)), kt)
-    levels = math.ceil(math.log2(cpo)) if cpo > 1 else 0
-    return min(kt * MM, work / CORES * MM + levels * (NOC_RELAY + 4096 / NOC_FLIT + FP32T))
-
-
-def mm_c(M, N, K):
-    out = math.ceil(M / TILE) * math.ceil(N / TILE)
-    kt = math.ceil(K / TILE)
-    return mm_chain(out, kt, out * kt)
+def mm_c(M, N, K, fmt):
+    return mm_cost.one(M, N, K, fmt)
 
 
 def mm_pool(*mms):
-    out = sum(math.ceil(m / TILE) * math.ceil(n / TILE) for m, n, k in mms)
-    kt = max(math.ceil(k / TILE) for m, n, k in mms)
-    return mm_chain(out, kt, sum(math.ceil(m / TILE) * math.ceil(n / TILE) * math.ceil(k / TILE) for m, n, k in mms))
+    return mm_cost.pool(*mms)
 
 
 def gdr_unit(R):
@@ -99,10 +91,10 @@ def cycles(x):
     if ".gr.norm" in n:
         r["elt_"] = elt(x["in_"]) * 3
     elif ".gr.down" in n:
-        r["mm"] = mm_pool((ROWS, HC_LOW, HCD / TP), (ROWS, HC, HCD / TP))
+        r["mm"] = mm_pool((ROWS, HC_LOW, HCD / TP, "bf16"), (ROWS, HC, HCD / TP, "bf16"))
         r["pool"] = "down + inject (same input)"
     elif ".gr.up" in n:
-        r["mm"] = mm_c(ROWS, HCD / TP, HC_LOW)
+        r["mm"] = mm_c(ROWS, HCD / TP, HC_LOW, "bf16")
     elif ".gr.gate x normalized" in n:
         r["elt_"] = elt(x["in_"]) * 2
     elif ".gr.inject" in n:
@@ -110,7 +102,7 @@ def cycles(x):
     elif ".gr.write" in n:
         r["elt_"] = elt(x["in_"]) * 2
     elif ".in_proj_qkv" in n:
-        r["mm"] = mm_pool((ROWS, 1280, H), (ROWS, 6 * GDN_HD, H), (ROWS, TILE, H), (ROWS, TILE, H))
+        r["mm"] = mm_pool((ROWS, 1280, H, "bf8"), (ROWS, 6 * GDN_HD, H, "bf8"), (ROWS, TILE, H, "bf8"), (ROWS, TILE, H, "bf8"))
         r["pool"] = "qkv + z + a + b"
     elif ".in_proj_z" in n or ".in_proj_a" in n or ".in_proj_b" in n:
         r["pool"] = "(in the qkv pool)"
@@ -123,9 +115,9 @@ def cycles(x):
     elif ".norm (gated)" in n:
         r["elt_"] = elt(x["in_"], 4.0) * 3
     elif ".out_proj" in n:
-        r["mm"] = mm_c(ROWS, H, 6 * GDN_HD)
+        r["mm"] = mm_c(ROWS, H, 6 * GDN_HD, "bf8")
     elif ".indexer qk" in n:
-        r["mm"] = mm_pool((ROWS, 3 * 2 * QSA_HD, H), (ROWS, 2 * QSA_HD, H), (ROWS, IDX_Q * IDX_HD + IDX_HD, H))
+        r["mm"] = mm_pool((ROWS, 3 * 2 * QSA_HD, H, "bf8"), (ROWS, 2 * QSA_HD, H, "bf8"), (ROWS, IDX_Q * IDX_HD + IDX_HD, H, "bf8"))
         r["pool"] = "q+gate + k,v + indexer"
     elif ".index scoring" in n:
         r["elt_"] = elt(x["in_"])
@@ -136,13 +128,13 @@ def cycles(x):
     elif ".SDPA" in n:
         r["elt_"] = elt(x["in_"]) * 3
     elif ".o_proj" in n:
-        r["mm"] = mm_c(ROWS, H, 3 * QSA_HD)
+        r["mm"] = mm_c(ROWS, H, 3 * QSA_HD, "bf8")
     elif ".router" in n and "speculative" not in n:
-        r["mm"] = mm_pool((ROWS, 2 * SH_INT / TP, H), (ROWS, E, H))
+        r["mm"] = mm_pool((ROWS, 2 * SH_INT / TP, H, "bf8"), (ROWS, E, H, "bf16"))
         r["serial"] = topk(ROWS, E / TILE)
         r["pool"] = "router + shared gate/up"
     elif "speculative router" in n:
-        r["mm"] = mm_c(ROWS, E, H)
+        r["mm"] = mm_c(ROWS, E, H, "bf16")
         r["serial"] = topk(ROWS, E / TILE)
         r["pool"] = "(one block earlier, off the chain)"
     elif ".shared gate_proj" in n:
@@ -150,10 +142,10 @@ def cycles(x):
     elif ".shared down_proj" in n:
         r["pool"] = "(in the experts' down pool)"
     elif "routed expert e: gate_up" in n:
-        r["mm"] = mm_c(1, T_BUSIEST * 2 * TILE, H)
+        r["mm"] = mm_c(1, T_BUSIEST * 2 * TILE, H, "bf4")
         r["pool"] = f"{T_BUSIEST:.1f} tiles x 2 cols pooled"
     elif "routed expert e: down" in n:
-        r["mm"] = mm_pool((1, H * math.ceil(T_BUSIEST), TILE), (ROWS, H, SH_INT / TP))
+        r["mm"] = mm_pool((1, H * math.ceil(T_BUSIEST), TILE, "bf4"), (ROWS, H, SH_INT / TP, "bf8"))
         r["pool"] = f"{T_BUSIEST:.1f} down slices + shared down"
     elif "routed + shared" in n:
         r["elt_"] = elt(x["in_"], 4.0)
@@ -162,7 +154,7 @@ def cycles(x):
     elif ".ple.n-gram" in n:
         r["elt_"] = 0
     elif ".ple.key_proj" in n:
-        r["mm"] = mm_pool((ROWS, HCD / TP, 2560), (ROWS, H / TP, 2560))
+        r["mm"] = mm_pool((ROWS, HCD / TP, 2560, "bf16"), (ROWS, H / TP, 2560, "bf16"))
         r["pool"] = "key + value"
     elif ".ple.norm_query" in n:
         r["elt_"] = elt(x["in_"]) * 3
@@ -171,15 +163,15 @@ def cycles(x):
     elif ".ple.norm_conv" in n:
         r["elt_"] = elt(x["in_"]) * 5
     elif n.startswith("final hyper") or n.startswith("mtp.hyper"):
-        r["mm"] = mm_c(ROWS, HC_LOW, HCD / TP) + mm_c(ROWS, H, HC_LOW)
+        r["mm"] = mm_c(ROWS, HC_LOW, HCD / TP, "bf8") + mm_c(ROWS, H, HC_LOW, "bf8")
     elif n.startswith("lm_head") or n.startswith("mtp.lm_head"):
-        r["mm"] = mm_c(ROWS, V / TP, H)
+        r["mm"] = mm_c(ROWS, V / TP, H, "bf8")
     elif n.startswith("argmax"):
         r["serial"] = (
             math.ceil(math.ceil(V / TP / TILE) / CORES) * FP32T + NOC_RELAY + math.ceil(CORES / TILE) * FP32T
         )  # local argmax: each core scans its ~7.5 logit tiles (32 cycles per fp32 tile), NoC gather of the 130 candidates, final pass over 5 tiles
     elif n.startswith("mtp.embed_tokens"):
-        r["mm"] = mm_c(ROWS, 2 * H / TP, H)
+        r["mm"] = mm_c(ROWS, 2 * H / TP, H, "bf8")
     else:
         raise SystemExit("unmatched " + n)
     return r

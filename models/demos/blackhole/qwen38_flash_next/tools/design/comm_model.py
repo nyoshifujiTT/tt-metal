@@ -1,11 +1,16 @@
 #!/usr/bin/env python
 r"""Packet-level communication model of a TP group on the 8x4 Blackhole Galaxy torus (physical values only, README
-11.2.3 / 27B README section 3): link 25 GB/s per direction, hop latency 280 ns, store-and-forward of a packet at the
-sender 96 B/cycle (2 KiB: 16 ns), relay through an intermediate chip over the NoC 92 cycles + 32 flits (92 ns), 56 B of
-line overhead per packet, payload per packet <= 4,096 B (2 KiB used: the tile size), a reduce level (NoC distribution of
-the arrived tiles to cores + one DEST accumulate) 92 + 64 + 32 cycles = 139 ns.
+11.2.3 / 27B README section 3): toward each neighbour, per direction, 2 channels (2 Ethernet cores of the link, each
+25 GB/s one way), hop
+latency 280 ns, store-and-forward of a packet at the sender 96 B/cycle (2 KiB: 16 ns), relay through an intermediate
+chip over the NoC 92 cycles + 32 flits (92 ns), 56 B of line overhead per packet, payload per packet <= 4,096 B (2 KiB
+used: the tile size), a reduce level (NoC distribution of the arrived partial rows to cores + the add: 92 cycles + the
+rows' flits + their unpack, 98 cycles at rows 2 = 73 ns; revision 5: 92 + 64 + 32 = 139 ns for a full tile).
 Submesh r x c of the torus: horizontal ring when c == 4 (the torus column count), vertical ring when r == 8; otherwise
-lines.  Routes: vertical first, then the shorter ring direction (ties alternate).  Every link-direction is a FIFO.
+lines.  Routes: vertical first, then the shorter ring direction (ties alternate).  Every link-direction is CH = 2
+channels, each a FIFO; a packet takes the channel that frees first.  A chunk is cut into packets of <= pkt bytes, either
+the fewest packets or that count rounded up to a multiple of CH (equal packets, so a single chunk uses both channels);
+simulate_mc keeps the faster of the two cuts.
 Collectives (per chip payload P):
   AG_tree    each chip's chunk multicast along its BFS tree (a relay forwards to each child after RELAY + SAF)
   AG_direct  each chip sends its chunk point-to-point to every other chip
@@ -21,19 +26,44 @@ import itertools
 import math
 
 BW = 25e9
+CH = 2
 HOP = 280e-9
 CLK = 1.35e9
 SAF_RATE = 96
 RELAY_CYC = 92 + 32
 HDR = 56
 PKT = 2048
-ADD_LEVEL = (92 + 64 + 32) / CLK
+ROWS_AR = 2
+# a reduce level (revision 6): the NoC distribution of the arrived partial rows to the cores + the add, from mm_cost.py's
+# tree level at the meeting's row count (rows 2: 98 cycles; revision 5 counted a full 4 KiB tile, 188)
+ADD_LEVEL = (92 + math.ceil(ROWS_AR * 32 * 4 / 64) + max(math.ceil(ROWS_AR * 32 * 4 / 128), math.ceil(ROWS_AR / 8) * 2)) / CLK
 TORUS_R = 8
 TORUS_C = 4
 
 
 def saf(b):
     return b / SAF_RATE / CLK
+
+
+def cut(nbytes, pkt, even):
+    """the packet sizes of a chunk: the fewest packets of <= pkt, or that count rounded up to a multiple of CH"""
+    n = max(1, math.ceil(nbytes / pkt))
+    if even and n % CH:
+        n += CH - n % CH
+    return [nbytes / n] * n
+
+
+class Link:
+    """one link-direction: CH channels, each a FIFO; a packet takes the channel that frees first"""
+
+    def __init__(s):
+        s.free = [0.0] * CH
+
+    def send(s, t, ser):
+        i = min(range(CH), key=lambda k: s.free[k])
+        start = max(t, s.free[i])
+        s.free[i] = start + ser
+        return start
 
 
 RELAY = RELAY_CYC / CLK
@@ -101,11 +131,16 @@ class Mesh:
 
 
 # ---------------- packet simulation ----------------
-def simulate_mc(flows, pkt=PKT):
+def simulate_mc(flows, pkt=PKT, even=None):
     """flows: (t_ready, root, tree, bytes, tag).  Multicast of bytes from root along tree (dict parent -> children);
-    returns (last arrival, arrivals {(tag, leaf): time of the last byte}, link bytes {link: bytes}, link busy {link: s})
+    returns (last arrival, arrivals {(tag, leaf): time of the last byte}, link bytes {link: bytes}, link busy {link: s}).
+    even=None: the faster of the two cuts (cut()).
     """
-    link_free = {}
+    if even is None:
+        a = simulate_mc(flows, pkt, False)
+        b = simulate_mc(flows, pkt, True)
+        return a if a[0] <= b[0] else b
+    links = {}
     link_bytes = {}
     link_busy = {}
     events = []
@@ -113,12 +148,8 @@ def simulate_mc(flows, pkt=PKT):
     arrivals = {}
     done = 0.0
     for t0, root, tree, nbytes, tag in flows:
-        n = max(1, math.ceil(nbytes / pkt))
-        left = nbytes
         tr = t0
-        for p in range(n):
-            b = min(pkt, left)
-            left -= b
+        for b in cut(nbytes, pkt, even):
             tr += saf(b)  # the sender stores packet after packet
             heapq.heappush(events, (tr, next(seq), root, tree, b, tag, True))
     while events:
@@ -126,9 +157,8 @@ def simulate_mc(flows, pkt=PKT):
         kids = tree.get(node, [])
         for kid in kids:
             link = (node, kid)
-            start = max(t, link_free.get(link, 0.0))
             ser = (b + HDR) / BW
-            link_free[link] = start + ser
+            start = links.setdefault(link, Link()).send(t, ser)
             link_bytes[link] = link_bytes.get(link, 0) + b
             link_busy[link] = link_busy.get(link, 0.0) + ser
             arrive = start + ser + HOP
@@ -166,16 +196,22 @@ def rs_direct(mesh, P, t0=0.0, pkt=PKT):
     return d + ADD_LEVEL, arr, lb, lu
 
 
-def rs_tree(mesh, P, t0=0.0, pkt=PKT):
-    """for every owner: leaves send P/n up; a node sends after all its children arrived (+ ADD_LEVEL); FIFO links
-    shared among the owners' trees; simulated node by node in dependency order (per owner the tree is a DAG)"""
-    link_free = {}
+def rs_tree(mesh, P, t0=0.0, pkt=PKT, even=None):
+    """for every owner: leaves send P/n up; a node sends after all its children arrived (+ ADD_LEVEL); CH-channel
+    links shared among the owners' trees; simulated node by node in dependency order (per owner the tree is a DAG).
+    even=None: the faster of the two cuts."""
+    if even is None:
+        a = rs_tree(mesh, P, t0, pkt, False)
+        b = rs_tree(mesh, P, t0, pkt, True)
+        return a if a[0] <= b[0] else b
+    links = {}
     lb = {}
     lu = {}
     done = 0.0
     slice_ = P / mesh.n
+    sizes = cut(slice_, pkt, even)
     # event-driven: a node's send time = max(children's arrivals) + ADD_LEVEL (leaves: t0 + saf); process in order of
-    # readiness over all owners jointly (a link FIFO orders packets by readiness)
+    # readiness over all owners jointly (a link channel orders packets by readiness)
     ready = []
     seq = itertools.count()
     trees = {o: mesh.bfs_tree(o) for o in mesh.chips}
@@ -191,26 +227,21 @@ def rs_tree(mesh, P, t0=0.0, pkt=PKT):
                 continue
             pending[o][x] = len(T.get(x, []))
             if pending[o][x] == 0:
-                heapq.heappush(ready, (t0 + saf(min(pkt, slice_)), next(seq), o, x))
+                heapq.heappush(ready, (t0 + saf(sizes[0]), next(seq), o, x))
     finish = {}
     while ready:
         t, s, o, x = heapq.heappop(ready)
         p = parent[o][x]
         link = (x, p)
-        n = max(1, math.ceil(slice_ / pkt))
-        left = slice_
         tcur = t
-        last = None
-        for i in range(n):
-            b = min(pkt, left)
-            left -= b
-            start = max(tcur + (0 if i == 0 else 0.0), link_free.get(link, 0.0))
+        last = 0.0
+        for b in sizes:
             ser = (b + HDR) / BW
-            link_free[link] = start + ser
+            start = links.setdefault(link, Link()).send(tcur, ser)
             lb[link] = lb.get(link, 0) + b
             lu[link] = lu.get(link, 0.0) + ser
-            last = start + ser + HOP
-            tcur = start + ser
+            last = max(last, start + ser + HOP)
+            tcur = tcur + saf(b)
         arr[o].setdefault(p, 0.0)
         arr[o][p] = max(arr[o][p], last)
         if p == o:
@@ -219,7 +250,7 @@ def rs_tree(mesh, P, t0=0.0, pkt=PKT):
             continue
         pending[o][p] -= 1
         if pending[o][p] == 0:
-            heapq.heappush(ready, (arr[o][p] + ADD_LEVEL + saf(min(pkt, slice_)), next(seq), o, p))
+            heapq.heappush(ready, (arr[o][p] + ADD_LEVEL + saf(sizes[0]), next(seq), o, p))
     return done, finish, lb, lu
 
 
