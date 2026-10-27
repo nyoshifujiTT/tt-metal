@@ -33,7 +33,7 @@ namespace {
 namespace distributed = tt::tt_metal::distributed;
 
 constexpr uint32_t kKt = 80, kNt = 80, kRows = 2, kCores = 130, kGridX = 13, kGridY = 10;
-constexpr uint32_t kWTile = 1088, kTile = 128, kSlot = 4096 + 32, kHub = 71;
+constexpr uint32_t kWTile = 1088, kTile = 128, kSlot = 4096 + 32, kHub = 72;
 constexpr double kClockGHz = 1.35;
 
 struct Segment {
@@ -216,6 +216,7 @@ std::string run_seq(const std::shared_ptr<distributed::MeshDevice>& mesh, uint32
     cb(16, 2, kTile, tt::DataFormat::Float16_b, &tile);
     cb(17, 2, spart, tt::DataFormat::Float32, &tile);
     cb(24, 1, 512, tt::DataFormat::UInt32, nullptr);
+    cb(25, 1, 32, tt::DataFormat::UInt32, nullptr);
     std::vector<uint32_t> rd_ct = {kKt, steps};
     tt::tt_metal::TensorAccessorArgs(*buf_x).append_to(rd_ct);
     tt::tt_metal::TensorAccessorArgs(*buf_w).append_to(rd_ct);
@@ -233,6 +234,7 @@ std::string run_seq(const std::shared_ptr<distributed::MeshDevice>& mesh, uint32
         tt::tt_metal::ComputeConfig{.math_fidelity = MathFidelity::HiFi2, .fp32_dest_acc_en = true, .compile_args = {1u, kKt, steps}});
     const auto go_phys = dev->worker_core_from_logical_core(tt::tt_metal::CoreCoord(0, 0));
     const auto mc1 = dev->worker_core_from_logical_core(tt::tt_metal::CoreCoord(kGridX - 1, kGridY - 1));
+    TT_FATAL(plan[kHub].role == 0, "the hub (core {}) must be an owner", kHub);
     const auto hub = dev->worker_core_from_logical_core(plan[kHub].core);
     for (uint32_t i = 0; i < kCores; ++i) {
         const CorePlan& p = plan[i];

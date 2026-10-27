@@ -15,8 +15,9 @@
 //           owner's cb_in_part;
 //   owner:  waits for the sentinels of its slots, pushes cb_in_part, waits for its packed column (cb_out), re-arms the
 //           sentinels, writes the column (non-posted) to slot col of the hub's half (s + 1) & 1;
-//   hub (one core): waits until its NIU has completed 80 (s + 1) incoming non-posted writes since the go
-//           (NIU_SLV_WR_ACK_SENT), writes tag s + 2 in its trailer and multicasts the half
+//   hub (one owner): copies its own column, waits until its NIU has completed (79 + 2 n_in) (s + 1) incoming
+//           non-posted writes since the go (the other owners' columns and its partials, NIU_SLV_WR_ACK_SENT), writes
+//           tag s + 2 in its trailer and sends the half on its persistent linked multicast
 //           (Kt + 1 pages, one packet, one path reservation) to the other 129 cores.
 // (Worklog I-3b v2: 80 owners each multicasting their column, two path-reserving multicasts per owner per step,
 // measured 141 us/step: the concurrent path reservations back off exponentially.  27B rule 105 / Blitz mcast.)
@@ -113,7 +114,8 @@ void kernel_main() {
         seg_y[s] = get_arg_val<uint32_t>(a++);
         seg_slot[s] = get_arg_val<uint32_t>(a++);
     }
-    constexpr uint32_t cb_act = 0, cb_w = 1, cb_in_part = 2, cb_sel = 5, cb_out = 16, cb_part = 17, cb_stamp = 24;
+    constexpr uint32_t cb_act = 0, cb_w = 1, cb_in_part = 2, cb_sel = 5, cb_out = 16, cb_part = 17, cb_stamp = 24,
+                       cb_scratch = 25;
     constexpr auto x0_args = TensorAccessorArgs<2>();
     const auto x0 = TensorAccessor(x0_args, x0_addr);
     constexpr auto w_args = TensorAccessorArgs<x0_args.next_compile_time_args_offset()>();
@@ -186,10 +188,21 @@ void kernel_main() {
     while (reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L) - settle < 200) {
     }
     const uint32_t ack_base = NOC_STATUS_READ_REG(noc_index, NIU_SLV_WR_ACK_SENT);
+    // the hub (an owner: no other NOC0 request of this core during the chain) opens a persistent linked multicast to the
+    // grid: the path is reserved once by this 32 B scratch write (NOC_CMD_PATH_RESERVE on the first request of the
+    // transaction), every step's half rides the same transaction (linked, no reservation; tt-isa-documentation
+    // NoC/MemoryMap.md NOC_CMD_VC_LINKED), an unlinked scratch write closes it before the hub's DRAM writes
+    // (DeepSeek Blitz unified_kernels/mcast.hpp, tt-blaze mcast_common.hpp; non-posted: errata BH-85)
+    const uint32_t scratch = get_write_ptr(cb_scratch);
+    const uint64_t mc_scr = get_noc_multicast_addr(mc_x0, mc_y0, mc_x1, mc_y1, scratch);
+    const uint32_t per_step = (n_owners - 1) + 2 * n_in;  // the hub's incoming non-posted writes a step
     cb_reserve_back(cb_stamp, 1);
     volatile tt_l1_ptr uint32_t* stamps = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_write_ptr(cb_stamp));
     stamps[0] = reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L);
     const uint64_t mc_act = get_noc_multicast_addr(mc_x0, mc_y0, mc_x1, mc_y1, 0);
+    if (is_hub) {
+        noc_async_write_multicast(scratch, mc_scr, 32, n_cores - 1, true);
+    }
     // profile of one step (kProf): words 64.. of the stamp page, each core's own clock
     constexpr uint32_t kProf = steps > 21 ? 20 : 0xFFFFu;
     auto prof = [&](uint32_t s, uint32_t w) {
@@ -230,12 +243,26 @@ void kernel_main() {
             }
             const uint32_t src = get_read_ptr(cb_out);
             if (s + 1 < steps) {
-                // the column to slot col of the hub's half nh, then the hub's counter (same source, destination and
-                // unicast VC: the increment lands after the tile, tt-isa-documentation NoC/Ordering.md)
-                noc_async_write(src, get_noc_addr(hub_x, hub_y, act_base + (nh * Kp + col) * kTile), kTile);
-                noc_async_writes_flushed();
-                prof(s, 73);
+                if (is_hub) {
+                    // the hub's own column: a local copy into slot col of its half nh (no NoC request while linked)
+                    volatile tt_l1_ptr uint32_t* d =
+                        reinterpret_cast<volatile tt_l1_ptr uint32_t*>(act_base + (nh * Kp + col) * kTile);
+                    volatile tt_l1_ptr uint32_t* q = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(src);
+                    for (uint32_t w = 0; w < kTile / 4; ++w) {
+                        d[w] = q[w];
+                    }
+                } else {
+                    // the column (non-posted) to slot col of the hub's half nh; the hub counts its NIU's completed
+                    // incoming non-posted writes
+                    noc_async_write(src, get_noc_addr(hub_x, hub_y, act_base + (nh * Kp + col) * kTile), kTile);
+                    noc_async_writes_flushed();
+                }
+            prof(s, 73);
             } else {
+                if (is_hub) {
+                    noc_async_write_multicast(scratch, mc_scr, 32, n_cores - 1, false);
+                    noc_async_write_barrier();
+                }
                 noc_async_write_page(col, out, src);
                 noc_async_write_barrier();
             }
@@ -246,7 +273,7 @@ void kernel_main() {
         }
         if (is_hub && s + 1 < steps) {
             // all owners' columns of x_{s+1} are in this core's half nh: tag the trailer, one multicast to the others
-            errors += wait_acks(ack_base + n_owners * (s + 1)) ? 0 : 0x10000;
+            errors += wait_acks(ack_base + per_step * (s + 1)) ? 0 : 0x10000;
             prof(s, 74);
             volatile tt_l1_ptr uint32_t* t =
                 reinterpret_cast<volatile tt_l1_ptr uint32_t*>(act_base + (nh * Kp + Kt) * kTile + 96);
@@ -255,7 +282,7 @@ void kernel_main() {
             const uint32_t back = t[4];
             asm volatile("addi x0, %0, 0" : : "r"(back));
             const uint32_t half = act_base + nh * Kp * kTile;
-            noc_async_write_multicast(half, mc_act | half, Kp * kTile, n_cores - 1);
+            noc_async_write_multicast(half, mc_act | half, Kp * kTile, n_cores - 1, true);
             noc_async_writes_flushed();
             prof(s, 75);
         }
