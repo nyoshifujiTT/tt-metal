@@ -229,6 +229,13 @@ void kernel_main() {
     if (is_hub) {
         noc_async_write_multicast(scratch, mc_scr, 32, n_cores - 1, true);
     }
+    // v8: preset the unicast write state once (senders with one segment: its owner; non-hub owners: the hub); the
+    // write cmd_buf is used by nothing else in the loop of these roles
+    if (role == 1 && n_seg == 1) {
+        noc_async_write_one_packet_set_state(get_noc_addr(seg_x[0], seg_y[0], 0), kChunk);
+    } else if (role == 0 && !is_hub) {
+        noc_async_write_one_packet_set_state(get_noc_addr(hub_x, hub_y, 0), kTile);
+    }
     // profile of one step (kProf): words 64.. of the stamp page, each core's own clock
     constexpr uint32_t kProf = steps > 21 ? 20 : 0xFFFFu;
     auto prof = [&](uint32_t s, uint32_t w) {
@@ -249,8 +256,13 @@ void kernel_main() {
                 prof(s, 65 + 2 * g);
                 const uint32_t src = get_read_ptr(cb_part);
                 const uint32_t slot = in_base + ((s & 1) * kSlotsHalf + seg_slot[g]) * kSlot;
-                noc_async_write(src, get_noc_addr(seg_x[g], seg_y[g], slot), kChunk);
-                noc_async_write(src + kChunk, get_noc_addr(seg_x[g], seg_y[g], slot + kFace1), kChunk);
+                // v8: the destination core and length were preset on this cmd_buf (Blitz PR #43584's preprogramming);
+                // only the two L1 addresses and the send are written here
+                if (n_seg > 1) {
+                    noc_async_write_one_packet_set_state(get_noc_addr(seg_x[g], seg_y[g], 0), kChunk);
+                }
+                noc_async_write_one_packet_with_state(src, slot);
+                noc_async_write_one_packet_with_state(src + kChunk, slot + kFace1);
                 noc_async_writes_flushed();
                 prof(s, 66 + 2 * g);
                 cb_pop_front(cb_part, 1);
@@ -270,8 +282,9 @@ void kernel_main() {
             const uint32_t src = get_read_ptr(cb_out);
             if (s + 1 < steps) {
                 if (!is_hub) {
-                    // the column (non-posted) to slot col of the hub's half nh (the hub packed its own column there)
-                    noc_async_write(src, get_noc_addr(hub_x, hub_y, act_base + (nh * Kp + col) * kTile), kTile);
+                    // the column (non-posted) to slot col of the hub's half nh (the hub packed its own column there);
+                    // v8: the hub's coordinates and the length are preset on this cmd_buf
+                    noc_async_write_one_packet_with_state(src, act_base + (nh * Kp + col) * kTile);
                     noc_async_writes_flushed();
                 }
             } else {
