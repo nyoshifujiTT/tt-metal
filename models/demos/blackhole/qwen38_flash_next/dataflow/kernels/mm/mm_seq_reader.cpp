@@ -28,7 +28,7 @@
 namespace {
 constexpr uint32_t kSpin = 1u << 24;
 constexpr uint32_t kSentinel = 0x7FC0DEADu;
-constexpr uint32_t kChunk = 128, kFace1 = 1024, kSlot = 4096 + 32, kTile = 128;
+constexpr uint32_t kChunk = 128, kFace1 = 1024, kSlot = 4096 + 32, kTile = 128, kSlotsHalf = 4;
 bool wait_min(volatile tt_l1_ptr uint32_t* p, uint32_t v) {
     for (uint32_t i = 0; i < kSpin; ++i) {
         invalidate_l1_cache();
@@ -139,8 +139,12 @@ void kernel_main() {
         }
     }
     if (role == 0) {
-        cb_reserve_back(cb_sel, 1);
-        noc_async_read(get_noc_addr_from_bank_id<true>(0, sel_addr), get_write_ptr(cb_sel), get_tile_size(cb_sel));
+        cb_reserve_back(cb_sel, kSlotsHalf);
+        for (uint32_t j = 0; j < kSlotsHalf; ++j) {
+            noc_async_read(
+                get_noc_addr_from_bank_id<true>(0, sel_addr), get_write_ptr(cb_sel) + j * get_tile_size(cb_sel),
+                get_tile_size(cb_sel));
+        }
     }
     const uint32_t act_base = get_write_ptr(cb_act);
     for (uint32_t k = 0; k < Kt; ++k) {
@@ -155,16 +159,20 @@ void kernel_main() {
     }
     cb_push_back(cb_w, w_tiles);
     if (role == 0) {
-        cb_push_back(cb_sel, 1);
+        cb_push_back(cb_sel, kSlotsHalf);
     }
     const uint32_t in_base = get_write_ptr(cb_in_part);
     if (role == 0) {
-        for (uint32_t j = 0; j < 6; ++j) {
+        // every slot zeroed; only the n_in written ones carry sentinels (the padding slots, read as zero partials by
+        // the owner's even-count unpack, must stay zero)
+        for (uint32_t j = 0; j < 2 * kSlotsHalf; ++j) {
             volatile tt_l1_ptr uint32_t* p = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(in_base + j * kSlot);
             for (uint32_t q = 0; q < kSlot / 4; ++q) {
                 p[q] = 0;
             }
-            arm(in_base + j * kSlot);
+            if (j % kSlotsHalf < n_in) {
+                arm(in_base + j * kSlot);
+            }
         }
     }
     // one go for the chain
@@ -222,7 +230,7 @@ void kernel_main() {
                 cb_wait_front(cb_part, 1);
                 prof(s, 65 + 2 * g);
                 const uint32_t src = get_read_ptr(cb_part);
-                const uint32_t slot = in_base + ((s & 1) * 3 + seg_slot[g]) * kSlot;
+                const uint32_t slot = in_base + ((s & 1) * kSlotsHalf + seg_slot[g]) * kSlot;
                 noc_async_write(src, get_noc_addr(seg_x[g], seg_y[g], slot), kChunk);
                 noc_async_write(src + kChunk, get_noc_addr(seg_x[g], seg_y[g], slot + kFace1), kChunk);
                 noc_async_writes_flushed();
@@ -231,15 +239,15 @@ void kernel_main() {
             }
         } else {
             for (uint32_t j = 0; j < n_in; ++j) {
-                errors += wait_landed(in_base + ((s & 1) * 3 + j) * kSlot) ? 0 : 0x10000;
+                errors += wait_landed(in_base + ((s & 1) * kSlotsHalf + j) * kSlot) ? 0 : 0x10000;
             }
             prof(s, 71);
-            cb_reserve_back(cb_in_part, 3);
-            cb_push_back(cb_in_part, 3);
+            cb_reserve_back(cb_in_part, kSlotsHalf);
+            cb_push_back(cb_in_part, kSlotsHalf);
             cb_wait_front(cb_out, 1);
             prof(s, 72);
             for (uint32_t j = 0; j < n_in; ++j) {
-                arm(in_base + ((s & 1) * 3 + j) * kSlot);
+                arm(in_base + ((s & 1) * kSlotsHalf + j) * kSlot);
             }
             const uint32_t src = get_read_ptr(cb_out);
             if (s + 1 < steps) {

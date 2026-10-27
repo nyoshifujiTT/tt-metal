@@ -59,7 +59,7 @@ std::vector<CorePlan> make_plan(uint32_t k_own) {
     std::vector<CorePlan> senders(n_send);
     std::vector<uint32_t> start(n_send + 1);
     for (uint32_t s = 0; s <= n_send; ++s) {
-        start[s] = static_cast<uint32_t>((static_cast<uint64_t>(total) * s) / n_send);
+        start[s] = static_cast<uint32_t>((static_cast<uint64_t>(total) * s) / n_send) & ~1u;  // even K runs (v4 unit)
     }
     for (uint32_t s = 0; s < n_send; ++s) {
         senders[s].role = 1;
@@ -211,8 +211,8 @@ std::string run_seq(const std::shared_ptr<distributed::MeshDevice>& mesh, uint32
     const tt::tt_metal::Tile ptile({32, 32});
     cb(0, 2 * (kKt + 1), kTile, tt::DataFormat::Float16_b, &tile);
     cb(1, max_w, kWTile, tt::DataFormat::Bfp8_b, nullptr);
-    cb(2, 6, kSlot, tt::DataFormat::Float32, &ptile);
-    cb(5, 1, kTile, tt::DataFormat::Float16_b, &tile);
+    cb(2, 8, kSlot, tt::DataFormat::Float32, &ptile);
+    cb(5, 4, kTile, tt::DataFormat::Float16_b, &tile);
     cb(16, 2, kTile, tt::DataFormat::Float16_b, &tile);
     cb(17, 2, spart, tt::DataFormat::Float32, &tile);
     cb(24, 1, 512, tt::DataFormat::UInt32, nullptr);
@@ -227,10 +227,10 @@ std::string run_seq(const std::shared_ptr<distributed::MeshDevice>& mesh, uint32
         tt::tt_metal::DataMovementConfig{
             .processor = tt::tt_metal::DataMovementProcessor::RISCV_0, .noc = tt::tt_metal::NOC::RISCV_0_default, .compile_args = rd_ct});
     auto comp_own = tt::tt_metal::CreateKernel(
-        program, "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_seq_compute.cpp", owners_set,
+        program, "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_seq2_compute.cpp", owners_set,
         tt::tt_metal::ComputeConfig{.math_fidelity = MathFidelity::HiFi2, .fp32_dest_acc_en = true, .compile_args = {0u, kKt, steps}});
     auto comp_send = tt::tt_metal::CreateKernel(
-        program, "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_seq_compute.cpp", senders_set,
+        program, "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_seq2_compute.cpp", senders_set,
         tt::tt_metal::ComputeConfig{.math_fidelity = MathFidelity::HiFi2, .fp32_dest_acc_en = true, .compile_args = {1u, kKt, steps}});
     const auto go_phys = dev->worker_core_from_logical_core(tt::tt_metal::CoreCoord(0, 0));
     const auto mc1 = dev->worker_core_from_logical_core(tt::tt_metal::CoreCoord(kGridX - 1, kGridY - 1));

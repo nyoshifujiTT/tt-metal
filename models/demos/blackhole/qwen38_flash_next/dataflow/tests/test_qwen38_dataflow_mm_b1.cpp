@@ -40,7 +40,7 @@ enum class Fmt { Bf8, Bf4, Bf16 };
 // kt x ct weight tiles in `fmt` at its served fidelity (bf8 HiFi2, BF4 LoFi, bf16 HiFi4), fp32 DEST
 BenchResult bench_b1(
     const std::shared_ptr<distributed::MeshDevice>& mesh, uint32_t kt, uint32_t ct, uint32_t reps, uint32_t rows = 32,
-    Fmt fmt = Fmt::Bf8) {
+    Fmt fmt = Fmt::Bf8, uint32_t mode = 0) {
     const uint32_t K = kt * 32, N = ct * 32, M = rows;
     std::mt19937 rng(kt * 131 + ct);
     std::normal_distribution<float> dist(0.0f, 1.0f);
@@ -183,7 +183,7 @@ BenchResult bench_b1(
             .math_fidelity = fmt == Fmt::Bf8 ? MathFidelity::HiFi2 : fmt == Fmt::Bf4 ? MathFidelity::LoFi : MathFidelity::HiFi4,
             .fp32_dest_acc_en = true,
             .dst_full_sync_en = ct > 4,
-            .compile_args = {kt, ct, reps, fmt == Fmt::Bf8 ? 2u : fmt == Fmt::Bf4 ? 1u : 4u}});
+            .compile_args = {kt, ct, reps, fmt == Fmt::Bf8 ? 2u : fmt == Fmt::Bf4 ? 1u : 4u, mode}});
     distributed::MeshWorkload wl;
     wl.add_program(distributed::MeshCoordinateRange(mesh->shape()), std::move(program));
     distributed::EnqueueMeshWorkload(cq, wl, false);
@@ -223,15 +223,20 @@ TEST(Qwen38DataflowMm, B1Unit) {
     std::ofstream out(std::string(out_path ? out_path : "/tmp/qwen38_mm.txt") + ".b1");
     bool ok = true;
     for (Fmt fmt : {Fmt::Bf8, Fmt::Bf4}) {
+        for (uint32_t mode : {0u, 1u}) {
         for (uint32_t ct : {1u, 2u, 4u}) {
             for (uint32_t kt : {16u, 48u, 80u}) {
+                if (mode == 1 && ct == 1) {
+                    continue;
+                }
                 const uint32_t reps = std::max<uint32_t>(4, 20480 / (kt * ct));
-                const auto r = bench_b1(mesh, kt, ct, reps, 2, fmt);
-                out << (fmt == Fmt::Bf8 ? "bf8 HiFi2" : "BF4 LoFi") << " rows 2 ct " << ct << " kt " << kt << ": "
+                const auto r = bench_b1(mesh, kt, ct, reps, 2, fmt, mode);
+                out << (fmt == Fmt::Bf8 ? "bf8 HiFi2" : "BF4 LoFi") << (mode ? " SrcB-reuse" : " per-column") << " rows 2 ct " << ct << " kt " << kt << ": "
                     << r.cycles_per_mac << " cycles/tile-MAC, PCC " << r.pcc << (r.ok ? "" : " (bad status)") << "\n";
                 out.flush();
                 ok = ok && r.ok && r.pcc > 0.999;
             }
+        }
         }
     }
     mesh->close();

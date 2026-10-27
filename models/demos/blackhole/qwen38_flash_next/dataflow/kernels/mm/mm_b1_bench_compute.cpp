@@ -5,7 +5,8 @@
 // I-1c-7 (worklog 14): single-core bench of the B=1 matmul unit (kernels/mm/mm_b1_unit.h) at the served fidelity:
 // in0 = one tiny tile row (rows <= 8) x kt K tiles (bf16), in1 = ct columns x kt K tiles (column-major, Bfp8_b HiFi2 /
 // Bfp4_b LoFi), fp32 DEST; reps repetitions on the resident inputs, the pack thread stamps the wall clock before the
-// first acquire and after the last pack.  Compile args: kt, ct, reps, phases.
+// first acquire and after the last pack.  Compile args: kt, ct, reps, phases, mode (0: ct calls of one column, 1: one
+// call of ct columns with SrcB reused across the columns of a K tile, custom_mm's unpack order; the weights stay column-major: custom_mm's read_transposed walk steps kt tiles to the next column).
 #include <cstdint>
 #include "api/compute/compute_kernel_hw_startup.h"
 #include "api/compute/experimental/custom_mm.h"
@@ -19,19 +20,30 @@ void kernel_main() {
     constexpr uint32_t ct = get_compile_time_arg_val(1);
     constexpr uint32_t reps = get_compile_time_arg_val(2);
     constexpr uint32_t phases = get_compile_time_arg_val(3);
+    constexpr uint32_t mode = get_compile_time_arg_val(4);
     constexpr uint32_t cb_act = 0, cb_w = 1, cb_out = 16, cb_stamp = 24;
     compute_kernel_hw_startup<SrcOrder::Reverse>(cb_act, cb_w, cb_out);
-    UNPACK((llk_unpack_AB_custom_mm_init<false>(cb_act, cb_w, 1)));
-    MATH((qwen38_b1::b1_mm_math_init<phases>()));
+    if constexpr (mode == 0) {
+        UNPACK((llk_unpack_AB_custom_mm_init<false>(cb_act, cb_w, 1)));
+        MATH((qwen38_b1::b1_mm_math_init<phases>()));
+    } else {
+        UNPACK((llk_unpack_AB_custom_mm_init<false>(cb_act, cb_w, ct)));
+        MATH((qwen38_b1::b1_mm_math_init_ct<phases>(ct)));
+    }
     cb_wait_front(cb_act, kt);
     cb_wait_front(cb_w, kt * ct);
     uint32_t t0 = 0;
     PACK({ t0 = *reinterpret_cast<volatile uint32_t tt_reg_ptr*>(RISCV_DEBUG_REG_WALL_CLOCK_L); });
     for (uint32_t r = 0; r < reps; ++r) {
         tile_regs_acquire();
-        for (uint32_t c = 0; c < ct; ++c) {
-            custom_mm_block_unpack<false, true>(cb_act, cb_w, 0, c * kt, kt, 1);
-            MATH((qwen38_b1::b1_mm_math_run(c, kt)));
+        if constexpr (mode == 0) {
+            for (uint32_t c = 0; c < ct; ++c) {
+                custom_mm_block_unpack<false, true>(cb_act, cb_w, 0, c * kt, kt, 1);
+                MATH((qwen38_b1::b1_mm_math_run(c, kt)));
+            }
+        } else {
+            custom_mm_block_unpack<true, true>(cb_act, cb_w, 0, 0, kt, ct);
+            MATH((qwen38_b1::b1_mm_math_run_ct(kt)));
         }
         MATH((qwen38_b1::b1_mm_math_finalize<phases>(ct)));
         tile_regs_commit();

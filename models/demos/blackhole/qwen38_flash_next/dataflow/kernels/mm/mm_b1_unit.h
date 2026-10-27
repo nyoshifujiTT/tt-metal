@@ -73,6 +73,53 @@ inline void b1_mm_math_init() {
     ckernel::sfpu::_init_sfpu_config_reg();
 }
 
+// ct form (custom_mm's unpack order: for each K tile, SrcB once, then the ct weight tiles of that K row into SrcA):
+// the math walks c inside k, tile slot c at Dst rows 64 c (dense: 64 rows a slot), SrcB released only after the last
+// column of a K tile.  Per tile: phases x {M0 M1 M0 M3}; M3 of the last phase: SrcA released and Dst to the next slot
+// (or back to slot 0 with SrcB released after column ct - 1).
+template <uint32_t phases>
+inline void b1_mm_math_init_ct(uint32_t ct) {
+    addr_mod_t{.srca = {.incr = 16}, .srcb = {.incr = 0}, .dest = {.incr = 16}}.set(ADDR_MOD_0);
+    addr_mod_t{.srca = {.incr = 16}, .srcb = {.incr = 16}, .dest = {.incr = static_cast<int16_t>(-8)}}.set(ADDR_MOD_1);
+    addr_mod_t{.srca = {.incr = 0, .clr = 1}, .srcb = {.incr = 0, .clr = 1}, .dest = {.incr = 8}, .fidelity = {.incr = 1, .clr = 0}}
+        .set(ADDR_MOD_2);
+    // end of a tile, more columns follow: srca / srcb to 0, Dst to the next slot (from row 32 (phases - 1) + 24 to
+    // the slot base + 64: cr walk), fidelity cleared
+    addr_mod_t{.srca = {.incr = 0, .clr = 1}, .srcb = {.incr = 0, .clr = 1}, .dest = {.incr = 64, .clr = 0, .cr = 1}, .fidelity = {.incr = 0, .clr = 1}}
+        .set(ADDR_MOD_3);
+    // end of the K tile's last column: srca / srcb to 0, Dst back to slot 0 (clear), fidelity cleared
+    addr_mod_t{.srca = {.incr = 0, .clr = 1}, .srcb = {.incr = 0, .clr = 1}, .dest = {.incr = 0, .clr = 1, .cr = 0}, .fidelity = {.incr = 0, .clr = 1}}
+        .set(ADDR_MOD_4);
+    addr_mod_t{.srca = {.incr = 0}, .srcb = {.incr = 0}, .dest = {.incr = 0}}.set(ADDR_MOD_7);
+    load_replay_buf(ckernel::math::replay_buf_offset, 4, [] {
+        TTI_MVMUL(p_setrwc::CLR_NONE, 0, ADDR_MOD_0, 0);
+        TTI_MVMUL(p_setrwc::CLR_NONE, 0, ADDR_MOD_1, 0);
+        TTI_MVMUL(p_setrwc::CLR_NONE, 0, ADDR_MOD_0, 0);
+        TTI_MVMUL(p_setrwc::CLR_NONE, 0, ADDR_MOD_2, 0);
+    });
+    const uint32_t body3 = lltt::replay_insn(ckernel::math::replay_buf_offset, 3);
+    const uint32_t m3_phase = TT_OP_MVMUL(p_setrwc::CLR_NONE, 0, ADDR_MOD_2, 0);
+    const uint32_t m3_col = TT_OP_MVMUL(p_setrwc::CLR_A, 0, ADDR_MOD_3, 0);
+    const uint32_t m3_krow = TT_OP_MVMUL(p_setrwc::CLR_AB, 0, ADDR_MOD_4, 0);
+    // template 1: outer = ct columns, inner = phases x {body3, m3}; last inner op of a column: m3_col, of the last
+    // column: m3_krow
+    ckernel_template tmp(ct, phases, body3, m3_phase);
+    tmp.set_last_inner_loop_instr(m3_col);
+    tmp.set_last_outer_loop_instr(m3_krow);
+    tmp.program();
+    TTI_SETRWC(p_setrwc::CLR_NONE, 0, 0, 0, 0, p_setrwc::SET_ABD_F);
+    ckernel::sfpu::_init_sfpu_config_reg();
+}
+
+// kt K rows of ct columns into the tile slots 0 .. ct - 1 (Dst rows 64 c ..); no finalize
+inline void b1_mm_math_run_ct(uint32_t kt) {
+    math::set_dst_write_addr<DstTileShape::Tile32x32, UnpackDestination::SrcRegs>(0);
+    TTI_SETRWC(p_setrwc::CLR_NONE, 0, 0, 0, 0, p_setrwc::SET_ABD_F);
+    for (uint32_t k = 0; k < kt; ++k) {
+        TTI_MOP(1, 0, 0);
+    }
+}
+
 // kt tile-MACs into the tile slot `dst_index` (Dst rows dst_index x 64 .. + 32 phases); no finalize
 inline void b1_mm_math_run(uint32_t dst_index, uint32_t kt) {
     math::set_dst_write_addr<DstTileShape::Tile32x32, UnpackDestination::SrcRegs>(dst_index);
