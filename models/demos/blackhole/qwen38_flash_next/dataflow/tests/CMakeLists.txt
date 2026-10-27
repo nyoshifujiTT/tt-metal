@@ -12,6 +12,7 @@
 #   test_qwen38_dataflow_mm_chain I-1c-2: one chip's in_proj pool on 130 cores (Stream-K, fp32 partials over the NoC)
 #   test_qwen38_dataflow_mm_pairs I-1c-6: the in_proj pool in column pairs (ct 2) on 130 cores
 #   test_qwen38_dataflow_mm_seq   I-3b: a chain of dependent projections (the frame's unit-to-unit cost)
+#   test_qwen38_dataflow_mm_b1    I-1c-7: the B=1 matmul unit (served fidelity, >= 6 Dst blocks in flight, fp32 finalize)
 #   test_qwen38_dataflow_dram     I-1b': the DRAM lane, the cores reading their own slices into their L1 at once
 # Built with the tt_metal tests (TT_METAL_BUILD_TESTS); executables in build/test/models/demos/blackhole/qwen38_flash_next/.
 
@@ -24,7 +25,7 @@ set(QWEN38_DATAFLOW_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/..
 )
 
-foreach(GTEST_TARGET test_qwen38_dataflow_probe test_qwen38_dataflow_meeting test_qwen38_dataflow_meeting2 test_qwen38_dataflow_meeting3 test_qwen38_dataflow_meeting4 test_qwen38_dataflow_meeting5 test_qwen38_dataflow_link test_qwen38_dataflow_costs test_qwen38_dataflow_mm test_qwen38_dataflow_mm_chain test_qwen38_dataflow_mm_pairs test_qwen38_dataflow_mm_seq test_qwen38_dataflow_dram)
+foreach(GTEST_TARGET test_qwen38_dataflow_probe test_qwen38_dataflow_meeting test_qwen38_dataflow_meeting2 test_qwen38_dataflow_meeting3 test_qwen38_dataflow_meeting4 test_qwen38_dataflow_meeting5 test_qwen38_dataflow_link test_qwen38_dataflow_costs test_qwen38_dataflow_mm test_qwen38_dataflow_mm_chain test_qwen38_dataflow_mm_pairs test_qwen38_dataflow_mm_seq test_qwen38_dataflow_mm_b1 test_qwen38_dataflow_dram)
     add_executable(${GTEST_TARGET} ${GTEST_TARGET}.cpp)
     target_precompile_headers(${GTEST_TARGET} REUSE_FROM metal_common_pch)
     target_link_libraries(${GTEST_TARGET} PRIVATE test_metal_common_libs)
