@@ -94,7 +94,7 @@ void kernel_main() {
                 UNPACK({ tensix_sync(); ts[1 + 4 * s] = clock_low(); });
             }
             w0 += seg_kt[s];
-            if constexpr (role == 0) {
+            if (role == 0 && n_in > 0) {
                 cb_wait_front(cb_in_part, kSlotsHalf);
                 if (pf) {
                     UNPACK({ ts[2] = clock_low(); });

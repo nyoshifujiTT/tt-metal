@@ -256,10 +256,12 @@ void kernel_main() {
                 cb_pop_front(cb_part, 1);
             }
         } else {
-            errors += wait_landed_all(in_base + (s & 1) * kSlotsHalf * kSlot, n_in) ? 0 : 0x10000;
-            prof(s, 71);
-            cb_reserve_back(cb_in_part, kSlotsHalf);
-            cb_push_back(cb_in_part, kSlotsHalf);
+            if (n_in > 0) {
+                errors += wait_landed_all(in_base + (s & 1) * kSlotsHalf * kSlot, n_in) ? 0 : 0x10000;
+                prof(s, 71);
+                cb_reserve_back(cb_in_part, kSlotsHalf);
+                cb_push_back(cb_in_part, kSlotsHalf);
+            }
             cb_wait_front(cb_out, 1);
             prof(s, 72);
             for (uint32_t j = 0; j < n_in; ++j) {

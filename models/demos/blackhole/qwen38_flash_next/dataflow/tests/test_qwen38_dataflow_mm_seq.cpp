@@ -73,13 +73,13 @@ std::vector<CorePlan> make_plan(uint32_t k_own) {
         TT_FATAL(senders[s].segs.size() <= 3, "sender {} has {} segments", s, senders[s].segs.size());
     }
     for (auto& o : owners) {
-        TT_FATAL(o.n_in >= 1 && o.n_in <= 3, "column {} has {} partials", o.col, o.n_in);
+        TT_FATAL(o.n_in <= 3 && (o.n_in >= 1 || rest == 0), "column {} has {} partials", o.col, o.n_in);
     }
     std::vector<CorePlan> plan;
     uint32_t next = 0;
     for (uint32_t c = 0; c < kNt; ++c) {
         plan.push_back(owners[c]);
-        while (next < n_send && start[next] / rest <= c) {
+        while (rest > 0 && next < n_send && start[next] / rest <= c) {
             plan.push_back(senders[next++]);
         }
     }
@@ -321,7 +321,7 @@ TEST(Qwen38DataflowMm, DependentChain) {
     bool ok = true;
     out << run_seq(mesh, 54, 1, ok) << "\n";
     out.flush();
-    for (uint32_t k_own : {50u, 54u, 58u}) {
+    for (uint32_t k_own : {50u, 54u, 58u, 80u}) {
         out << run_seq(mesh, k_own, 48, ok) << "\n";
         out.flush();
     }
