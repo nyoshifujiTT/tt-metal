@@ -56,6 +56,10 @@ P_tok = ROWS * 4
 P_arg = ROWS * 8 * TP
 # the matmul times that hide a meeting: read from step 4 (one source for every unit cost, revision 6)
 T4 = json.load(open(sys.argv[2] if len(sys.argv) > 2 else "/tmp/q38/design/step4_item_time.json"))
+# correction 43: with step 4p of a form (argv 3), the matmul times are the placed ones (worst harvest) of that form
+P4 = json.load(open(sys.argv[3]))["units"] if len(sys.argv) > 3 else None
+if P4 is not None:
+    T4 = P4
 
 
 def t4(prefix, field="mm_us"):
@@ -138,6 +142,20 @@ OUT_PLAIN = mm_c(ROWS, H, 6 * 128, "bf8")
 OUT_FOLD = mm_pool(
     (ROWS, H, 6 * 128, "bf8"), (ROWS, HC * HC_LOW, 6 * 128, "bf16")
 )  # out_proj K-split 6 heads, with the fold F_i h_i pooled
+if P4 is not None:
+    # correction 43: the placed times of this form's units (the form decides which split the unit's pool is)
+    FORM6 = json.load(open(sys.argv[3]))["form"]
+    _down = t4("L00.gdn.gr.down")
+    _up = t4("L00.gdn.gr.up")
+    _out = t4("L00.gdn.out_proj")
+    if FORM6 == "A":
+        DOWN_K, UP_N, OUT_PLAIN = _down, _up, _out
+    elif FORM6 in ("B",):
+        DOWN_K, UP_N, OUT_FOLD = _down, _up, _out
+    elif FORM6 == "Bn":
+        DOWN_N, UP_N, OUT_FOLD = _down, _up, _out
+    elif FORM6 == "B+D":
+        DOWN_R, UP_N, OUT_FOLD = _down, _up, _out
 
 
 def main():
@@ -196,7 +214,7 @@ def main():
         moe=block(MM_DOWN_EXP, rs_moe, DOWN_K, ar_down, UP_N),
     )
     forms["B"] = dict(
-        desc="replicated residual: outputs AR_y (waves); the attention output carries the fold F_i h_i, so the MoE read's low-rank is local (its R_start term off the chain); the attention read's D K-split (AR_down waves), U N-split (AG_x)",
+        desc="replicated residual: outputs AR_y (waves); the attention output carries the fold F_i h_i and the MoE read's g_b (D K-split at the attention block's start, off the chain) rides the same all-reduce, so the MoE read's low-rank is on the chain only through that all-reduce; the attention read's D K-split (AR_down waves), U N-split (AG_x)",
         extra_MiB=(HC * HC_LOW * 768 * BF16 - HC_LOW * HCD * BF16 / TP) / MiB,
         attn=block(OUT_FOLD, aryf_attn, 0.0, 0.0, UP_N),
         moe=block(MM_DOWN_EXP, ary_moe, DOWN_K, ar_down, UP_N),
@@ -319,10 +337,10 @@ def main():
         fl = [(0.0, (0, c), cm.path_tree(big, (0, c), (2, c)), b, (0, c)) for c in range(4)] + [
             (0.0, (1, c), cm.path_tree(big, (1, c), (3, c)), b, (1, c)) for c in range(4)
         ]
-        t = cm.simulate_mc(fl)[0] * 1e6
+        t = cm.hand_over(fl, b) * 1e6  # revision 8: delivered to the receiving chip's cores
         hand.append(dict(cut=k, desc=nm, bytes=b, us=t))
         print(f"| {nm} | {desc} | {b:,.0f} | {t:.3f} |")
-    res_hop = cm.simulate_mc([(0.0, (1, 0), cm.path_tree(big, (1, 0), (3, 0)), res_cols, (1, 0))])[0] * 1e6
+    res_hop = cm.hand_over([(0.0, (1, 0), cm.path_tree(big, (1, 0), (3, 0)), res_cols, (1, 0))], res_cols) * 1e6
     print(
         f"\nhand-offs per pass: {sum(h['us'] for h in hand):.2f} us (8 cuts); forms B: the next group needs the whole residual [2,4H]: the sender sends its columns 1/8 as in A and the receiving group all-gathers them (AG of 5 KiB per chip: +{cm.all_gather(mesh,res_cols)[0]*1e6:.2f} us per cut)"
     )
@@ -352,6 +370,7 @@ def main():
             ary_moe=ary_moe,
             aryf_attn=aryf_attn,
             res_hop=res_hop,
+            ids_hop=cm.hand_over([(0.0, (1, 0), cm.path_tree(big, (1, 0), (3, 0)), ROWS * 10 * 2, (1, 0))], ROWS * 10 * 2) * 1e6,
             ar_down_full=ar_down_full,
             spec_meet_A=ar_down_full + out["AG_x"]["us"],
             spec_meet_B=ag_low + out["AG_x"]["us"],

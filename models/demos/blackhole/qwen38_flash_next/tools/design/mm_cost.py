@@ -41,7 +41,14 @@ def tree_level(rows):
     return NOC_RELAY + math.ceil(part / NOC_FLIT) + max(math.ceil(part / UNPACK_BYTES), math.ceil(rows / 8) * 2)
 
 
+import stages
+
+
 def pool(*mms):
+    return stages.pool_stage(mms)
+
+
+def _pool_model(*mms):
     """cycles of matmuls that read the same input, their output tiles pooled over the 130 cores"""
     out = 0
     work = 0.0

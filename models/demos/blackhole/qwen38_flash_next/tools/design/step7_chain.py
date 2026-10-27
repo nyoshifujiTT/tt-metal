@@ -38,16 +38,19 @@ PFX = "" if D == "/tmp/q38/design" else "design_"
 A = json.load(open(f"{D}/{PFX}step2_account.json"))
 U = A["units"]
 ROWS = A["rows"]
-F = json.load(open(f"{D}/{PFX}step3_frames.json"))
+FORM = ARGS.get("form", "A")
+# corrections 30-42: the form's frames (step 3 per form: stored weights incl. padding and folds), the form's unit times
+# with the pools timed on their placement (step 4p: worst of the 14 harvest cases), the form's stored bytes per unit
+F = json.load(open(f"{D}/{PFX}step3_frames_{FORM}.json"))
 FR = F["frames"]
 CAP = F["cap"]
 PP = F["PP"]
-T4 = json.load(open(f"{D}/{PFX}step4_item_time.json"))
-C6 = json.load(open(f"{D}/{PFX}step6_comm.json"))
+T4 = json.load(open(f"{D}/{PFX}step4p_{FORM}.json"))["units"]
+STORED = F["stored"]
+C6 = json.load(open(f"{D}/{PFX}step6_comm_{FORM}.json"))  # correction 43: the form's exposures on its placed times
 CEN = json.load(open(ARGS.get("census", f"{D}/census_stage2.json")))["rows2"]
 CASE = ARGS.get("case", "hit")
 NPASS = int(ARGS.get("npass", "24"))
-FORM = ARGS.get("form", "A")
 S_RES = ARGS.get("s_resident", "0") == "1"
 PIECE = int(ARGS.get("piece", str(512 * KiB)))
 BW = 512e9
@@ -57,9 +60,17 @@ DN = 1 / 3
 FM = C6["forms"][FORM]
 PARTS = C6["parts"]
 AGARG = C6["AG_argmax"]["us"]
-HAND = {h["cut"]: h["us"] + (C6["hand_B_extra"] if FORM != "A" else 0.0) for h in C6["hand"]}
+C6B = json.load(open(f"{D}/{PFX}step6b_hand_{FORM}.json"))  # correction 23: the hand-offs at the real frame cuts (liveness)
+HAND = {h["cut"]: h["us"] + (C6["hand_B_extra"] if (FORM != "A" and h["cut"] != 0) else 0.0) for h in C6B["hand"]}
+assert set(HAND) == {f["frame"] for f in FR}, "step 6b must cover every frame cut of step 3"
 HOP_RES = PARTS["res_hop"]
-ISSUE = 0.16
+sys.path.insert(0, __file__.rsplit("/", 1)[0] if "/" in __file__ else ".")
+import stages as SG  # noqa: E402
+
+# revision 8 (D-3, corrected 10-27 16:2x): router result -> 8 unicasts to the bank DRISCs (no broadcast to DRAM tiles) ->
+# expert lookup + DRISC page -> GDDR pipeline 0.3 us budget -> first page to the cores (stages.routed_issue, shared with
+# free5d_v8)
+ISSUE = SG.routed_issue() / SG.CLK * 1e6
 # the speculative router and its hc read (the down + up matmuls of the hyper-connection read), from step 4 (revision 6)
 SPEC = next(t["t_us"] for t in T4 if t["unit"].startswith("L00.moe.speculative router"))
 HC_READ = next(t["t_us"] for t in T4 if t["unit"].startswith("L00.moe.gr.down")) + next(
@@ -68,11 +79,11 @@ HC_READ = next(t["t_us"] for t in T4 if t["unit"].startswith("L00.moe.gr.down"))
 SPEC_MEET = PARTS["spec_meet_A"] if FORM == "A" else PARTS["spec_meet_B"]
 SPEC_LOCAL = HC_READ + SPEC_MEET + SPEC
 SPEC_REMOTE = HOP_RES + SPEC_LOCAL
-TOKHOP = C6["hand"][0]["us"]
+TOKHOP = C6B["hand"][0]["us"]
 ARGMAX_LOCAL = next(t["t_us"] for t in T4 if t["unit"].startswith("argmax"))
 AGX_FULL = C6["AG_x"]["us"]
-EXTRA_MiB = FM["extra_MiB"]
-IDS_HOP = 1.04
+EXTRA_MiB = (sum(STORED) - sum(json.load(open(f"{D}/{PFX}step3_frames_A.json"))["stored"])) / MiB / PP if FORM != "A" else 0.0  # correction 41: from the stored bytes
+IDS_HOP = PARTS["ids_hop"]  # revision 8 (D-7 8): the predicted ids (rows x 10 x 2 B) to the next group's chip, 2 hops, from step 6 (was a hand-written 1.04)
 spec_binds = [0, 0]  # (predictions whose weights were not yet in L1, total)
 N = len(U)
 frame_of = [None] * N
@@ -136,7 +147,9 @@ def comm_after(i):
     n = U[i]["unit"]
     b = block_of(i)
     if ".gr.down" in n:
-        return FM[b]["meet_low"] if b else PARTS["ar_down"]
+        # correction 37: step 6's sections run from a block's output to the next block's read: an attention block's read
+        # (gdn / qsa) follows a MoE block's output -> FM["moe"]; a MoE block's read follows an attention output -> FM["attn"]
+        return FM["moe" if b == "attn" else "attn"]["meet_low"] if b else PARTS["ar_down"]
     if ".gr.gate x normalized" in n:
         nxt = U[i + 1]["unit"]
         return (
@@ -162,14 +175,9 @@ def comm_after(i):
 def dur(i):
     if T4[i]["spec"]:
         return 0.0
-    n = U[i]["unit"]
-    b = block_of(i)
-    if b and ".gr.down" in n:
-        return FM[b]["down"]
-    if b and ".gr.up" in n:
-        return FM[b]["up"]
-    if ".out_proj" in n or ".o_proj" in n:
-        return FM["attn"]["out"]
+    # corrections 37, 39-43: the unit's time on its form's pools and placement (step 4p); a unit whose matmul is off the
+    # chain in the form (the MoE read's down in the B forms: g_b at the attention block's start) keeps only its
+    # elementwise part on the chain (silu / 4 of the low-rank after the all-reduce): step 4p's t_us
     return T4[i]["t_us"]
 
 
@@ -203,9 +211,8 @@ EXTRA_PER_LAYER = EXTRA_MiB * MiB
 
 
 def extra_of(i):
-    n = U[i]["unit"]
-    b = block_of(i)
-    return EXTRA_PER_LAYER if (b == "attn" and ".gr.down" in n and FORM != "A") else 0.0
+    """correction 41: the form's extra bytes are in the stored bytes of the units themselves (STORED)"""
+    return 0.0
 
 
 # ---------------- lanes ----------------
@@ -282,7 +289,7 @@ def heads(lane):
 
 
 ROUTED_LOOKAHEAD = int(
-    ARGS.get("lookahead", "3")
+    ARGS.get("lookahead", "2")
 )  # the routed buffer kept free ahead of the chain: this many MoE layers' routed reads
 
 
@@ -386,7 +393,7 @@ def schedule_pass_reads(p):
         keys += add_read(
             (p, i, "w"),
             g,
-            x["w"] + x["dram_read"] + extra_of(i) + x["in_"] + x["out"] + x["work"],
+            STORED[i] + x["dram_read"] + x["work"],
             0.0,
             deadline_of(p, i),
             i,

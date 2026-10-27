@@ -29,11 +29,15 @@ R = F["R"]
 CAP = F["cap"]
 NF = PP * R
 frames = F["frames"]
+# corrections 32, 41, 44: the form's stored bytes (step 3) and unit times on the placement (step 4p, argv 5)
+STO = F.get("stored", [x["w"] for x in A])
+if len(sys.argv) > 5:
+    T = json.load(open(sys.argv[5]))["units"]
 for f in frames:
     us = A[f["a"] : f["z"]]
     ts = T[f["a"] : f["z"]]
     f["chain_us"] = sum(t["t_us"] for t in ts if not t["spec"])
-    f["dense"] = sum(x["w"] for x in us if "routed expert" not in x["unit"])
+    f["dense"] = sum(STO[f["a"] + k] for k, x in enumerate(us) if "routed expert" not in x["unit"])
     f["rows"] = sum(x["in_"] + x["out"] + x["work"] for x in us)
     f["S2"] = 2 * sum(x["S"] for x in us)
     f["reads"] = sum(x["dram_read"] for x in us)
@@ -105,7 +109,7 @@ for u in A:
         layers.append((u["layer"],))
 per_layer = []
 for (lay,) in layers:
-    rt = sum(x["w"] for x in A if x["layer"] == lay and x["kind"] == "mm_expert") / BW * 1e6
+    rt = sum(STO[i] for i, x in enumerate(A) if x["layer"] == lay and x["kind"] == "mm_expert") / BW * 1e6
     ch = sum(t["t_us"] for t in T if t["layer"] == lay and not t["spec"])
     per_layer.append((lay, rt, ch))
 moe = [p for p in per_layer if p[1] > 0]

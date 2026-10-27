@@ -1,24 +1,19 @@
 #!/usr/bin/env python
-r"""Step 4 of the detailed design (worklog 12.4): the time of every unit on one chip of the chosen form (rows 2, TP8,
-tiles-form experts), from the physical values (README 11.2.3) only.
-  matmul [M, K] x [K, N] on the chip's share: the per-format, per-row-count tile-MAC of mm_cost.py (revision 6: bf8
-    HiFi2 / BF4 LoFi 8 cycles and bf16 HiFi4 16 cycles at rows <= 8; revision 5 used HiFi2 32 for every format).  Output tiles go to the 130 cores;
-    when there are fewer output tiles than cores (every projection at rows 2 -> 1 row-tile) the K dimension is split over
-    cores_per_tile = ceil(130 / out) cores so every core carries work/130 tile-MACs, and the fp32 partial tiles are
-    tree-reduced over the NoC (per level: 92 cycles + 64 flits of a 4 KiB tile + a 32-cycle DEST accumulate).
-    chain = min(no split: K-tiles x 32, split: work/130 x 32 + levels x 188 cycles).  Units that read the same input run
-    side by side (their output tiles pooled): the GDN in-projections (qkv, z, a, b), the QSA projections (q+gate, k, v,
-    indexer), the shared up/gate with the router, the experts' gate_up across experts, the experts' down with the shared
-    down.  (README 11.3 E19, H-18/H-19.)
-  gated delta rule: one (value head, user) is 4,224 cycles for one row (27B section 9), split into 4 independent 32-column
-    units of 256 + 800 x rows cycles (the 2 rows are a recurrence); units on separate cores: 6 heads x 4 = 24 units on 24
-    cores, one round.
-  router top-10: per row-tile, 16 logit tiles -> 10 passes x 32 cycles each in parallel, NoC gather 92 cycles, 10 passes
-    on the merged tile.
-  argmax (greedy): the chip's 970 logit tiles (fp32, V/8 columns) spread over the 130 cores, 32 cycles per tile scanned,
-    a NoC gather of the 130 (value, index) candidates (92 cycles), a final pass over the 5 candidate tiles; the 8 chips'
-    candidates are all-gathered (step 6) and every chip picks the same token.
-  elementwise: 16 cycles per bf16 tile moved through the FPU, 32 per fp32 tile, spread over the cores.
+r"""Step 4 of the detailed design (worklog 12.4; revision 8 = the stage-level design D-2, worklog 10-27): the time of
+every unit on one chip of the chosen form (rows 2, TP8, tiles-form experts), from the specifications only (stages.py:
+instruction counts x specified cycles, plus the three budgets P_PACK / P_UNP / N_RD for pipeline depths no document gives).
+  matmul pools (units reading the same input run side by side, their output tiles pooled): stages.pool_stage = the MACs
+    (work / 130 at the per-format, per-row-count tile-MAC), the Stream-K senders (finalize, pack, NoC write) and the
+    column owners (poll, unpack of the partials to Dst, SFPU add, finalize, pack, NoC write), then the hand-over of the
+    finished columns: up to the hub (owners near the hub: 7 / 11 / 14 hops), the hub's poll and issue, the multicast to
+    all 130 cores as two rectangles on NoC0 / NoC1 (17 hops, worst over the 14 harvest cases), the receivers' poll.
+  elementwise work is fused into the owners' finalize (SFPU instruction counts of the fp32 functions, stages.ACT).
+  gated delta rule: stages.gdr_unit = (value head, 8 columns of S fp32 in Dst), 2 passes a row on the SFPU, 2 rows in
+    series; 96 units on 96 cores; + the hand-over to out_proj; the gated norm's per-head scale gathered over 7 hops.
+  router top-10: stages.topk10 = each of the 16 router owners' top-10, merged on the selector, softmax of the 10.
+  SDPA (ctx 1): on the kv-head cores, 3 q heads x 2 rows, the output multicast straight to the o_proj cores.
+  argmax (greedy): each core's ~8 logit column tiles (SFPSWAP max + index), one hop of the candidates to the selector;
+    the 8 chips' candidates are all-gathered (step 6).
   DRAM: the unit's weight + S + reads at 512 GB/s (the chip's lane, for reference; the pass-level lane is step 5).
 Outputs: the per-unit table (markdown) and step4_item_time.json."""
 import json
@@ -27,6 +22,7 @@ import sys
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0] if "/" in __file__ else ".")
 import mm_cost
+import stages as SG
 
 A = json.load(open(sys.argv[1] if len(sys.argv) > 1 else "/tmp/q38/design/step2_account.json"))
 U = A["units"]
@@ -34,11 +30,6 @@ ROWS = A["rows"]
 S0 = json.load(open(sys.argv[2] if len(sys.argv) > 2 else "/tmp/q38/design/step0_units.json"))["units"]
 CLK = 1.35e9
 CORES = 130
-MM = 32
-ELT = 16
-FP32T = 32
-NOC_RELAY = 92
-NOC_FLIT = 64
 TILE = 32
 BW = 512e9
 KiB = 1024
@@ -58,27 +49,17 @@ IDX_Q = 4
 IDX_HD = 128
 
 
+_MMS = []  # the matmul shapes of the unit being costed (written to the json for the H-1 L1 map)
+
+
 def mm_c(M, N, K, fmt):
+    _MMS.append([[M, N, K, fmt]])
     return mm_cost.one(M, N, K, fmt)
 
 
 def mm_pool(*mms):
+    _MMS.append([[list(x) if isinstance(x, tuple) else x for x in m] for m in mms])
     return mm_cost.pool(*mms)
-
-
-def gdr_unit(R):
-    return 256 + 800 * R
-
-
-def topk(rows, ntile):
-    return max(
-        10 * FP32T + NOC_RELAY + 10 * FP32T,
-        math.ceil(rows / TILE) * (ntile * 10 * FP32T + NOC_RELAY + 10 * FP32T) / CORES,
-    )
-
-
-def elt(bytes_, dt=2.0):
-    return bytes_ / (TILE * TILE * dt) * (ELT if dt == 2.0 else FP32T) / CORES
 
 
 T_BUSIEST = A["busiest_tiles"]
@@ -89,66 +70,68 @@ def cycles(x):
     n = x["unit"]
     r = dict(mm=0.0, serial=0.0, elt_=0.0, pool="")
     if ".gr.norm" in n:
-        r["elt_"] = elt(x["in_"]) * 3
+        r["elt_"] = SG.ACT["rsqrt"] + 2 * SG.ACT["mul"]  # D-2: 1/rms_g (part of SG.hc_read_elt)
     elif ".gr.down" in n:
         r["mm"] = mm_pool((ROWS, HC_LOW, HCD / TP, "bf16"), (ROWS, HC, HCD / TP, "bf16"))
         r["pool"] = "down + inject (same input)"
+        r["elt_"] = SG.owner_act("silu") + SG.ACT["mul"]  # D-2: silu/4 in the owners' finalize
     elif ".gr.up" in n:
         r["mm"] = mm_c(ROWS, HCD / TP, HC_LOW, "bf16")
+        r["elt_"] = SG.owner_act("sigmoid")  # D-2: sigmoid in the owners' finalize
     elif ".gr.gate x normalized" in n:
-        r["elt_"] = elt(x["in_"]) * 2
+        r["elt_"] = 4 * 2 * SG.ACT["mul"]  # D-2: the 4 branches of a column on one owner: local
     elif ".gr.inject" in n:
         r["pool"] = "(in the gr.down pool)"
     elif ".gr.write" in n:
-        r["elt_"] = elt(x["in_"]) * 2
+        r["elt_"] = 4 * 2 * SG.ACT["mul"]  # D-2: residual columns on their owner
     elif ".in_proj_qkv" in n:
         r["mm"] = mm_pool((ROWS, 1280, H, "bf8"), (ROWS, 6 * GDN_HD, H, "bf8"), (ROWS, TILE, H, "bf8"), (ROWS, TILE, H, "bf8"))
         r["pool"] = "qkv + z + a + b"
     elif ".in_proj_z" in n or ".in_proj_a" in n or ".in_proj_b" in n:
         r["pool"] = "(in the qkv pool)"
     elif ".conv1d" in n:
-        r["elt_"] = elt(x["in_"]) * 4
+        r["elt_"] = SG.conv1d_elt()
     elif ".l2norm" in n:
-        r["elt_"] = elt(x["in_"]) * 3
+        r["elt_"] = 0  # D-2: folded into the GDR unit (k.k, q.q with the passes)
     elif ".gated delta rule" in n:
-        r["serial"] = math.ceil(6 * 4 / CORES) * gdr_unit(ROWS)
+        r["serial"] = SG.gdr_layer(ROWS, 6 * 16)  # D-2: 96 units of 8 columns on 96 cores + the hand-over
     elif ".norm (gated)" in n:
-        r["elt_"] = elt(x["in_"], 4.0) * 3
+        r["elt_"] = SG.norm_gated()
     elif ".out_proj" in n:
         r["mm"] = mm_c(ROWS, H, 6 * GDN_HD, "bf8")
     elif ".indexer qk" in n:
         r["mm"] = mm_pool((ROWS, 3 * 2 * QSA_HD, H, "bf8"), (ROWS, 2 * QSA_HD, H, "bf8"), (ROWS, IDX_Q * IDX_HD + IDX_HD, H, "bf8"))
         r["pool"] = "q+gate + k,v + indexer"
     elif ".index scoring" in n:
-        r["elt_"] = elt(x["in_"])
+        r["elt_"] = SG.index_ctx1_elt()
     elif ".q+gate proj" in n or ".k proj" in n:
         r["pool"] = "(in the indexer pool)"
     elif ".partial RoPE" in n:
-        r["elt_"] = elt(x["in_"]) * 2
+        r["elt_"] = SG.rope_elt()
     elif ".SDPA" in n:
-        r["elt_"] = elt(x["in_"]) * 3
+        r["elt_"] = SG.sdpa_ctx1(ROWS)
     elif ".o_proj" in n:
         r["mm"] = mm_c(ROWS, H, 3 * QSA_HD, "bf8")
     elif ".router" in n and "speculative" not in n:
-        r["mm"] = mm_pool((ROWS, 2 * SH_INT / TP, H, "bf8"), (ROWS, E, H, "bf16"))
-        r["serial"] = topk(ROWS, E / TILE)
-        r["pool"] = "router + shared gate/up"
+        r["mm"] = mm_pool((ROWS, SH_INT / TP, H, "bf8", 2, SG.moe_act_elt(ROWS, False)), (ROWS, E, H, "bf16"), (ROWS, 1, H, "bf16"))
+        r["serial"] = SG.topk10(ROWS, E // TILE)
+        r["pool"] = "router + shared gate/up pairs (silu x up in their owners) + shared expert gate"
     elif "speculative router" in n:
         r["mm"] = mm_c(ROWS, E, H, "bf16")
-        r["serial"] = topk(ROWS, E / TILE)
+        r["serial"] = SG.topk10(ROWS, E // TILE)  # rev8 read-through: the same stage-level top-10 as the router
         r["pool"] = "(one block earlier, off the chain)"
     elif ".shared gate_proj" in n:
         r["pool"] = "(in the router pool)"
     elif ".shared down_proj" in n:
         r["pool"] = "(in the experts' down pool)"
     elif "routed expert e: gate_up" in n:
-        r["mm"] = mm_c(1, T_BUSIEST * 2 * TILE, H, "bf4")
-        r["pool"] = f"{T_BUSIEST:.1f} tiles x 2 cols pooled"
+        r["mm"] = mm_pool((1, T_BUSIEST * TILE, H, "bf4", 2, SG.moe_act_elt(ROWS, True)))
+        r["pool"] = f"{T_BUSIEST:.1f} gate/up tile pairs (silu x up x score in their owners)"
     elif "routed expert e: down" in n:
-        r["mm"] = mm_pool((1, H * math.ceil(T_BUSIEST), TILE, "bf4"), (ROWS, H, SH_INT / TP, "bf8"))
-        r["pool"] = f"{T_BUSIEST:.1f} down slices + shared down"
+        r["mm"] = mm_pool((ROWS, H, ((T_BUSIEST * TILE, "bf4"), (SH_INT / TP, "bf8")), "cat", 1, SG.moe_combine_elt(ROWS)))
+        r["pool"] = f"down: K = {T_BUSIEST:.1f} expert tiles + shared 80 columns concatenated, routed + gated shared in the owners"
     elif "routed + shared" in n:
-        r["elt_"] = elt(x["in_"], 4.0)
+        r["elt_"] = 0  # correction 19: in the down owners' epilogue (SG.moe_combine_elt)
     elif n.startswith("embed_tokens"):
         r["elt_"] = 0
     elif ".ple.n-gram" in n:
@@ -157,19 +140,19 @@ def cycles(x):
         r["mm"] = mm_pool((ROWS, HCD / TP, 2560, "bf16"), (ROWS, H / TP, 2560, "bf16"))
         r["pool"] = "key + value"
     elif ".ple.norm_query" in n:
-        r["elt_"] = elt(x["in_"]) * 3
+        r["elt_"] = SG.ACT["rsqrt"] + 4 * SG.ACT["mul"] + SG.ACT["sigmoid"] + 20  # D-2: gate from the meeting's dot products
     elif ".ple.value_proj" in n:
         r["pool"] = "(in the key pool)"
     elif ".ple.norm_conv" in n:
-        r["elt_"] = elt(x["in_"]) * 5
+        r["elt_"] = SG.ACT["rsqrt"] + 2 * 4 * 3 + SG.owner_act("silu") + 2 * SG.ACT["mul"]  # D-2: in the value owners' finalize
     elif n.startswith("final hyper") or n.startswith("mtp.hyper"):
         r["mm"] = mm_c(ROWS, HC_LOW, HCD / TP, "bf8") + mm_c(ROWS, H, HC_LOW, "bf8")
     elif n.startswith("lm_head") or n.startswith("mtp.lm_head"):
         r["mm"] = mm_c(ROWS, V / TP, H, "bf8")
     elif n.startswith("argmax"):
         r["serial"] = (
-            math.ceil(math.ceil(V / TP / TILE) / CORES) * FP32T + NOC_RELAY + math.ceil(CORES / TILE) * FP32T
-        )  # local argmax: each core scans its ~7.5 logit tiles (32 cycles per fp32 tile), NoC gather of the 130 candidates, final pass over 5 tiles
+            math.ceil(math.ceil(V / TP / TILE) / CORES) * 2 * 4 + 9 + SG.flight(SG.UP_HOPS, 16) + SG.poll() + 9 * 4 + 9
+        )  # D-2: each core's ~8 logit column tiles (2 rows = 2 groups each, SFPSWAP max + index), one hop of the 130 candidates to the selector, its 9 groups
     elif n.startswith("mtp.embed_tokens"):
         r["mm"] = mm_c(ROWS, 2 * H / TP, H, "bf8")
     else:
@@ -177,8 +160,41 @@ def cycles(x):
     return r
 
 
+def form_pools(n, pools_a):
+    """correction 39 (10-27 19:5x): the unit's pools per hyper-connection form (step 6's forms: A, B, Bn, B+D).  Only the
+    hc read's down and the attention output differ:
+      attention read's down (the hc read before a GDN / QSA block): A, B K-split [320+4, 4H/8]; Bn N-split [40 rows of
+        D + inject, 4H] (AG_low); B+D replicated [320+4, 4H]
+      MoE read's down (before a MoE block): K-split in every form; in B, Bn, B+D it runs at the attention block's start
+        off the chain (g_b rides the attention output's all-reduce with the fold F_i h_i): same pool, same L1
+      attention output (out_proj / o_proj): A plain; B, Bn, B+D pooled with the fold [4 x 320, heads x 128 (GDN) / 256 (QSA)] bf16"""
+    out = {"A": pools_a}
+    attn_read = (".gdn.gr.down" in n or ".qsa.gr.down" in n) and not n.startswith("mtp.hyper") and not n.startswith("final")
+    moe_read = ".moe.gr.down" in n
+    if attn_read:
+        out["B"] = pools_a
+        out["Bn"] = [[[ROWS, HC_LOW / TP, HCD, "bf16"], [ROWS, HC, HCD, "bf16"]]]
+        out["B+D"] = [[[ROWS, HC_LOW, HCD, "bf16"], [ROWS, HC, HCD, "bf16"]]]
+    elif moe_read:
+        # correction 40: the MoE read's D K-split still runs (g_b = D_b[:, C_i] ((1+w) * r_b)[C_i] at the attention block's
+        # start, off the chain, riding the attention output's all-reduce): its weights are in L1 and placed; its time is
+        # off the chain (step 6's forms: moe block down 0)
+        for f in ("B", "Bn", "B+D"):
+            out[f] = pools_a
+    elif ".out_proj" in n or ".o_proj" in n:
+        k = 6 * GDN_HD if ".out_proj" in n else 3 * QSA_HD
+        fold = [[ROWS, H, k, "bf8"], [ROWS, HC * HC_LOW, k, "bf16"]]
+        for f in ("B", "Bn", "B+D"):
+            out[f] = [fold]
+    else:
+        for f in ("B", "Bn", "B+D"):
+            out[f] = pools_a
+    return out
+
+
 rows = []
 for x in U:
+    _MMS.clear()
     c = cycles(x)
     t = (c["mm"] + c["serial"] + c["elt_"]) / CLK
     d = (x["w"] + 2 * x["S"] + x["dram_read"]) / BW
@@ -193,6 +209,8 @@ for x in U:
             dram_us=d * 1e6,
             pool=c["pool"],
             spec=("speculative" in x["unit"]),
+            pools=[list(p) for p in _MMS],  # the unit's matmul pools (each a list of [M, N, K, fmt]); step 3 sizes the partial landing from them
+            pools_by_form=form_pools(x["unit"], [list(p) for p in _MMS]),
         )
     )
 
