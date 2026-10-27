@@ -12,7 +12,9 @@
 //           HiFi2's two phases take all of tf32's mantissa) and SrcB = the 2-row selector (rows 0 / 1 identity, 4
 //           copies), accumulating into the same Dst blocks; one finalize, pack the 2-row bf16 column to cb_out.
 // custom_mm's unpack MOP takes 2 K tiles an iteration: every segment and the padded partial count are even.
-// Compile args: role (0 owner, 1 sender), Kt, steps.  Runtime args: n_seg, per segment (k0, kt), n_in.
+// The hub owner packs its column straight into slot col of its half (s + 1) & 1 of cb_act (an explicit pack address;
+// v3a copied it there with the RISC, ~400 cycles) and signals its reader through cb_out (a 1-page token).
+// Compile args: role (0 owner, 1 sender), Kt, steps.  Runtime args: n_seg, per segment (k0, kt), n_in, hub, col.
 #include <cstdint>
 #include "api/compute/compute_kernel_hw_startup.h"
 #include "api/compute/experimental/custom_mm.h"
@@ -23,6 +25,8 @@
 #include "mm_b1_unit.h"
 
 namespace {
+inline uint32_t clock_low() { return *reinterpret_cast<volatile uint32_t tt_reg_ptr*>(RISCV_DEBUG_REG_WALL_CLOCK_L); }
+constexpr uint32_t cb_tstamp = 26, kProfStep = 20;
 // the unpacker base address of a CB position (16 B units, minus one: llk_unpack_AB_custom_mm_api.h)
 #ifdef TRISC_UNPACK
 inline void unpack_seg(uint32_t a16, uint32_t b16, uint32_t a_tile16, uint32_t b_tile16, uint32_t kt) {
@@ -46,6 +50,8 @@ void kernel_main() {
         seg_kt[s] = get_arg_val<uint32_t>(2 + 2 * s);
     }
     const uint32_t n_in = get_arg_val<uint32_t>(1 + 2 * n_seg);
+    const uint32_t is_hub = get_arg_val<uint32_t>(2 + 2 * n_seg);
+    const uint32_t col = get_arg_val<uint32_t>(3 + 2 * n_seg);
     const uint32_t n_pad = n_in + (n_in & 1);
     compute_kernel_hw_startup<SrcOrder::Reverse>(cb_act, cb_w, cb_dst);
     UNPACK((llk_unpack_AB_custom_mm_init<false>(cb_act, cb_w, 1)));
@@ -58,8 +64,18 @@ void kernel_main() {
     if constexpr (role == 0) {
         cb_wait_front(cb_sel, kSlotsHalf);
     }
+    // per-thread stamps of step kProfStep (measurement build: drained, tensix_sync, so a stamp is the moment the
+    // coprocessor finished what this thread issued): words 0..15 unpack, 16..31 math, 32..47 pack of a 64-word page
+    volatile tt_l1_ptr uint32_t* ts = nullptr;
+    UNPACK({ ts = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_local_cb_interface(cb_tstamp).fifo_rd_ptr << cb_addr_shift); });
+    PACK({ ts = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_local_cb_interface(cb_tstamp).fifo_wr_ptr << cb_addr_shift); });
     for (uint32_t st = 0; st < steps; ++st) {
+        const bool pf = st == kProfStep;
         cb_wait_front(cb_act, Kp);
+        if (pf) {
+            UNPACK({ ts[0] = clock_low(); });
+            PACK({ ts[32] = clock_low(); });
+        }
         uint32_t w0 = 0;
         for (uint32_t s = 0; s < n_seg; ++s) {
             tile_regs_acquire();
@@ -74,9 +90,15 @@ void kernel_main() {
                     seg_kt[s]);
             });
             MATH((qwen38_b1::b1_mm_math_run(0, seg_kt[s])));
+            if (pf) {
+                UNPACK({ tensix_sync(); ts[1 + 4 * s] = clock_low(); });
+            }
             w0 += seg_kt[s];
             if constexpr (role == 0) {
                 cb_wait_front(cb_in_part, kSlotsHalf);
+                if (pf) {
+                    UNPACK({ ts[2] = clock_low(); });
+                }
                 reconfig_data_format_srca(cb_w, cb_in_part);
                 UNPACK({
                     const auto& a = get_local_cb_interface(cb_in_part);
@@ -84,17 +106,44 @@ void kernel_main() {
                     unpack_seg(a.fifo_rd_ptr - 1, b.fifo_rd_ptr - 1, a.fifo_page_size, b.fifo_page_size, n_pad);
                 });
                 MATH((qwen38_b1::b1_mm_math_run(0, n_pad)));
+                if (pf) {
+                    UNPACK({ tensix_sync(); ts[3] = clock_low(); });
+                }
                 reconfig_data_format_srca(cb_in_part, cb_w);
                 cb_pop_front(cb_in_part, kSlotsHalf);
             }
             MATH((qwen38_b1::b1_mm_math_finalize<2>(1)));
+            if (pf) {
+                MATH({ tensix_sync(); });
+            }
             tile_regs_commit();
             cb_reserve_back(cb_dst, 1);
             tile_regs_wait();
-            pack_tile(0, cb_dst);
+            if (pf) {
+                PACK({ ts[33 + 4 * s] = clock_low(); });
+            }
+            if (role == 0 && is_hub && st + 1 < steps) {
+                // the column straight into slot col of the next half of x (this core's cb_act; that half is free: the
+                // reader re-pushes it only after the hub has multicast it, which needs this column)
+                // (the pack thread never moves cb_act's pointers: its fifo_wr_ptr stays at the CB base, in the units
+                // of fifo_page_size; get_output_tile_address's "- 1" convention)
+                PACK({
+                    const auto& a = get_local_cb_interface(cb_act);
+                    const uint32_t slot = ((st + 1) & 1) * Kp + col;
+                    ::_llk_pack_<DST_SYNC_MODE, DST_ACCUM_MODE, PackMode::Default>(
+                        0, a.fifo_wr_ptr + slot * a.fifo_page_size - 1);
+                });
+            } else {
+                pack_tile(0, cb_dst);
+            }
+            if (pf) {
+                PACK({ tensix_sync(); ts[34 + 4 * s] = clock_low(); });
+            }
             tile_regs_release();
             cb_push_back(cb_dst, 1);
         }
         cb_pop_front(cb_act, Kp);
     }
+    cb_reserve_back(cb_tstamp, 1);
+    cb_push_back(cb_tstamp, 1);
 }

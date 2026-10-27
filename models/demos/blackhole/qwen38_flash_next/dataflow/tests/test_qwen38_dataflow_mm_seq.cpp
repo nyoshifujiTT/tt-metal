@@ -214,9 +214,10 @@ std::string run_seq(const std::shared_ptr<distributed::MeshDevice>& mesh, uint32
     cb(2, 8, kSlot, tt::DataFormat::Float32, &ptile);
     cb(5, 4, kTile, tt::DataFormat::Float16_b, &tile);
     cb(16, 2, kTile, tt::DataFormat::Float16_b, &tile);
-    cb(17, 2, spart, tt::DataFormat::Float32, &tile);
+    cb(17, 3, spart, tt::DataFormat::Float32, &tile);
     cb(24, 1, 512, tt::DataFormat::UInt32, nullptr);
     cb(25, 1, 32, tt::DataFormat::UInt32, nullptr);
+    cb(26, 1, 256, tt::DataFormat::UInt32, nullptr);
     std::vector<uint32_t> rd_ct = {kKt, steps};
     tt::tt_metal::TensorAccessorArgs(*buf_x).append_to(rd_ct);
     tt::tt_metal::TensorAccessorArgs(*buf_w).append_to(rd_ct);
@@ -252,6 +253,8 @@ std::string run_seq(const std::shared_ptr<distributed::MeshDevice>& mesh, uint32
             ca.insert(ca.end(), {s.k0, s.kt});
         }
         ca.push_back(p.n_in);
+        ca.push_back(i == kHub ? 1u : 0u);
+        ca.push_back(p.col);
         tt::tt_metal::SetRuntimeArgs(program, rd, p.core, ra);
         tt::tt_metal::SetRuntimeArgs(program, p.role == 0 ? comp_own : comp_send, p.core, ca);
     }
@@ -270,7 +273,7 @@ std::string run_seq(const std::shared_ptr<distributed::MeshDevice>& mesh, uint32
             ++bad_status;
         }
         if (plan[i].role == 0 && steps > 1) {
-            const uint32_t last = std::min<uint32_t>(steps, 119);
+            const uint32_t last = std::min<uint32_t>(steps, 59);
             step_max = std::max(step_max, static_cast<double>(s[last] - s[1]) / (last - 1));
             first_max = std::max(first_max, static_cast<double>(s[1] - s[0]));
         }
@@ -281,7 +284,7 @@ std::string run_seq(const std::shared_ptr<distributed::MeshDevice>& mesh, uint32
         for (uint32_t i = 0; i < kCores; ++i) {
             raw << i << " " << plan[i].core.x << " " << plan[i].core.y << " " << plan[i].role << " " << plan[i].segs.size()
                 << " " << plan[i].n_in << " " << (i == kHub ? 1 : 0);
-            for (uint32_t w = 64; w < 77; ++w) {
+            for (uint32_t w = 64; w < 127; ++w) {
                 raw << " " << st[i * 128 + w];
             }
             raw << "\n";

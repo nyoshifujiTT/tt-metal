@@ -29,6 +29,8 @@ namespace {
 constexpr uint32_t kSpin = 1u << 24;
 constexpr uint32_t kSentinel = 0x7FC0DEADu;
 constexpr uint32_t kChunk = 128, kFace1 = 1024, kSlot = 4096 + 32, kTile = 128, kSlotsHalf = 4;
+// the NoC on which the partials and the owners' columns arrive (0: sent by this BRISC reader; v6 tried 1 = NCRISC)
+constexpr uint32_t kRxNoc = 0;
 bool wait_min(volatile tt_l1_ptr uint32_t* p, uint32_t v) {
     for (uint32_t i = 0; i < kSpin; ++i) {
         invalidate_l1_cache();
@@ -50,7 +52,7 @@ bool wait_tag(uint32_t trailer, uint32_t tag) {
 }
 bool wait_acks(uint32_t target) {
     for (uint32_t i = 0; i < kSpin; ++i) {
-        if (static_cast<int32_t>(NOC_STATUS_READ_REG(noc_index, NIU_SLV_WR_ACK_SENT) - target) >= 0) {
+        if (static_cast<int32_t>(NOC_STATUS_READ_REG(kRxNoc, NIU_SLV_WR_ACK_SENT) - target) >= 0) {
             return true;
         }
     }
@@ -62,6 +64,22 @@ bool wait_landed(uint32_t slot) {
         invalidate_l1_cache();
         if (w[96 / 4] != kSentinel && w[112 / 4] != kSentinel && w[(kFace1 + 96) / 4] != kSentinel &&
             w[(kFace1 + 112) / 4] != kSentinel) {
+            return true;
+        }
+    }
+    return false;
+}
+// all n of the consecutive slots landed (one poll loop over every sentinel, any order)
+bool wait_landed_all(uint32_t slot0, uint32_t n) {
+    for (uint32_t i = 0; i < kSpin; ++i) {
+        invalidate_l1_cache();
+        bool all = true;
+        for (uint32_t j = 0; j < n; ++j) {
+            volatile tt_l1_ptr uint32_t* w = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(slot0 + j * kSlot);
+            all = all && w[96 / 4] != kSentinel && w[112 / 4] != kSentinel && w[(kFace1 + 96) / 4] != kSentinel &&
+                  w[(kFace1 + 112) / 4] != kSentinel;
+        }
+        if (all) {
             return true;
         }
     }
@@ -115,7 +133,7 @@ void kernel_main() {
         seg_slot[s] = get_arg_val<uint32_t>(a++);
     }
     constexpr uint32_t cb_act = 0, cb_w = 1, cb_in_part = 2, cb_sel = 5, cb_out = 16, cb_part = 17, cb_stamp = 24,
-                       cb_scratch = 25;
+                       cb_scratch = 25, cb_tstamp = 26;
     constexpr auto x0_args = TensorAccessorArgs<2>();
     const auto x0 = TensorAccessor(x0_args, x0_addr);
     constexpr auto w_args = TensorAccessorArgs<x0_args.next_compile_time_args_offset()>();
@@ -195,7 +213,7 @@ void kernel_main() {
     const uint32_t settle = reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L);
     while (reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L) - settle < 200) {
     }
-    const uint32_t ack_base = NOC_STATUS_READ_REG(noc_index, NIU_SLV_WR_ACK_SENT);
+    const uint32_t ack_base = NOC_STATUS_READ_REG(kRxNoc, NIU_SLV_WR_ACK_SENT);
     // the hub (an owner: no other NOC0 request of this core during the chain) opens a persistent linked multicast to the
     // grid: the path is reserved once by this 32 B scratch write (NOC_CMD_PATH_RESERVE on the first request of the
     // transaction), every step's half rides the same transaction (linked, no reservation; tt-isa-documentation
@@ -238,9 +256,7 @@ void kernel_main() {
                 cb_pop_front(cb_part, 1);
             }
         } else {
-            for (uint32_t j = 0; j < n_in; ++j) {
-                errors += wait_landed(in_base + ((s & 1) * kSlotsHalf + j) * kSlot) ? 0 : 0x10000;
-            }
+            errors += wait_landed_all(in_base + (s & 1) * kSlotsHalf * kSlot, n_in) ? 0 : 0x10000;
             prof(s, 71);
             cb_reserve_back(cb_in_part, kSlotsHalf);
             cb_push_back(cb_in_part, kSlotsHalf);
@@ -251,21 +267,11 @@ void kernel_main() {
             }
             const uint32_t src = get_read_ptr(cb_out);
             if (s + 1 < steps) {
-                if (is_hub) {
-                    // the hub's own column: a local copy into slot col of its half nh (no NoC request while linked)
-                    volatile tt_l1_ptr uint32_t* d =
-                        reinterpret_cast<volatile tt_l1_ptr uint32_t*>(act_base + (nh * Kp + col) * kTile);
-                    volatile tt_l1_ptr uint32_t* q = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(src);
-                    for (uint32_t w = 0; w < kTile / 4; ++w) {
-                        d[w] = q[w];
-                    }
-                } else {
-                    // the column (non-posted) to slot col of the hub's half nh; the hub counts its NIU's completed
-                    // incoming non-posted writes
+                if (!is_hub) {
+                    // the column (non-posted) to slot col of the hub's half nh (the hub packed its own column there)
                     noc_async_write(src, get_noc_addr(hub_x, hub_y, act_base + (nh * Kp + col) * kTile), kTile);
                     noc_async_writes_flushed();
                 }
-            prof(s, 73);
             } else {
                 if (is_hub) {
                     noc_async_write_multicast(scratch, mc_scr, 32, n_cores - 1, false);
@@ -274,10 +280,11 @@ void kernel_main() {
                 noc_async_write_page(col, out, src);
                 noc_async_write_barrier();
             }
-            if (s + 1 < 120) {
+            cb_pop_front(cb_out, 1);
+            prof(s, 73);
+            if (s + 1 < 60) {
                 stamps[1 + s] = reg_read(RISCV_DEBUG_REG_WALL_CLOCK_L);
             }
-            cb_pop_front(cb_out, 1);
         }
         if (is_hub && s + 1 < steps) {
             // all owners' columns of x_{s+1} are in this core's half nh: tag the trailer, one multicast to the others
@@ -295,6 +302,15 @@ void kernel_main() {
             prof(s, 75);
         }
     }
+    // the compute threads' stamps of the profiled step (CB 26, 64 words) into words 80..127 of the stamp page
+    cb_wait_front(cb_tstamp, 1);
+    {
+        volatile tt_l1_ptr uint32_t* t = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_read_ptr(cb_tstamp));
+        for (uint32_t w = 0; w < 47; ++w) {
+            stamps[80 + w] = t[w];
+        }
+    }
+    cb_pop_front(cb_tstamp, 1);
     stamps[127] = 0x600d0000u | (errors & 0xFFFFu) | (errors >> 16 ? 0x8000u : 0u);
     noc_async_write_page(stamp_page, st, get_write_ptr(cb_stamp));
     noc_async_write_barrier();
