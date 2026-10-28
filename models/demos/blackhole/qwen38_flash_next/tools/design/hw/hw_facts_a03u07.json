@@ -1,0 +1,3362 @@
+[
+ {
+  "chip": 0,
+  "bus": "0000:01:00.0",
+  "asic_location": 1,
+  "harvested_tensix_noc0_x": [
+   13
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1312,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 134.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 1,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 1,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 4,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 4,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 8,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 8,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 24,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 24,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 2
+   }
+  ]
+ },
+ {
+  "chip": 1,
+  "bus": "0000:02:00.0",
+  "asic_location": 2,
+  "harvested_tensix_noc0_x": [
+   15
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1350,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 60.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 0,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 0,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 2,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 2,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 5,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 5,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 9,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 9,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 0
+   }
+  ]
+ },
+ {
+  "chip": 2,
+  "bus": "0000:03:00.0",
+  "asic_location": 3,
+  "harvested_tensix_noc0_x": [
+   5
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1325,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 131.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 1,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 1,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 3,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 3,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 6,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 6,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 10,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 10,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 0
+   }
+  ]
+ },
+ {
+  "chip": 3,
+  "bus": "0000:04:00.0",
+  "asic_location": 4,
+  "harvested_tensix_noc0_x": [
+   6
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1350,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 55.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 2,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 2,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 7,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 7,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 11,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 11,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 27,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 27,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 4
+   }
+  ]
+ },
+ {
+  "chip": 4,
+  "bus": "0000:05:00.0",
+  "asic_location": 5,
+  "harvested_tensix_noc0_x": [
+   3
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1325,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 116.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 0,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 0,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 5,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 5,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 12,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 12,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 28,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 28,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 2
+   }
+  ]
+ },
+ {
+  "chip": 5,
+  "bus": "0000:06:00.0",
+  "asic_location": 6,
+  "harvested_tensix_noc0_x": [
+   10
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1318,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 133.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 1,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 1,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 4,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 4,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 6,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 6,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 13,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 13,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 6
+   }
+  ]
+ },
+ {
+  "chip": 6,
+  "bus": "0000:07:00.0",
+  "asic_location": 7,
+  "harvested_tensix_noc0_x": [
+   13
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1318,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 125.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 2,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 2,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 5,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 5,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 7,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 7,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 14,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 14,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 6
+   }
+  ]
+ },
+ {
+  "chip": 7,
+  "bus": "0000:08:00.0",
+  "asic_location": 8,
+  "harvested_tensix_noc0_x": [
+   5
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1318,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 126.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 3,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 3,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 6,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 6,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 15,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 15,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 31,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 31,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 4
+   }
+  ]
+ },
+ {
+  "chip": 8,
+  "bus": "0000:41:00.0",
+  "asic_location": 1,
+  "harvested_tensix_noc0_x": [
+   16
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1312,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 145.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 0,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 0,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 9,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 9,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 12,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 12,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 16,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 16,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 2
+   }
+  ]
+ },
+ {
+  "chip": 9,
+  "bus": "0000:42:00.0",
+  "asic_location": 2,
+  "harvested_tensix_noc0_x": [
+   15
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1350,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 63.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 1,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 1,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 8,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 8,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 10,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 10,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 13,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 13,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 0
+   }
+  ]
+ },
+ {
+  "chip": 10,
+  "bus": "0000:43:00.0",
+  "asic_location": 3,
+  "harvested_tensix_noc0_x": [
+   16
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1331,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 96.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 2,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 2,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 9,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 9,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 11,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 11,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 14,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 14,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 0
+   }
+  ]
+ },
+ {
+  "chip": 11,
+  "bus": "0000:44:00.0",
+  "asic_location": 4,
+  "harvested_tensix_noc0_x": [
+   13
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1325,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 125.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 3,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 3,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 10,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 10,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 15,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 15,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 19,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 19,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 4
+   }
+  ]
+ },
+ {
+  "chip": 12,
+  "bus": "0000:45:00.0",
+  "asic_location": 5,
+  "harvested_tensix_noc0_x": [
+   16
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1337,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 87.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 4,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 4,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 8,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 8,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 13,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 13,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 20,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 20,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 2
+   }
+  ]
+ },
+ {
+  "chip": 13,
+  "bus": "0000:46:00.0",
+  "asic_location": 6,
+  "harvested_tensix_noc0_x": [
+   2
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1343,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 70.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 5,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 5,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 9,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 9,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 12,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 12,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 14,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 14,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   }
+  ]
+ },
+ {
+  "chip": 14,
+  "bus": "0000:47:00.0",
+  "asic_location": 7,
+  "harvested_tensix_noc0_x": [
+   14
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1350,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 58.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 6,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 6,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 10,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 10,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 13,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 13,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 15,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 15,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   }
+  ]
+ },
+ {
+  "chip": 15,
+  "bus": "0000:48:00.0",
+  "asic_location": 8,
+  "harvested_tensix_noc0_x": [
+   6
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1331,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 100.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 7,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 7,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 11,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 11,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 14,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 14,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 23,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 23,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 4
+   }
+  ]
+ },
+ {
+  "chip": 16,
+  "bus": "0000:81:00.0",
+  "asic_location": 1,
+  "harvested_tensix_noc0_x": [
+   12
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1306,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 159.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 8,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 8,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 17,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 17,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 20,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 20,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 24,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 24,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 0
+   }
+  ]
+ },
+ {
+  "chip": 17,
+  "bus": "0000:82:00.0",
+  "asic_location": 2,
+  "harvested_tensix_noc0_x": [
+   6
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1306,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 139.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 16,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 16,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 18,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 18,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 21,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 21,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 25,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 25,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 0
+   }
+  ]
+ },
+ {
+  "chip": 18,
+  "bus": "0000:83:00.0",
+  "asic_location": 3,
+  "harvested_tensix_noc0_x": [
+   7
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   13
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1350,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 57.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   5,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 17,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 17,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 19,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 19,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 22,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 22,
+    "ch": 6,
+    "noc0": [
+     5,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 26,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 26,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 0
+   }
+  ]
+ },
+ {
+  "chip": 19,
+  "bus": "0000:84:00.0",
+  "asic_location": 4,
+  "harvested_tensix_noc0_x": [
+   10
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1350,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 46.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 11,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 11,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 18,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 18,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 23,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 23,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 27,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 27,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 0
+   }
+  ]
+ },
+ {
+  "chip": 20,
+  "bus": "0000:85:00.0",
+  "asic_location": 5,
+  "harvested_tensix_noc0_x": [
+   4
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1350,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 49.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 12,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 12,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 16,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 16,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 21,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 21,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 28,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 28,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 6
+   }
+  ]
+ },
+ {
+  "chip": 21,
+  "bus": "0000:86:00.0",
+  "asic_location": 6,
+  "harvested_tensix_noc0_x": [
+   10
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1350,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 52.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 17,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 17,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 20,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 20,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 22,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 22,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 29,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 29,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 6
+   }
+  ]
+ },
+ {
+  "chip": 22,
+  "bus": "0000:87:00.0",
+  "asic_location": 7,
+  "harvested_tensix_noc0_x": [
+   5
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1312,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 123.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 18,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 18,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 21,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 21,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 23,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 23,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 30,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 30,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 6
+   }
+  ]
+ },
+ {
+  "chip": 23,
+  "bus": "0000:88:00.0",
+  "asic_location": 8,
+  "harvested_tensix_noc0_x": [
+   10
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1343,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 65.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 15,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 15,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 19,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 19,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 22,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 22,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 31,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 31,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 6
+   }
+  ]
+ },
+ {
+  "chip": 24,
+  "bus": "0000:c1:00.0",
+  "asic_location": 1,
+  "harvested_tensix_noc0_x": [
+   12
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1337,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 84.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 0,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 0,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 16,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 16,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 25,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 25,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 28,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 28,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 0
+   }
+  ]
+ },
+ {
+  "chip": 25,
+  "bus": "0000:c2:00.0",
+  "asic_location": 2,
+  "harvested_tensix_noc0_x": [
+   7
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1312,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 135.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 17,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 17,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 24,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 24,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 26,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 26,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 29,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 29,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 0
+   }
+  ]
+ },
+ {
+  "chip": 26,
+  "bus": "0000:c3:00.0",
+  "asic_location": 3,
+  "harvested_tensix_noc0_x": [
+   2
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1350,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 47.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 18,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 18,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 25,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 25,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 27,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 27,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 30,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 30,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 0
+   }
+  ]
+ },
+ {
+  "chip": 27,
+  "bus": "0000:c4:00.0",
+  "asic_location": 4,
+  "harvested_tensix_noc0_x": [
+   4
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1312,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 133.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 3,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 3,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 19,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 19,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 0
+   },
+   {
+    "peer": 26,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 26,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 31,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 1
+   },
+   {
+    "peer": 31,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 0
+   }
+  ]
+ },
+ {
+  "chip": 28,
+  "bus": "0000:c5:00.0",
+  "asic_location": 5,
+  "harvested_tensix_noc0_x": [
+   6
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1325,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 111.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 4,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 4,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 2
+   },
+   {
+    "peer": 20,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 20,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 24,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 24,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 29,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 29,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   }
+  ]
+ },
+ {
+  "chip": 29,
+  "bus": "0000:c6:00.0",
+  "asic_location": 6,
+  "harvested_tensix_noc0_x": [
+   4
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1350,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 46.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 21,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 21,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 25,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 25,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 28,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 28,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 30,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 30,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   }
+  ]
+ },
+ {
+  "chip": 30,
+  "bus": "0000:c7:00.0",
+  "asic_location": 7,
+  "harvested_tensix_noc0_x": [
+   7
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1350,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 66.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 22,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 22,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 26,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 26,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 29,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 29,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 31,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 3
+   },
+   {
+    "peer": 31,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 2
+   }
+  ]
+ },
+ {
+  "chip": 31,
+  "bus": "0000:c8:00.0",
+  "asic_location": 8,
+  "harvested_tensix_noc0_x": [
+   3
+  ],
+  "harvested_eth_noc0_x": [
+   14,
+   5
+  ],
+  "enabled_gddr": "0xff",
+  "aiclk_mhz_now": 1318,
+  "asic_fmax": 1350,
+  "tdp_limit_w": 130,
+  "power_now_w": 132.0,
+  "eth_logical_channel_noc0_x": [
+   1,
+   16,
+   2,
+   15,
+   3,
+   4,
+   13,
+   12,
+   6,
+   11,
+   7,
+   10
+  ],
+  "links": [
+   {
+    "peer": 7,
+    "ch": 5,
+    "noc0": [
+     4,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 7,
+    "ch": 4,
+    "noc0": [
+     3,
+     1
+    ],
+    "peer_ch": 4
+   },
+   {
+    "peer": 23,
+    "ch": 7,
+    "noc0": [
+     12,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 23,
+    "ch": 6,
+    "noc0": [
+     13,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 27,
+    "ch": 1,
+    "noc0": [
+     16,
+     1
+    ],
+    "peer_ch": 7
+   },
+   {
+    "peer": 27,
+    "ch": 0,
+    "noc0": [
+     1,
+     1
+    ],
+    "peer_ch": 6
+   },
+   {
+    "peer": 30,
+    "ch": 3,
+    "noc0": [
+     15,
+     1
+    ],
+    "peer_ch": 5
+   },
+   {
+    "peer": 30,
+    "ch": 2,
+    "noc0": [
+     2,
+     1
+    ],
+    "peer_ch": 4
+   }
+  ]
+ }
+]
