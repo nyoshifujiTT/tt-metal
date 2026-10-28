@@ -74,7 +74,7 @@ ROWS = [
     ("ACT softplus", "52 (code 101)", "tensix", "same count, repo's current softplus (correction: 101 was the 27B copy's older version)", "derived"),
     ("ACT recip", "9 + 5 n for n groups (code 6 a group)", "tensix", "SFPLOADMACRO pipeline of _calculate_reciprocal_fast_24b_5c_ (correction 57)", "derived"),
     ("ACT mul, add", "4, 4", "tensix", "SFPLOAD + op + nop (latency 2) + SFPSTORE (VectorUnit.md)", "derived"),
-    ("P_PACK", "17 bf16 / 18 fp32 (code 16)", "tensix", "tt-metal #59810 / #58704 (LLK team, BH pack paths read against the RTL): packer drain 16-17 bf16, 18 fp32", "spec"),
+    ("P_PACK", "no BH value (code 17 = #58704 counter reading)", "tensix", "searched: tt-isa PACR.md (refers to WH, no cycles), PackerPipeline diagram, tensix_llk_doc (Glean chat 10-28). #58704 16-17 cycles is a perf-counter measurement (WAITING_FOR_PACK_IDLE_2), not a spec: correction 60. Design must not depend on it (D-2)", "nosource"),
     ("P_UNP", "no BH value (code 17 = NEO)", "tensix", "searched: tt-isa, Glean (TA Unpackers Performance = NEO RTL, #59809, #58713, TEN-4865), Glean chat: no BH value. Design must not depend on it (D-2)", "nosource"),
     # ---- RISC sequences (our design) ----
     ("ETH_POLL, NOC_ISSUE, EXPERT_LOOKUP", "22, 10, 10", "risc", "poll = 2 x (fence 1 + L1 load 8 + compare/branch 2); issue = 3 stores + cmd_buf-ready load 7; lookup = L1 load + add", "derived"),

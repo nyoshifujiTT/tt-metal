@@ -42,7 +42,7 @@ def main():
     w("inline constexpr uint32_t kNiuOut = %d, kNiuIn = %d, kHop = %d, kFlitBytes = %d;   // NoC/README.md Performance" % (SG.NIU_OUT, SG.NIU_IN, SG.HOP, SG.FLIT))
     w("")
     w("// ---- budgets: pipeline depths no document gives (README 12.7; checked pass / fail on the device) ----")
-    w("inline constexpr uint32_t kPPack = %d;   // packer drain, bf16 out (tt-metal #59810/#58704)" % SG.P_PACK)
+    w("inline constexpr uint32_t kPPack = %d;   // NO SOURCE for BH: must not be on the chain (D-2)" % SG.P_PACK)
     w("inline constexpr uint32_t kPUnp = %d;    // NO SOURCE for BH: must not be on the chain (D-2)" % SG.P_UNP)
     w("inline constexpr uint32_t kNRd = %d;     // NIU write payload L1 round trip (bh noc deepdive slide 21)" % SG.N_RD)
     w("")

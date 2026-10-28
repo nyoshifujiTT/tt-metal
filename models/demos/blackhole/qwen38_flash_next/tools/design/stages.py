@@ -40,8 +40,8 @@ RISC_FENCE = 1             # the fence itself; its wait (store queue drain) is c
 NIU_OUT, NIU_IN, HOP = 5, 5, 9
 FLIT = 64
 # ---- pipeline depths (D-1 audit, worklog 10-28; audit.py rows) ----
-P_PACK = 17                # packer drain, PACR issue -> last L1 write of a short pack, bf16 out (fp32 out: 18): tt-metal
-                           # #59810 / #58704, the LLK team's reading of the BH pack paths against the RTL (was a 16 budget)
+P_PACK = 17                # NO SOURCE for BH (correction 60): tt-metal #58704's 16-17 (fp32 18) is a perf-counter reading
+                           # (WAITING_FOR_PACK_IDLE_2), not a specified depth.  The design must not put it on the chain (D-2)
 P_PACK_FP32 = 18
 P_UNP = 17                 # NO SOURCE for BH (searched 10-28: tt-isa, Glean, LLK trackers; 17 is the NEO RTL value).  The
                            # design must not put it on the chain (D-2); kept only so the old formulas still evaluate
