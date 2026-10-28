@@ -6,6 +6,9 @@ sys.argv=["/data/yoshifuji/qwen38/scripts/free5d_v8.py"]
 __file__="/data/yoshifuji/qwen38/scripts/free5d_v8.py"
 exec(open("/data/yoshifuji/qwen38/scripts/free5d_v8.py").read().replace('if __name__=="__main__": main(*sys.argv[1:])',''))
 import comm_model as cm
+sys.path.insert(0, "/data/yoshifuji/qwen38/scripts/design")
+import audit
+AUDIT_TABLE=audit.render_audit()
 R=json.load(open("/data/yoshifuji/qwen38/routing/free5d_v8_results.json"))
 CTXS=(1,128,8192,32768,262144,1000000)
 RC={c: json.load(open(f"/data/yoshifuji/qwen38/routing/free5d_v8_results_ctx{c}.json")) for c in CTXS}   # H-26: the context sweep (k=1)
@@ -260,6 +263,11 @@ routed の分子は一様仮定ではなく census の実測: 同時 B 行の実
 {table_census()}
 
 #### 11.2.3 機械の物理値（設計の入力。出典は一次資料（tt-isa-documentation、EthernetSsDesignSpec、GDDR6 のデータシート）と 27B README §3 の最新版）
+
+**全定数の監査表（計画 v2 D-1、規則 R14。生成器 `tools/design/audit.py` の行がそのまま本表）**。生成器（`tools/design`、`tools/limit`）のモジュール直下の全定数を 1 行ずつ、値・種類・出典・状態で示す。状態 spec = 一次資料に値がある、derived = spec から式で出す、hw = この実機から読んだ（`tools/design/hw/`）、recount = 本設計の命令数・hop 数で、§12 の本文（D-2〜D-4）から数え直す、choice = 設計・模型の選択（§11.3 / §12 で列挙または理由付け）、stat = 本件プロンプト集合の統計、build = ビルド物でしか分からない（カーネルの大きさ、R2 の例外、K-1 で合否）、load = 負荷時にfirmware が決める（AI クロック、R2 の例外、K-1 で合否）、nosource = 探索して資料に値が無い（作業記録 10-28 に探索範囲）ので設計がその値に依らないことを D-2 で示す、name = ラベル・列挙。**この表の値は 10-28 の監査後のもの。下の箇条書きと §11.4 以降・§12 の数値は改訂 8 の生成値（N_RD 16、P_PACK 16、softplus 101、recip 6/群、harvest 14 通りの最悪）のままで、D-7 の再生成まで更新しない（規則 R9）。**
+
+{AUDIT_TABLE}
+
 
 - DRAM {BW_DRAM/1e9:.0f} GB/s/chip（読み書きの和）、容量 31.9 GiB の 90% = {DRAM_CHIP/GB:.1f} GB を使う（runtime・trace・CB に 10%）。
 - chip 間 link {BW_LINK/1e9:.0f} GB/s × 2 本/方向 × 4 方向（8 × 4 torus、submesh の直径: {'、'.join(f'{SUBMESH[n][0]}×{SUBMESH[n][1]} で {diameter(n)}' for n in (4,8,16,32))} hop）、1 hop {HOP*1e9:.0f} ns（EthernetSsDesignSpec Table 16 の 400G の 280 ns + 200G の RS-FEC の codeword の組 25.6 ns）+ 蓄積転送 2 KiB/(96 B/cycle) = {saf(PKT)*1e9:.0f} ns、packet は payload ≤ 2 KiB（会合の chunk を最少 packet 数か 2 チャネルの倍数に切る: `comm_model.chosen_cut`）+ 線上 56 B（MAX_PKT_SIZE 4,096 B の範囲）。chip 内の段（`comm_model.py`）: 中継 {cm.RELAY_CYC} cycle + flit（受け側の検知 22 + 同じ側の対の Ethernet タイルへの NoC 書き 10 + N_RD + {cm.NOC_ETH_ETH} hop + 送り側の検知 22 + 送り 31）; 会合の起点・終点は種類ごと: 足し込み系（AR、RS）の起点 = 部分和を作った owner（Ethernet タイルから {cm.NOC_ETH_CORE} hop 以内の 91 コア以上の中に置く）の 2 本の書き + {cm.NOC_ETH_CORE} hop + 検知 + 送り = {round(cm.ORIGIN_ADD*cm.CLK)} cycle + flit、足し込みの段 {round(cm.ADD_LEVEL*cm.CLK)} cycle; 集め（AG）の起点 = pool の hub（Ethernet タイルから {cm.NOC_HUB_ETH} hop）→ Ethernet + 検知 + 送り = {round(cm.ORIGIN_GATHER*cm.CLK)} cycle + flit、終点 = 受けた Ethernet タイルから 2 本の multicast で全 130 コアへ（最悪 {cm.NOC_ETH_ALL} hop）+ 検知 = {round(cm.DELIVER_GATHER*cm.CLK)} cycle + flit; 群間の受け渡し = 足し込み系の起点 + 受けた chip での配り。

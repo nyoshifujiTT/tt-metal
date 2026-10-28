@@ -39,11 +39,14 @@ RISC_FENCE = 1             # the fence itself; its wait (store queue drain) is c
 # ---- NoC (specification) ----
 NIU_OUT, NIU_IN, HOP = 5, 5, 9
 FLIT = 64
-# ---- budgets (no document gives the value; upper bounds, checked pass/fail on the device) ----
-P_PACK = 16                # packer pipeline depth from PACR issue to the last L1 write of a short (<= 4 rows) pack
-P_UNP = 17                 # unpacker depth from busy to the first Src/Dst write (TA "Unpackers Performance": ~17, a
-                           # measurement page; used only as the budget's size, rule R1: never in the limit as a measurement)
-N_RD = 16                  # NIU: write request issue -> first flit leaves (L1 read of the payload, one round trip)
+# ---- pipeline depths (D-1 audit, worklog 10-28; audit.py rows) ----
+P_PACK = 17                # packer drain, PACR issue -> last L1 write of a short pack, bf16 out (fp32 out: 18): tt-metal
+                           # #59810 / #58704, the LLK team's reading of the BH pack paths against the RTL (was a 16 budget)
+P_PACK_FP32 = 18
+P_UNP = 17                 # NO SOURCE for BH (searched 10-28: tt-isa, Glean, LLK trackers; 17 is the NEO RTL value).  The
+                           # design must not put it on the chain (D-2); kept only so the old formulas still evaluate
+N_RD = 8                   # NIU write request: payload fetched from L1, round trip 8 cycles (SharePoint SOC "bh noc deepdive"
+                           # slide 21); was a 16 budget
 # ---- the chip's Tensix grid ----
 XS = [1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16]
 YS = list(range(2, 12))
@@ -198,11 +201,17 @@ def _pool_stage(mms, cores=130):
     return int(round(_plan(mms, cores)[0]))
 
 
-# ---- SFPU (fp32) costs per 32-lane group (one 4-row x 8-column load group): instruction counts of the fp32 SFPU
-# functions of tt-metal's llk_sfpu counted by the kernel toolchain (27B README section 3, latest 10-26: silu 1,728,
-# sigmoid 1,664, exp 1,280, softplus 3,232, rsqrt 960, reciprocal 192 cycles a 32x32 tile = 32 groups) + load/store;
-# a simple mul/add: SFPLOAD, op, nop (latency 2), SFPSTORE.  These are instruction counts, not measurements.
-ACT = {"silu": 54, "sigmoid": 52, "exp": 40, "softplus": 101, "rsqrt": 30, "recip": 6, "mul": 4, "add": 4}
+# ---- SFPU (fp32) costs per 32-lane group (one 4-row x 8-column load group): the repo's llk_sfpu fp32 functions
+# compiled with the repo's toolchain (sfpi 7.74.0, -O3 -mcpu=tt-bh-tensix) and counted by sfpu/sfpu_count.py
+# (instructions + the documented stalls; worklog 10-28: silu 432, sigmoid 416, exp 320, rsqrt 240, softplus 416 cycles
+# a face = 8 groups); a simple mul/add: SFPLOAD, op, nop (latency 2), SFPSTORE.  Instruction counts, not measurements.
+ACT = {"silu": 54, "sigmoid": 52, "exp": 40, "softplus": 52, "rsqrt": 30, "mul": 4, "add": 4}
+
+
+def recip(groups):
+    """reciprocal (24 bit) of `groups` 32-lane groups: the SFPLOADMACRO pipeline of _calculate_reciprocal_fast_24b_5c_
+    (head 4 + load 1 + 5 a group after the first + tail 9: 9 + 5 n; correction 57, sfpu/sfpu_count.py)"""
+    return 9 + 5 * groups
 
 
 def col_groups(rows):
@@ -272,7 +281,7 @@ def merge10(n_cand):
 
 def topk_post():
     """after the merge: softmax of the 10 (exp, sum, reciprocal) and the multicast of the 10 weights + ids to the cores"""
-    return ACT["exp"] + 10 + ACT["recip"] + issue() + N_RD + flight(MC_HOPS, 128) + poll()
+    return ACT["exp"] + 10 + recip(1) + issue() + N_RD + flight(MC_HOPS, 128) + poll()
 
 
 @functools.lru_cache(maxsize=None)
@@ -285,8 +294,8 @@ def topk10(rows=2, ntile=16):
 DRAM_HOPS = 14
 DRISC_PAGE = 110           # one DRISC page: reservation, DMA issue, NoC write, oldest-trid check, arrival word (27B
                            # README section 16 item 10, core_plan.h kDriscPageCycles: instruction counts x specified latencies)
-GDDR_PIPE = 405            # budget (rule R2's exception): GDDR read pipeline, NoC round trip + tRCD + RL <= 0.3 us (27B
-                           # README section 16 item 7)
+GDDR_PIPE = 405            # NO SOURCE for the controller/PHY part (searched 10-28: Rambus GDDR6 Controller UG 1.03, BH GDDR
+                           # Architecture, SOC MAS 4.6); only O2O's empirical Tdram ~392.  Keep it off the chain (D-2/D-3)
 EXPERT_LOOKUP = RISC_L1_LOAD + 2   # the DRISC turns an expert id into its bank address: one L1 table load + add
 
 
@@ -329,7 +338,7 @@ def norm_gated():
 def sdpa_ctx1(rows=2):
     """SDPA at ctx 1 on the kv-head cores: 3 q heads x rows, q.k (16 x 4), softmax (max 20, exp, sum 10, reciprocal), P.v
     (16 x 4), sigmoid(gate); the attention output multicast straight to the o_proj cores (no owner -> hub leg)"""
-    return (rows * (16 * 4 + 20 + ACT["exp"] + 10 + ACT["recip"] + 16 * 4) + owner_act("sigmoid") + issue() + N_RD
+    return (rows * (16 * 4 + 20 + ACT["exp"] + 10 + recip(1) + 16 * 4) + owner_act("sigmoid") + issue() + N_RD
             + flight(MC_HOPS, 8 * rows * 64) + poll())
 
 
@@ -409,7 +418,7 @@ def sdpa_stage(R, sel, cores=130):
             red = lv
         t = a + m + b + red
         best = t if best is None else min(best, t)
-    fin = math.ceil(R / 4) * (ACT["recip"] + 4) + g * ACT["mul"] + owner_act("sigmoid")
+    fin = recip(math.ceil(R / 4)) + math.ceil(R / 4) * 4 + g * ACT["mul"] + owner_act("sigmoid")
     return best + fin + issue() + N_RD + flight(MC_HOPS, R * 256 * 2) + poll()
 
 

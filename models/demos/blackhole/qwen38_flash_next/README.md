@@ -328,6 +328,88 @@ routed の分子は一様仮定ではなく census の実測: 同時 B 行の実
 
 #### 11.2.3 機械の物理値（設計の入力。出典は一次資料（tt-isa-documentation、EthernetSsDesignSpec、GDDR6 のデータシート）と 27B README §3 の最新版）
 
+**全定数の監査表（計画 v2 D-1、規則 R14。生成器 `tools/design/audit.py` の行がそのまま本表）**。生成器（`tools/design`、`tools/limit`）のモジュール直下の全定数を 1 行ずつ、値・種類・出典・状態で示す。状態 spec = 一次資料に値がある、derived = spec から式で出す、hw = この実機から読んだ（`tools/design/hw/`）、recount = 本設計の命令数・hop 数で、§12 の本文（D-2〜D-4）から数え直す、choice = 設計・模型の選択（§11.3 / §12 で列挙または理由付け）、stat = 本件プロンプト集合の統計、build = ビルド物でしか分からない（カーネルの大きさ、R2 の例外、K-1 で合否）、load = 負荷時にfirmware が決める（AI クロック、R2 の例外、K-1 で合否）、nosource = 探索して資料に値が無い（作業記録 10-28 に探索範囲）ので設計がその値に依らないことを D-2 で示す、name = ラベル・列挙。**この表の値は 10-28 の監査後のもの。下の箇条書きと §11.4 以降・§12 の数値は改訂 8 の生成値（N_RD 16、P_PACK 16、softplus 101、recip 6/群、harvest 14 通りの最悪）のままで、D-7 の再生成まで更新しない（規則 R9）。**
+
+| 定数 | 値 | 種類 | 出典 | 状態 |
+|---|---|---|---|---|
+| H | 2560 | model | HF config.json text_config hidden_size | spec |
+| L, L_GDN, L_QSA, LAYER | 48, 36, 12 | model | HF config.json text_config num_hidden_layers, layer_types (full_attention_interval 4) | spec |
+| GDN_QK, GDN_V, GDN_HD | 16, 48, 128 | model | HF config.json text_config linear_num_key_heads, linear_num_value_heads, linear_key/value_head_dim | spec |
+| CONV_K | 4 | model | HF config.json text_config linear_conv_kernel_dim | spec |
+| QSA_Q, QSA_KV, QSA_HD | 24, 2, 256 | model | HF config.json text_config num_attention_heads, num_key_value_heads, head_dim | spec |
+| ROPE | 64 | model | HF config.json text_config head_dim 256 x partial_rotary_factor 0.25 | derived |
+| IDX_Q, IDX_KV, IDX_HD, IDX_BUDGET, IDX_COMP | 4, 1, 128, 2048, 4 | model | HF config.json text_config indexer_n_heads, indexer_kv_heads, indexer_head_dim, indexer_budget, indexer_compress_ratio | spec |
+| E, TOPK (K) | 512, 10 | model | HF config.json text_config num_experts, num_experts_per_tok | spec |
+| E_INT, SH_INT | 640, 640 | model | HF config.json text_config moe_intermediate_size, shared_expert_intermediate_size | spec |
+| V | 248320 | model | HF config.json text_config vocab_size | spec |
+| HC, HC_LOW, HCD | 4, 320, 10240 | model | HF config.json text_config hc_count, hc_lowrank; HCD = HC x H | spec |
+| PLE_LAYER, PLE_NGRAM_PARTS, PLE_DIM | 2, 128, 2560 | model | HF config.json text_config ple_layer_ids [2], split_ngram_parts, ple_embed_dim | spec |
+| PLE_HEADS, PLE_HEAD_DIM | 16, 160 | model | HF config.json text_config (ngram_size 3 - 1) x heads_per_ngram 8 = 16; ple_embed_dim / 16 = 160 | derived |
+| PLE_CONV_K, PLE_DIL | 4, 3 | model | HF config.json text_config ple_conv_kernel_size; dilation = ngram_size (tt/ple.py:163, the HF n-gram conv) | spec |
+| MTP layers | 1 | model | HF config.json text_config mtp_num_hidden_layers | spec |
+| BF8 (TB bf8) | 1088 B/tile | format | tt-metal blockfloat_common.cpp: 1,024 datum bytes + 64 shared-exponent bytes (16 values share one) | spec |
+| BF4 (TB bf4) | 576 B/tile | format | same file: 512 datum bytes + 64 exponent bytes | spec |
+| BF16, FP32 | 2, 4 B | format | IEEE / bfloat16 | spec |
+| TILE | 32 | format | 32 x 32 tile of 4 16 x 16 faces (tt-isa-documentation be83310 BlackholeA0/TensixTile/TensixCoprocessor/MVMUL.md) | spec |
+| N_TILES, EXPERT_TILE_COLS | 20 | format | E_INT 640 / 32 | derived |
+| EXPERT_TILE, GU, DN | 138240 B, 2/3, 1/3 | format | expert (2 x 640 x 2560 + 2560 x 640) x 0.5625 B / 20 columns; gate/up 2 of 3 matrices | derived |
+| CORES | 130 | resource | this machine: every chip 13 of 14 Tensix columns enabled (tools/design/hw/hw_facts_a03u07.json) | hw |
+| XS, YS | x 1-7,10-16 minus the chip's harvested column; y 2-11 | resource | tt-isa-documentation be83310 BlackholeA0/NoC/Coordinates.md + hw_facts (harvested x per chip) | hw |
+| L1 per core | 1536 KiB | resource | tt-isa-documentation be83310 BlackholeA0/TensixTile/L1.md; MEM_L1_SIZE | spec |
+| firmware (in L1_FIXED) | 40 KiB | resource | MEM_MAP_END = 40,960 B (tt_metal/hw/inc/internal/tt-1xx/blackhole/dev_mem_map.h, compiled /tmp/q38/mm.c) | spec |
+| kernel (in L1_FIXED) | 100 KiB | resource | kernel binaries + config: a build product (rule R2 exception); default config 69 KiB (bh_hal_tensix.cpp) | build |
+| DRAM_CHIP | 8 x 4,278,190,080 B x 0.90 | resource | blackhole_140_arch.yaml dram_bank_size x 8 banks (= 31.875 GiB; the code's 31.9 is rounded, correction 58); 0.90 = reserve for runtime / trace (choice) | spec+choice |
+| BW_DRAM, BW (DRAM) | 512 GB/s | resource | 8 GDDR6 instances x 2 x16 channels x 16 Gbps (tt-smi ENABLED_GDDR 0xff, DDR_SPEED 16,000, hw_facts); read + write share it (JESD250) | derived |
+| BANK | 47.4 B/cycle | resource | 512 GB/s / 8 banks / 1.35 GHz | derived |
+| BANK_EPS | 3 DRAM tiles per bank | resource | blackhole_140_arch.yaml dram (x 0 and 9) | spec |
+| G | 4096 B | choice | DRAM request granule >= 2 KiB contiguous (27B README section 3 GDDR rule (1): one ACT per 2 KiB, tRC/tFAW not binding; K4ZAF325BC Table 98) | choice |
+| CLK | 1.35 GHz | clock | tt-smi AICLK fmax 1350 MHz (hw_facts); firmware throttles above TDP 130 W (seen 1306-1312 MHz under other users' load) | load |
+| NIU_OUT, NIU_IN, HOP (NoC), FLIT, NOC, NOC_FLIT, LINK | 5, 5, 9 cycles, 64 B | noc | tt-isa-documentation be83310 BlackholeA0/NoC/README.md:62-66 (NIU->router ~5, router->router 9, router->NIU ~5, 64 B a cycle) | spec |
+| NX, NY | 17, 12 | noc | blackhole_140_arch.yaml grid; tt-isa-documentation be83310 BlackholeA0/NoC/Coordinates.md | spec |
+| N_RD | 8 cycles (code still 16) | noc | SharePoint SOC 'bh noc deepdive' slide 21: write requests fetch flits from L1, 8 cycles of round trip | spec |
+| ETH (channel coordinates) | per chip | noc | hw_facts: logical ch0-7 -> NoC0 x [1,16,2,15,3,4,13,12] (x 14 and 5 harvested; chip 18: ch6 x 5). gen_core_map.py's list (x 14 as ch5) is wrong for this machine: correction 59 | hw |
+| UP_OWN, UP_HOPS, MC_HOPS, DRAM_HOPS | 7/11/14, 14, 17, 14 | noc | worst over 14 hypothetical harvests (rule R13 violation); recount on this machine's placement at D-3 | recount |
+| NOC_ETH_CORE, NOC_HUB_ETH, NOC_ETH_ALL, NOC_ETH_ETH, NEAR_ETH_MIN | 6, 2, 22, 3, 91 | noc | placement placeholders; recount on this machine's placement and Ethernet tiles at D-3/D-4 | recount |
+| NOC_RELAY (limit/mm_cost) | 92 | noc | revision-5 relay value used by mm_cost.tree_level (step6 TREE); replace by stages.py's stage sums at D-2 | recount |
+| MVMUL_LAT | 5 | tensix | tt-isa-documentation be83310 BlackholeA0/TensixTile/TensixCoprocessor/MatrixUnit.md:21-25; Dst.md:112 (5 cycles before a written 8x16 block is readable) | spec |
+| PHASES | bf8 2, bf4 1, bf16 4 | tensix | fidelity phases of the deployed formats (HiFi2, LoFi, HiFi4: MVMUL.md, SrcASrcB.md; ttnn/decode_matmul.py dense plan) | spec+choice |
+| WEIGHT_UNPACK, UNP_BYTES, UNPACK_BYTES, ELT | 8 / 8 / 16 cycles a tile, 128 B/cycle, 16 | tensix | tt-isa-documentation be83310 BlackholeA0/UNPACR_Regular.md (BH throttle: 8-bit x8 = 128 B, 16-bit x4 '2x' = 128 B, <= 8 rows a cycle) | spec |
+| UNP_ADDR | 2 | tensix | WormholeB0 UNPACR_Regular.md:735 (2 cycles of address calculation; BH page refers to WH: 'similar, not identical') | spec |
+| SFP_LAT | 2 | tensix | tt-isa-documentation be83310 BlackholeA0/TensixCoprocessor/VectorUnit.md table; SFPMAD.md:70 (auto stall 1 cycle) | spec |
+| PACK_ROWS | 4 | tensix | tt-isa-documentation be83310 BlackholeA0/TensixCoprocessor/PACR.md (4 Dst rows of 16 datums a cycle) | spec |
+| SEM, STALL_LAG | 1, 1 | tensix | tt-isa-documentation be83310 BlackholeA0/TensixCoprocessor/SyncUnit.md, STALLWAIT.md:27 | spec |
+| RISC_L1_LOAD, RISC_NOC_REG, RISC_FENCE | 8, 7, 1 | tensix | tt-isa-documentation be83310 BlackholeA0/TensixTile/BabyRISCV/README.md load latency table (L1 miss >= 8, NoC regs >= 7); MemoryOrdering.md:57-59 | spec |
+| ACT silu, sigmoid, exp, rsqrt | 54, 52, 40, 30 cycles a group | tensix | repo llk_sfpu compiled with sfpi 7.74.0 -O3 -mcpu=tt-bh-tensix, counted by tools/design/sfpu/sfpu_count.py (worklog 10-28) | derived |
+| ACT softplus | 52 (code 101) | tensix | same count, repo's current softplus (correction: 101 was the 27B copy's older version) | derived |
+| ACT recip | 9 + 5 n for n groups (code 6 a group) | tensix | SFPLOADMACRO pipeline of _calculate_reciprocal_fast_24b_5c_ (correction 57) | derived |
+| ACT mul, add | 4, 4 | tensix | SFPLOAD + op + nop (latency 2) + SFPSTORE (VectorUnit.md) | derived |
+| P_PACK | 17 bf16 / 18 fp32 (code 16) | tensix | tt-metal #59810 / #58704 (LLK team, BH pack paths read against the RTL): packer drain 16-17 bf16, 18 fp32 | spec |
+| P_UNP | no BH value (code 17 = NEO) | tensix | searched: tt-isa, Glean (TA Unpackers Performance = NEO RTL, #59809, #58713, TEN-4865), Glean chat: no BH value. Design must not depend on it (D-2) | nosource |
+| ETH_POLL, NOC_ISSUE, EXPERT_LOOKUP | 22, 10, 10 | risc | poll = 2 x (fence 1 + L1 load 8 + compare/branch 2); issue = 3 stores + cmd_buf-ready load 7; lookup = L1 load + add | derived |
+| DRISC_PAGE | 110 | risc | 27B core_plan.h kDriscPageCycles (instruction count x ISA latencies); recount from our DRISC sequence at D-2 | recount |
+| ETH_SEND | 31 | risc | 27B core_plan.h kEthDm0PacketCycles (4 TXQ registers + reads + cmd_ongoing, EthernetTxRx.md); recount from our ERISC sequence at D-4 | recount |
+| GDDR_PIPE | 405 cycles (0.3 us) | dram | controller/PHY cycles not in Rambus GDDR6 Controller UG 1.03, BH GDDR Architecture, SOC MAS 4.6 (Glean chat 10-28); only O2O Tdram ~392 (empirical). Keep off the chain (D-2/D-3) | nosource |
+| BW (link), BW_LINK | 25 GB/s | link | BH Galaxy runs 200G (Confluence syseng 'Overview of Blackhole ASIC -> Blackhole Galaxy'); one channel one way | spec |
+| CH, LINKS | 2 | link | this machine's I-0 link map: 2 channels per neighbour per direction (tools/design/hw/probe_links_a03u07.txt) | hw |
+| HOP (chip) | 306 ns + medium | link | EthernetSsDesignSpec 2.13 Table 16 280 ns (400G, L1->remote L1, excludes wire/backplane) + RS-FEC 25.6 ns at 200G (27B README 3); medium per link class at D-4 (AEC DSP latency unpublished) | spec+recount |
+| SAF, SAF_RATE | 96 B/cycle | link | EthernetSsDesignSpec 2.8.4 (TX reads L1 by 6 x 128-bit ports); store-and-forward 2.8 | spec |
+| HDR | 56 B | link | preamble/SFD 8 + Ethernet 14 + TT-link 18 (tt-isa-documentation be83310 BlackholeA0/EthernetTile/EthernetTxRx.md:21) + FCS 4 + IPG 12 | spec |
+| PKT | 2048 B | choice | packet payload <= 4,096 B (EthernetSsDesignSpec 1.2.10); 2 KiB chosen | choice |
+| TORUS_R, TORUS_C | 8, 4 | link | this machine's I-0 map: 8 rings of 4 + vertical rings of 8 (hw_facts torus groups) | hw |
+| ROWS, ROWS_AR | 2 | choice | B = 1, MTP k = 1 (token + verify row) | choice |
+| TP, TPX, PP, KVG, GDR_UNITS | 8, 8, 4, 4, 96 | choice | the chosen form DP1 x PP4(R2) x 8chip[TP8 | EP1 x TPx8]; KVG = TP8 / 2 kv heads; 6 value heads x 16 units of 8 columns | choice |
+| WAVES | 10 | choice | partial sums streamed in 10 waves (section 11.3 rule 17) | choice |
+| PIECE | 512 KiB | choice | DRAM read piece of step7 (consumption-order issue) | choice |
+| ROUTED_LOOKAHEAD, ROUTED_RESERVE_LAYERS | 2 | choice | routed reserve of 2 layers in L1 (fastest of 1-5, section 12.6) | choice |
+| L1_MM, L1_GDR, L1_KVC, STREAM_MULT | 80, 48, 64 KiB, x1 | choice | section 11 stream regions (only when the configuration needs them, correction 33) | choice |
+| PKT_CAP, SUBMESH, CASES_K, FORMS, HC_FORM | - | choice | enumeration / numerical method of the generators | choice |
+| T_BUSIEST, X_DISTINCT, h12, h2 | 43.9 tiles, 16.5, 0.83, 0.66 (rows 1x2) | stat | census of the prompt set (34 items x 256 positions, CPU oracle, routing/stats.json) | stat |
+| R_EFF, TOKENS_PER_PASS | 1.376 | stat | MTP k=1 tokens per pass on the prompt set (ISL 128) | stat |
+| GB, MiB, KiB, KIND, FMT, VALNAME, CHIPS, TILE_PAIRS, STAGES, FIRST, PIECES, FANIN, KMAX_POOL, FRAMES_SINK, _MESH, _MEET, _MMS | - | name | labels, caches and enumerations | name |
+
+状態の内訳: build 1, choice 9, derived 11, hw 5, load 1, name 1, nosource 2, recount 5, spec 34, spec+choice 2, spec+recount 1, stat 2
+
+
 - DRAM 512 GB/s/chip（読み書きの和）、容量 31.9 GiB の 90% = 30.8 GB を使う（runtime・trace・CB に 10%）。
 - chip 間 link 25 GB/s × 2 本/方向 × 4 方向（8 × 4 torus、submesh の直径: 1×4 で 2、2×4 で 3、4×4 で 5、8×4 で 6 hop）、1 hop 306 ns（EthernetSsDesignSpec Table 16 の 400G の 280 ns + 200G の RS-FEC の codeword の組 25.6 ns）+ 蓄積転送 2 KiB/(96 B/cycle) = 16 ns、1 packet 4,096 B + 56 B。chip 内の段（`comm_model.py`）: 中継 138 cycle + flit（受け側の検知 22 + 同じ側の対の Ethernet タイルへの NoC 書き 10 + N_RD + 3 hop + 送り側の検知 22 + 送り 31）; 会合の起点・終点は種類ごと: 足し込み系（AR、RS）の起点 = 部分和を作った owner（Ethernet タイルから 6 hop 以内の 91 コア以上の中に置く）の 2 本の書き + 6 hop + 検知 + 送り = 169 cycle + flit、足し込みの段 179 cycle; 集め（AG）の起点 = pool の hub（Ethernet タイルから 2 hop）→ Ethernet + 検知 + 送り = 107 cycle + flit、終点 = 受けた Ethernet タイルから 2 本の multicast で全 130 コアへ（最悪 22 hop）+ 検知 = 278 cycle + flit; 群間の受け渡し = 足し込み系の起点 + 受けた chip での配り。
 - Tensix 130 core × 1.35 GHz: 行列積の 32×32 tile-MAC = max(MVMUL の命令数, 重み tile の SrcA への unpack)（MVMUL.md / MatrixUnit.md: MVMUL は SrcB 8 行 × SrcA 16×16 を 1 cycle に 1 本、fidelity の phase ごとに 1 本; UNPACR_Regular.md: SrcA へ 8 行/cycle（8・4 bit）、4 行/cycle（16 bit））、fidelity は配備の重みの形式どおり（bf8 HiFi2、BF4 LoFi、bf16 HiFi4）→ 行 ≤ 8 で bf8 8 / BF4 8 / bf16 16 cycle、32 行で 32 / 16 / 64 cycle（`mm_cost.py`。改訂 5 までは全形式一律 HiFi2 32 cycle で、b=1 の 2 行には過大だった誤り）。attention / indexer の行列積は bf16 の K/V を HiFi4 で 64 cycle/tile。単品の時間は段の積み上げ（`stages.py`、改訂 8）: 行列積の pool = 実際に作れるコアの割付（`pool_plan.py`: 列ごとのコア数 / 線形 Stream-K / 列丸ごとの最速、列ごとの木をコアの実際の終わりから追う）の MAC + 送り手と木と owner（SFPU の fp32 finalize、pack、部分和の Dst への unpack と SFPU の足し込み、NoC 書き、owner の後処理）+ 出力の受け渡し（owner → hub 7〜14 hop、hub の検知と発行、2 本の multicast 17 hop、受け手の検知: 13×10 の格子・14 通りの harvest の最悪）; 要素演算は owner の finalize に融合（SFPU の fp32 関数の命令数）; GDR は (value head, 8 列) の単位で S を Dst に置き SFPU で 2 行を直列に 1111 cycle; router の top-10 は 16 owner の並列 + 選択コアの併合 743.0 cycle。仕様は RISC の load 8 cycle（L1）/ 7（NoC レジスタ）、NoC の hop 5 + 9 + 5 cycle、MVMUL・SFPU の遅延（MatrixUnit.md、VectorUnit.md）、poll は fence + load の 2 周期。文書に段数の無い遅延は予算（この予算の場合には）: packer P_PACK 16、unpacker P_UNP 17、NIU の書きのペイロード読み N_RD 16 cycle、GDDR の読みの pipeline 0.3 µs。routed の発行の段（`stages.routed_issue`）: router の単品の終わり → 選択コアが併合の直後に id を 8 bank の DRISC へ 8 本の unicast（DRAM タイルへは multicast できない: NoC/README.md:32）→ DRISC の表引きと 1 頁 110 cycle（27B `core_plan.h`）→ GDDR の pipeline → 最初の頁（2 KiB、最悪 14 hop）がコアへ = 0.53 µs。

@@ -37,7 +37,7 @@ SAF_RATE = 96
 # 31, 27B README 3); the send's store-and-forward read (saf) is added separately by the simulation
 ETH_POLL = 22
 NOC_ISSUE = 10
-N_RD = 16
+N_RD = 8     # = stages.N_RD (bh noc deepdive slide 21)
 ETH_SEND = 31
 # D-4 (ii)(b), corrected 10-27 15:1x: a relay's receiving and sending tiles are a pair on the same side of the chip
 # (the used Ethernet tiles are x 1-4 and 13-16 on NoC row 1: same-side pairs are at most 3 NoC hops apart)
@@ -60,7 +60,7 @@ ROWS_AR = 2
 # NoC issue 10 + N_RD 16 + flight over NOC_ETH_CORE NoC hops Ethernet -> Tensix (5 + 9 x 6 + 5) + the rows' flits), the
 # owner sees them (poll 22), unpacks them into Dst (2 + bytes/128 + budget P_UNP 17) and adds them on the SFPU (per 4-row
 # group x half x face: 2 loads, add, nop, store)
-P_UNP = 17
+P_UNP = 17   # NO SOURCE for BH (= stages.P_UNP; D-2 removes it from the chain)
 ADD_LEVEL = (ETH_POLL + NOC_ISSUE + N_RD + (5 + 9 * NOC_ETH_CORE + 5) + math.ceil(ROWS_AR * 32 * 4 / 64) + ETH_POLL
              + 2 + math.ceil(ROWS_AR * 32 * 4 / 128) + P_UNP + math.ceil(ROWS_AR / 4) * 2 * 2 * 5) / CLK
 TORUS_R = 8
