@@ -1,0 +1,582 @@
+// SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+// I-1c-2 (worklog 14): the in_proj pool of one chip (README 12.4 step 4: qkv 40 + z 24 + a 1 + b 1 = 66 output column
+// tiles, K = H = 2,560 = 80 tiles, bf8 weights, HiFi2, fp32 DEST) on the 130 worker cores of one chip in the Stream-K
+// assignment (kernels/mm/mm_chain_*.cpp): 66 owner cores compute K [0, k_own) of their column, 64 sender cores split
+// the remaining 66 x (80 - k_own) tile-MACs into contiguous ranges of the column-major stream (cut at the column
+// boundaries into 1..3 segments) and send each finished fp32 partial to the column's owner, which adds it in DEST and
+// packs the bf16 column.  Inputs resident in L1 (DRAM reads are I-1b' / I-3).  A round starts on a multicast go after
+// every core has run its init; the round time is the earliest go -> the last owner's packed column (one chip; the
+// per-core end - go is reported as well, independent of the cores' clock offsets).
+// Budget: step 4, in_proj pool 1.10 us (5,280 tile-MACs / 130 x 32 cycles + one tree level of 188 cycles).
+// Accuracy: PCC of the 66 columns (2 decode rows) against a host fp64 reference on the bf8-quantized weights and the
+// bf16 activation.
+#include <gtest/gtest.h>
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <random>
+#include <sstream>
+#include <map>
+#include <tt-metalium/allocator.hpp>
+#include <tt-metalium/host_api.hpp>
+#include <tt-metalium/tt_metal.hpp>
+#include <tt-metalium/distributed.hpp>
+#include <tt-metalium/bfloat16.hpp>
+#include <tt-metalium/bfloat8.hpp>
+#include <tt-metalium/tilize_utils.hpp>
+#include <tt-metalium/tensor_accessor_args.hpp>
+#include "impl/context/metal_context.hpp"
+
+namespace qwen38_dataflow {
+namespace {
+
+namespace distributed = tt::tt_metal::distributed;
+
+constexpr uint32_t kNt = 66, kKt = 80, kM = 32, kCores = 130, kGridX = 13, kGridY = 10;
+constexpr uint32_t kRounds = 48, kStampRounds = 40, kSkip = 8;
+constexpr uint32_t kWTile = 1088;
+constexpr double kClockGHz = 1.35;
+
+struct Segment {
+    uint32_t col, k0, kt, slot;
+};
+
+struct CorePlan {
+    uint32_t role;  // 0 owner, 1 sender
+    uint32_t col;   // owner: its column
+    std::vector<Segment> segs;
+    uint32_t n_in = 0;
+    tt::tt_metal::CoreCoord core;
+};
+
+// the Stream-K plan: owners and senders interleaved along the stream so a sender sits next to its owners
+std::vector<CorePlan> make_plan(uint32_t k_own) {
+    const uint32_t rest = kKt - k_own, n_send = kCores - kNt, total = kNt * rest;
+    std::vector<CorePlan> owners(kNt);
+    for (uint32_t c = 0; c < kNt; ++c) {
+        owners[c].role = 0;
+        owners[c].col = c;
+        owners[c].segs.push_back({c, 0, k_own, 0});
+    }
+    std::vector<CorePlan> senders(n_send);
+    std::vector<uint32_t> start(n_send + 1);
+    for (uint32_t s = 0; s <= n_send; ++s) {
+        start[s] = static_cast<uint32_t>((static_cast<uint64_t>(total) * s) / n_send);
+    }
+    for (uint32_t s = 0; s < n_send; ++s) {
+        senders[s].role = 1;
+        uint32_t p = start[s];
+        while (p < start[s + 1]) {
+            const uint32_t c = p / rest, off = p % rest;
+            const uint32_t len = std::min(start[s + 1] - p, rest - off);
+            senders[s].segs.push_back({c, k_own + off, len, owners[c].n_in++});
+            p += len;
+        }
+        TT_FATAL(senders[s].segs.size() <= 3, "sender {} has {} segments", s, senders[s].segs.size());
+    }
+    for (auto& o : owners) {
+        TT_FATAL(o.n_in >= 1 && o.n_in <= 3, "column {} has {} partials", o.col, o.n_in);
+    }
+    std::vector<CorePlan> plan;
+    uint32_t next_sender = 0;
+    for (uint32_t c = 0; c < kNt; ++c) {
+        plan.push_back(owners[c]);
+        while (next_sender < n_send && start[next_sender] / rest <= c) {
+            plan.push_back(senders[next_sender++]);
+        }
+    }
+    while (next_sender < n_send) {
+        plan.push_back(senders[next_sender++]);
+    }
+    TT_FATAL(plan.size() == kCores, "plan has {} cores", plan.size());
+    for (uint32_t i = 0; i < kCores; ++i) {
+        plan[i].core = tt::tt_metal::CoreCoord(i % kGridX, i / kGridX);
+    }
+    return plan;
+}
+
+// I-3a: the DRAM lane beside the chain -- the NCRISC (NOC1) of every core reads its weight segments of the balanced
+// NOC1-only assignment (noc/balanced.py: per core x y nseg {bank offset bytes tile_x tile_y noc}) once, into L1 above
+// the CBs (kernels/frame/dram_stream_ncrisc.cpp); returns the buffers kept alive until the program has run
+struct Stream {
+    std::shared_ptr<distributed::MeshBuffer> buf, res;
+    uint64_t bytes = 0;
+};
+
+Stream add_stream(
+    const std::shared_ptr<distributed::MeshDevice>& mesh, tt::tt_metal::Program& program, const std::string& file,
+    uint32_t reps, uint32_t go_sem_id) {
+    Stream sm;
+    auto* dev = mesh->get_devices()[0];
+    auto& cq = mesh->mesh_command_queue();
+    struct Seg {
+        uint32_t bank, off, len, tx, ty;
+    };
+    std::map<std::pair<uint32_t, uint32_t>, std::vector<Seg>> segs;
+    uint32_t bank_bytes = 0;
+    std::ifstream f(file);
+    TT_FATAL(f.good(), "no assignment file {}", file);
+    std::string line;
+    while (std::getline(f, line)) {
+        std::istringstream ls(line);
+        uint32_t x, y, n;
+        if (!(ls >> x >> y >> n)) {
+            continue;
+        }
+        for (uint32_t i = 0; i < n; ++i) {
+            Seg sg{};
+            uint32_t noc;
+            ls >> sg.bank >> sg.off >> sg.len >> sg.tx >> sg.ty >> noc;
+            TT_FATAL(noc == 1, "the stream reads on NOC1 only");
+            segs[{x, y}].push_back(sg);
+            bank_bytes = std::max(bank_bytes, sg.off + sg.len);
+        }
+    }
+    const uint32_t nb = dev->allocator()->get_num_banks(tt::tt_metal::BufferType::DRAM);
+    const uint32_t page = 65536;
+    const uint32_t pages = ((bank_bytes + page - 1) / page) * nb;
+    sm.buf = distributed::MeshBuffer::create(
+        distributed::ReplicatedBufferConfig{.size = static_cast<uint64_t>(pages) * page},
+        distributed::DeviceLocalBufferConfig{.page_size = page, .buffer_type = tt::tt_metal::BufferType::DRAM},
+        mesh.get());
+    sm.res = distributed::MeshBuffer::create(
+        distributed::ReplicatedBufferConfig{.size = kCores * 64},
+        distributed::DeviceLocalBufferConfig{.page_size = 64, .buffer_type = tt::tt_metal::BufferType::DRAM},
+        mesh.get());
+    std::vector<uint32_t> ct;
+    tt::tt_metal::TensorAccessorArgs(*sm.res).append_to(ct);
+    const tt::tt_metal::CoreRangeSet all(
+        tt::tt_metal::CoreRange(tt::tt_metal::CoreCoord(0, 0), tt::tt_metal::CoreCoord(kGridX - 1, kGridY - 1)));
+    auto k = tt::tt_metal::CreateKernel(
+        program,
+        "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/frame/dram_stream_ncrisc.cpp",
+        all,
+        tt::tt_metal::DataMovementConfig{
+            .processor = tt::tt_metal::DataMovementProcessor::RISCV_1,
+            .noc = tt::tt_metal::NOC::RISCV_1_default,
+            .compile_args = ct});
+    const uint32_t l1_base = dev->allocator()->get_base_allocator_addr(tt::tt_metal::HalMemType::L1);
+    const uint32_t dst = l1_base + 640 * 1024;
+    const uint32_t scratch = dst + 288 * 1024;
+    for (uint32_t i = 0; i < kCores; ++i) {
+        const tt::tt_metal::CoreCoord core(i % kGridX, i / kGridX);
+        const auto& v = segs[{core.x, core.y}];
+        TT_FATAL(v.size() <= 2, "core {} has {} segments", i, v.size());
+        std::vector<uint32_t> args = {
+            static_cast<uint32_t>(sm.buf->address()), dst, reps, static_cast<uint32_t>(sm.res->address()), i, scratch,
+            static_cast<uint32_t>(v.size())};
+        uint32_t tot = 0;
+        for (uint32_t q = 0; q < 2; ++q) {
+            const Seg z{};
+            const Seg& sg = q < v.size() ? v[q] : z;
+            args.insert(args.end(), {sg.bank, sg.off, sg.len, sg.tx, sg.ty});
+            tot += sg.len;
+        }
+        args.push_back(go_sem_id);
+        args.push_back(1);
+        TT_FATAL(tot <= 288 * 1024, "core {} reads {} B, more than its region", i, tot);
+        sm.bytes += static_cast<uint64_t>(tot) * reps;
+        tt::tt_metal::SetRuntimeArgs(program, k, core, args);
+    }
+    (void)cq;
+    return sm;
+}
+
+std::string stream_result(const std::shared_ptr<distributed::MeshDevice>& mesh, Stream& sm) {
+    std::vector<uint32_t> r;
+    distributed::EnqueueReadMeshBuffer(mesh->mesh_command_queue(), r, sm.res, true);
+    uint32_t bad = 0;
+    std::vector<double> dur;
+    for (uint32_t i = 0; i < kCores; ++i) {
+        const uint32_t* w = &r[i * 16];
+        if (w[15] != 0x600d0000u) {
+            ++bad;
+            continue;
+        }
+        dur.push_back(static_cast<double>(w[1] - w[0]) / 1350.0);
+    }
+    if (const char* raw = std::getenv("QWEN38_MM_RAW")) {
+        std::ofstream f(std::string(raw) + ".lane");
+        for (uint32_t i = 0; i < kCores; ++i) {
+            const uint32_t* w = &r[i * 16];
+            f << i << " " << (i % kGridX) << " " << (i / kGridX) << " " << (w[1] - w[0]) << " " << w[2] << "\n";
+        }
+    }
+    std::sort(dur.begin(), dur.end());
+    const double us = dur.empty() ? 0.0 : dur.back();
+    std::ostringstream os;
+    os << "DRAM lane (NOC1, " << sm.bytes / 1e6 << " MB, every core from the common go): slowest core " << us
+       << " us = " << sm.bytes / (us * 1e3) << " GB/s = " << 100.0 * sm.bytes / (us * 1e3) / 512.0
+       << "% of 512 (per-core durations min " << (dur.empty() ? 0.0 : dur.front()) << " median "
+       << (dur.empty() ? 0.0 : dur[dur.size() / 2]) << " us; bad " << bad << ")";
+    return os.str();
+}
+
+
+// v 2: I-1c-2 (full 32-row tiles, partial 4 KiB fp32); v 5: I-1c-5 (activation, output and partials 2-row tiny tiles,
+// init once)
+// v 6: the v5 kernels with every tile full (32 rows): isolates the init / reconfig changes; v 7: v5 kernels, activation
+// and output 2-row, partials full 32-row tiles: isolates the tiny partial
+// sel = 1 (v8 kernels): the owner adds the partials with the matmul against the 2-row selector tile (no add init, no
+// matmul re-init per round)
+std::string run_chain(
+    const std::shared_ptr<distributed::MeshDevice>& mesh, uint32_t k_own, bool& ok, uint32_t v = 2, uint32_t drain = 0,
+    uint32_t sel = 0, const std::string& stream_file = "", uint32_t stream_reps = 1, uint32_t rounds_override = 0) {
+    const uint32_t kRounds = rounds_override ? rounds_override : ::qwen38_dataflow::kRounds;
+    const uint32_t kStampRounds = std::min(::qwen38_dataflow::kStampRounds, kRounds);
+    const uint32_t kSkip = rounds_override ? 0u : ::qwen38_dataflow::kSkip;
+    // v 9: v8 with the sender packing a 2-row fp32 partial (CB 17 2-row) sent as two 128 B chunks into the owner's
+    // 32-row slot (CB 2 32-row), landing seen by sentinels
+    const uint32_t rows = (v == 5 || v == 7 || v == 8 || v == 9) ? 2u : 32u;
+    const tt::tt_metal::Tile tile({rows, 32});
+    const tt::tt_metal::Tile ptile({v == 5 ? 2u : 32u, 32});
+    const tt::tt_metal::Tile stile({(v == 5 || v == 9) ? 2u : 32u, 32});
+    const uint32_t act_tile = tile.get_tile_size(tt::DataFormat::Float16_b);
+    const uint32_t out_tile = act_tile;
+    const uint32_t part_bytes = ptile.get_tile_size(tt::DataFormat::Float32);
+    const uint32_t part_page = part_bytes + 32;
+    auto* dev = mesh->get_devices()[0];
+    auto& cq = mesh->mesh_command_queue();
+    const auto plan = make_plan(k_own);
+    std::vector<uint32_t> owner_index(kNt);
+    for (uint32_t i = 0; i < kCores; ++i) {
+        if (plan[i].role == 0) {
+            owner_index[plan[i].col] = i;
+        }
+    }
+    const uint32_t K = kKt * 32, N = kNt * 32;
+    std::mt19937 rng(7 + k_own);
+    std::normal_distribution<float> dist(0.0f, 1.0f);
+    std::vector<float> a(kM * K, 0.0f), w(static_cast<size_t>(K) * N);
+    for (uint32_t k = 0; k < K; ++k) {
+        a[k] = dist(rng);
+        a[K + k] = dist(rng);
+    }
+    for (auto& v : w) {
+        v = dist(rng) * 0.02f;
+    }
+    std::vector<bfloat16> a_bf(a.size());
+    for (size_t i = 0; i < a.size(); ++i) {
+        a_bf[i] = bfloat16(a[i]);
+    }
+    std::vector<bfloat16> a_rows(a_bf.begin(), a_bf.begin() + static_cast<size_t>(rows) * K);
+    const auto a_tiled = convert_layout<bfloat16>(
+        ttsl::Span<const bfloat16>(a_rows),
+        {rows, K},
+        TensorLayoutType::LIN_ROW_MAJOR,
+        TensorLayoutType::TILED_NFACES,
+        tile.get_tile_shape(),
+        tile.get_face_shape());
+    // weight tiles column-major: tile (k, c) at c * kKt + k, every tile row-major inside
+    std::vector<float> w_tiles;
+    w_tiles.reserve(static_cast<size_t>(K) * N);
+    for (uint32_t c = 0; c < kNt; ++c) {
+        for (uint32_t k = 0; k < kKt; ++k) {
+            for (uint32_t i = 0; i < 32; ++i) {
+                for (uint32_t j = 0; j < 32; ++j) {
+                    w_tiles.push_back(w[static_cast<size_t>(k * 32 + i) * N + c * 32 + j]);
+                }
+            }
+        }
+    }
+    const auto w_bf8 = pack_as_bfp8_tiles(ttsl::Span<const float>(w_tiles), true, false);
+    const auto w_q = unpack_bfp8_tiles_into_float_vec(ttsl::Span<const uint32_t>(w_bf8), true, false);
+    std::vector<double> ref(2 * N, 0.0);
+    for (uint32_t r = 0; r < 2; ++r) {
+        for (uint32_t c = 0; c < kNt; ++c) {
+            for (uint32_t k = 0; k < kKt; ++k) {
+                const float* t = &w_q[static_cast<size_t>(c * kKt + k) * 1024];
+                for (uint32_t i = 0; i < 32; ++i) {
+                    const double av = static_cast<float>(a_bf[r * K + k * 32 + i]);
+                    for (uint32_t j = 0; j < 32; ++j) {
+                        ref[r * N + c * 32 + j] += av * t[i * 32 + j];
+                    }
+                }
+            }
+        }
+    }
+    auto dram = [&](uint32_t page, uint32_t size) {
+        return distributed::MeshBuffer::create(
+            distributed::ReplicatedBufferConfig{.size = size},
+            distributed::DeviceLocalBufferConfig{.page_size = page, .buffer_type = tt::tt_metal::BufferType::DRAM},
+            mesh.get());
+    };
+    auto buf_a = dram(act_tile, kKt * act_tile);
+    auto buf_w = dram(kWTile, kNt * kKt * kWTile);
+    auto buf_o = dram(out_tile, kNt * out_tile);
+    auto buf_st = dram(512, 2 * kCores * 512);
+    // the 2-row selector (bf16, rows 0 / 1 = e_0 / e_1 over the K index 0..31) in the activation's tile shape, one
+    // tile in bank 0 (a single page)
+    const uint32_t sel_tile_bytes = tile.get_tile_size(tt::DataFormat::Float16_b);
+    auto buf_sel = distributed::MeshBuffer::create(
+        distributed::ReplicatedBufferConfig{.size = sel_tile_bytes},
+        distributed::DeviceLocalBufferConfig{.page_size = sel_tile_bytes, .buffer_type = tt::tt_metal::BufferType::DRAM},
+        mesh.get());
+    {
+        std::vector<bfloat16> sel_rm(static_cast<size_t>(rows) * 32, bfloat16(0.0f));
+        for (uint32_t r = 0; r < std::min<uint32_t>(rows, 2); ++r) {
+            sel_rm[r * 32 + r] = bfloat16(1.0f);
+        }
+        const auto sel_t = convert_layout<bfloat16>(
+            ttsl::Span<const bfloat16>(sel_rm),
+            {rows, 32},
+            TensorLayoutType::LIN_ROW_MAJOR,
+            TensorLayoutType::TILED_NFACES,
+            tile.get_tile_shape(),
+            tile.get_face_shape());
+        distributed::EnqueueWriteMeshBuffer(cq, buf_sel, sel_t, true);
+    }
+    distributed::EnqueueWriteMeshBuffer(cq, buf_a, a_tiled, false);
+    distributed::EnqueueWriteMeshBuffer(cq, buf_w, w_bf8, false);
+    tt::tt_metal::Program program;
+    const tt::tt_metal::CoreRangeSet all(
+        tt::tt_metal::CoreRange(tt::tt_metal::CoreCoord(0, 0), tt::tt_metal::CoreCoord(kGridX - 1, kGridY - 1)));
+    std::vector<tt::tt_metal::CoreRange> own_r, send_r;
+    for (const auto& p : plan) {
+        (p.role == 0 ? own_r : send_r).emplace_back(p.core);
+    }
+    const tt::tt_metal::CoreRangeSet owners_set(own_r), senders_set(send_r);
+    const uint32_t sem_go = tt::tt_metal::CreateSemaphore(program, all, 0);
+    const uint32_t sem_done = tt::tt_metal::CreateSemaphore(program, all, 0);
+    auto cb = [&](uint32_t index, uint32_t pages, uint32_t page, tt::DataFormat df, bool shaped) {
+        auto cfg = tt::tt_metal::CircularBufferConfig(pages * page, {{index, df}}).set_page_size(index, page);
+        if (shaped) {
+            cfg.set_tile_dims(index, index == 2 ? ptile : index == 17 ? stile : tile);
+        }
+        tt::tt_metal::CreateCircularBuffer(program, all, cfg);
+    };
+    cb(0, kKt, act_tile, tt::DataFormat::Float16_b, true);
+    cb(1, std::max(k_own, 48u), kWTile, tt::DataFormat::Bfp8_b, false);
+    cb(2, 3, part_page, tt::DataFormat::Float32, true);
+    cb(3, 2, 32, tt::DataFormat::Float16_b, false);
+    cb(4, 2, 32, tt::DataFormat::Float16_b, false);
+    cb(5, 1, act_tile, tt::DataFormat::Float16_b, true);
+    cb(16, 2, out_tile, tt::DataFormat::Float16_b, true);
+    cb(17, 2, v == 9 ? stile.get_tile_size(tt::DataFormat::Float32) : part_page, tt::DataFormat::Float32, true);
+    cb(24, 1, 512, tt::DataFormat::UInt32, false);
+    cb(25, 1, 512, tt::DataFormat::UInt32, false);
+    std::vector<uint32_t> rd_ct = {kKt, part_page};
+    if (v >= 5) {
+        rd_ct.push_back(part_bytes);
+        rd_ct.push_back(v == 8 ? 1u : v == 9 ? 2u : 0u);  // v8: 32-row partial, 2 valid rows sent; v9: 2-row pack
+        rd_ct.push_back(sel);
+    }
+    tt::tt_metal::TensorAccessorArgs(*buf_a).append_to(rd_ct);
+    tt::tt_metal::TensorAccessorArgs(*buf_w).append_to(rd_ct);
+    tt::tt_metal::TensorAccessorArgs(*buf_o).append_to(rd_ct);
+    tt::tt_metal::TensorAccessorArgs(*buf_st).append_to(rd_ct);
+    auto rd = tt::tt_metal::CreateKernel(
+        program,
+        v >= 5 ? "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain5_reader.cpp"
+               : "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain_reader.cpp",
+        all,
+        tt::tt_metal::DataMovementConfig{
+            .processor = tt::tt_metal::DataMovementProcessor::RISCV_0,
+            .noc = tt::tt_metal::NOC::RISCV_0_default,
+            .compile_args = rd_ct});
+    auto comp_own = tt::tt_metal::CreateKernel(
+        program,
+        v >= 5 ? "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain5_compute.cpp"
+               : "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain_compute.cpp",
+        owners_set,
+        tt::tt_metal::ComputeConfig{
+            .math_fidelity = MathFidelity::HiFi2, .fp32_dest_acc_en = true, .compile_args = {0u, kKt, kRounds, drain, sel}});
+    auto comp_send = tt::tt_metal::CreateKernel(
+        program,
+        v >= 5 ? "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain5_compute.cpp"
+               : "models/demos/blackhole/qwen38_flash_next/dataflow/kernels/mm/mm_chain_compute.cpp",
+        senders_set,
+        tt::tt_metal::ComputeConfig{
+            .math_fidelity = MathFidelity::HiFi2, .fp32_dest_acc_en = true, .compile_args = {1u, kKt, kRounds, drain, sel}});
+    const auto go_phys = dev->worker_core_from_logical_core(tt::tt_metal::CoreCoord(0, 0));
+    const auto mc1 = dev->worker_core_from_logical_core(tt::tt_metal::CoreCoord(kGridX - 1, kGridY - 1));
+    for (uint32_t i = 0; i < kCores; ++i) {
+        const CorePlan& p = plan[i];
+        std::vector<uint32_t> ra = {
+            static_cast<uint32_t>(buf_a->address()),
+            static_cast<uint32_t>(buf_w->address()),
+            static_cast<uint32_t>(buf_o->address()),
+            static_cast<uint32_t>(buf_st->address()),
+            i,
+            p.role,
+            kRounds,
+            sem_go,
+            sem_done,
+            i == 0 ? 1u : 0u,
+            kCores,
+            static_cast<uint32_t>(go_phys.x),
+            static_cast<uint32_t>(go_phys.y),
+            static_cast<uint32_t>(mc1.x),
+            static_cast<uint32_t>(mc1.y),
+            static_cast<uint32_t>(go_phys.x),
+            static_cast<uint32_t>(go_phys.y),
+            static_cast<uint32_t>(p.segs.size())};
+        std::vector<uint32_t> ca = {static_cast<uint32_t>(p.segs.size())};
+        for (const auto& s : p.segs) {
+            const auto own = dev->worker_core_from_logical_core(plan[owner_index[s.col]].core);
+            ra.insert(ra.end(), {s.col * kKt + s.k0, s.kt, static_cast<uint32_t>(own.x), static_cast<uint32_t>(own.y), s.slot});
+            ca.insert(ca.end(), {s.k0, s.kt});
+        }
+        ra.push_back(p.n_in);
+        ra.push_back(p.col);
+        ra.push_back(static_cast<uint32_t>(buf_sel->address()));
+        ca.push_back(p.n_in);
+        tt::tt_metal::SetRuntimeArgs(program, rd, p.core, ra);
+        tt::tt_metal::SetRuntimeArgs(program, p.role == 0 ? comp_own : comp_send, p.core, ca);
+    }
+    Stream sm;
+    if (!stream_file.empty()) {
+        sm = add_stream(mesh, program, stream_file, stream_reps, sem_go);
+    }
+    distributed::MeshWorkload wl;
+    wl.add_program(distributed::MeshCoordinateRange(mesh->shape()), std::move(program));
+    distributed::EnqueueMeshWorkload(cq, wl, false);
+    std::vector<bfloat16> out;
+    distributed::EnqueueReadMeshBuffer(cq, out, buf_o, true);
+    const std::string stream_line = stream_file.empty() ? "" : "; with the " + stream_result(mesh, sm);
+    std::vector<uint32_t> st;
+    distributed::EnqueueReadMeshBuffer(cq, st, buf_st, true);
+    // status words
+    uint32_t bad_status = 0;
+    for (uint32_t i = 0; i < kCores; ++i) {
+        if (st[i * 128 + 127] != 0x600d0000u) {
+            ++bad_status;
+        }
+    }
+    // timing: per round, earliest go over the cores -> last owner end; and the per-core spans
+    double sum_round = 0, best_round = 1e18, sum_span = 0, sum_go_spread = 0, sum_send = 0, sum_land = 0;
+    uint32_t cnt = 0, worst_core = 0;
+    double worst_span = 0;
+    for (uint32_t r = kSkip; r < kStampRounds; ++r) {
+        uint32_t go_min = UINT32_MAX, go_max = 0, end_max = 0;
+        double span_max = 0, send_max = 0, land_max = 0;
+        for (uint32_t i = 0; i < kCores; ++i) {
+            const uint32_t* s = &st[i * 128 + 3 * r];
+            go_min = std::min(go_min, s[0]);
+            go_max = std::max(go_max, s[0]);
+            if (plan[i].role == 0) {
+                end_max = std::max(end_max, s[2]);
+                const double span = static_cast<double>(s[2] - s[0]);
+                if (span > span_max) {
+                    span_max = span;
+                    if (span > worst_span) {
+                        worst_span = span;
+                        worst_core = i;
+                    }
+                }
+                land_max = std::max(land_max, static_cast<double>(s[1] - s[0]));
+            } else {
+                send_max = std::max(send_max, static_cast<double>(s[2] - s[0]));
+            }
+        }
+        const double us = static_cast<double>(end_max - go_min) / (kClockGHz * 1000.0);
+        sum_round += us;
+        best_round = std::min(best_round, us);
+        sum_span += span_max / (kClockGHz * 1000.0);
+        sum_go_spread += static_cast<double>(go_max - go_min);
+        sum_send += send_max;
+        sum_land += land_max;
+        ++cnt;
+    }
+    // raw stamps (I-1c-3): per core its role, place and segments, then for rounds 8..15 the reader's (go, mid, end), the
+    // unpack thread's (go seen, partials seen, segment issues 0..2) and the pack thread's (math done 0..2, packed 0..2)
+    if (const char* raw_path = std::getenv("QWEN38_MM_RAW")) {
+        std::ofstream raw(std::string(raw_path) + "." + std::to_string(k_own) + ".v" + std::to_string(v) + ".d" + std::to_string(drain));
+        for (uint32_t i = 0; i < kCores; ++i) {
+            const auto& p = plan[i];
+            raw << "core " << i << " role " << p.role << " x " << p.core.x << " y " << p.core.y << " n_in " << p.n_in
+                << " segs";
+            for (const auto& sg : p.segs) {
+                raw << " " << sg.col << ":" << sg.k0 << "+" << sg.kt;
+            }
+            raw << "\n";
+            const uint32_t* ct = &st[(kCores + i) * 128];
+            for (uint32_t r = 8; r < 16; ++r) {
+                const uint32_t* rs = &st[i * 128 + 3 * r];
+                const uint32_t* u = &ct[(r - 8) * 8];
+                const uint32_t* pk = &ct[64 + (r - 8) * 8];
+                raw << " r " << r << " rd " << rs[0] << " " << rs[1] << " " << rs[2] << " up " << u[0] << " " << u[1] << " "
+                    << u[2] << " " << u[3] << " " << u[4] << " pk " << pk[0] << " " << pk[1] << " " << pk[2] << " " << pk[4]
+                    << " " << pk[5] << " " << pk[6] << "\n";
+            }
+        }
+    }
+    // accuracy
+    const auto out_rm = convert_layout<bfloat16>(
+        ttsl::Span<const bfloat16>(out),
+        {rows, N},
+        TensorLayoutType::TILED_NFACES,
+        TensorLayoutType::LIN_ROW_MAJOR,
+        tile.get_tile_shape(),
+        tile.get_face_shape());
+    double sxy = 0, sxx = 0, syy = 0, sx = 0, sy = 0, max_err = 0, max_ref = 0;
+    const uint32_t n = 2 * N;
+    for (uint32_t r = 0; r < 2; ++r) {
+        for (uint32_t j = 0; j < N; ++j) {
+            const double x = static_cast<float>(out_rm[r * N + j]), y = ref[r * N + j];
+            sx += x;
+            sy += y;
+            sxx += x * x;
+            syy += y * y;
+            sxy += x * y;
+            max_err = std::max(max_err, std::abs(x - y));
+            max_ref = std::max(max_ref, std::abs(y));
+        }
+    }
+    const double pcc = (n * sxy - sx * sy) / std::sqrt((n * sxx - sx * sx) * (n * syy - sy * sy));
+    uint32_t max_seg = 0, max_in = 0, max_send_k = 0;
+    for (const auto& p : plan) {
+        max_seg = std::max<uint32_t>(max_seg, p.segs.size());
+        max_in = std::max(max_in, p.n_in);
+        if (p.role == 1) {
+            uint32_t k = 0;
+            for (const auto& s : p.segs) {
+                k += s.kt;
+            }
+            max_send_k = std::max(max_send_k, k);
+        }
+    }
+    std::ostringstream os;
+    os << "v" << v << (sel ? " sel-add" : "") << " (" << rows << "-row tiles, partial " << part_bytes << " B) k_own " << k_own << " (sender max " << max_send_k << " K tiles, max " << max_seg << " segments, owner max "
+       << max_in << " partials): round go -> last column mean " << sum_round / cnt << " us, best " << best_round
+       << " us; owner end - own go max mean " << sum_span / cnt << " us (worst core " << worst_core << " "
+       << worst_span / (kClockGHz * 1000.0) << " us); go spread mean " << sum_go_spread / cnt
+       << " cycles; sender go -> last sent max mean " << sum_send / cnt << " cycles; owner go -> partials landed max mean "
+       << sum_land / cnt << " cycles; PCC " << pcc << ", max abs err " << max_err << " (max |ref| " << max_ref
+       << "); bad status " << bad_status << " over " << cnt << " rounds" << stream_line;
+    ok = ok && bad_status == 0 && pcc > 0.999 && (cnt > 0 || rounds_override > 0);
+    return os.str();
+}
+
+TEST(Qwen38DataflowMm, InProjPoolChain) {
+    // slow dispatch (TT_METAL_SLOW_DISPATCH_MODE=1, jobs/mm_chain.sh): no Tensix column is taken by dispatch, so the
+    // 13 x 10 worker grid (130 cores, README 11.2.3) is whole (fast dispatch: 12 x 10, MCP 3fe17085; dispatch on
+    // Ethernet cores: no ETH dispatch core on this chip, MCP 37fd5309)
+    auto mesh = distributed::MeshDevice::create_unit_mesh(0);
+    const auto grid = mesh->get_devices()[0]->compute_with_storage_grid_size();
+    TT_FATAL(grid.x >= kGridX && grid.y >= kGridY, "grid {}x{} is smaller than 13x10", grid.x, grid.y);
+    const char* out_path = std::getenv("QWEN38_MM_OUT");
+    std::ofstream out(std::string(out_path ? out_path : "/tmp/qwen38_mm.txt") + ".chain");
+    out << "grid " << grid.x << "x" << grid.y << "; in_proj pool on 130 cores (66 cols x 80 K tiles, Stream-K, HiFi2 bf8, "
+        << "fp32 partials over the NoC; step 4 budget 1.10 us)\n";
+    bool ok = true;
+    std::vector<uint32_t> k_owns = {52};
+    if (const char* e = std::getenv("QWEN38_MM_KOWN")) {
+        k_owns = {static_cast<uint32_t>(std::atoi(e))};
+    }
+    for (uint32_t k_own : k_owns) {
+        const std::string sf = std::string(std::getenv("HOME")) + "/work/noc/balanced_262144_noc1.txt";
+        out << "lane only (the chain with 0 rounds is not possible; one round): " << run_chain(mesh, k_own, ok, 9, 0, 1, sf, 2, 1) << "\n";
+        out << "with the lane: " << run_chain(mesh, k_own, ok, 9, 0, 1, sf, 2) << "\n";
+        out.flush();
+    }
+    mesh->close();
+    EXPECT_TRUE(ok);
+}
+
+}  // namespace
+}  // namespace qwen38_dataflow
