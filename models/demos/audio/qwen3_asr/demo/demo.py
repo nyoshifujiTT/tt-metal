@@ -12,11 +12,16 @@ non-audio prompt embeddings are taken from the golden merged inputs_embeds and t
 exactly those rows via masked_scatter), so the only non-golden inputs are the audio
 embeds produced on device here.
 
-Run inside the dev container (chip 3 = fake P150):
-  docker exec -e TT_MESH_GRAPH_DESC_PATH=.../p150_mesh_graph_descriptor.textproto \
-    -e HF_MODEL=/ttwork/qwen3_asr_text_decoder qwen3asr-dev bash -lc \
-    'source /opt/venv/bin/activate && cd /work && \
-     python3 models/demos/audio/qwen3_asr/demo/demo.py'
+Point it at the same staged artifacts the README's test commands use, i.e. what
+reference/dump_reference.py and reference/extract_text_decoder.py wrote:
+
+  export QWEN3ASR_GOLDEN_DIR=/tmp/qwen3_asr_golden
+  export QWEN3ASR_TEXT_DECODER=/tmp/qwen3_asr_text_decoder
+  python3 models/demos/audio/qwen3_asr/demo/demo.py
+
+(An earlier revision documented a `docker exec ... qwen3asr-dev` invocation
+against /ttwork paths from a bring-up container that no longer exists, and set
+HF_MODEL, which this demo did not read in preference to anything else.)
 """
 import os
 import sys
@@ -34,10 +39,15 @@ sys.path.insert(0, os.path.join(ROOT, "reference"))
 sys.path.insert(0, os.path.join(ROOT, "tt"))
 import audio_encoder as tt_enc  # noqa: E402
 import audio_encoder_ref as ref  # noqa: E402
-from qwen3_asr_decoder import Qwen3ASRDecoder  # noqa: E402
+from qwen3_asr_decoder import Qwen3ASRDecoder, decoder_weight_dtype  # noqa: E402
 
-GOLDEN = os.environ.get("GOLDEN_DIR", "/golden")
-CKPT = os.environ.get("HF_MODEL", "/ttwork/qwen3_asr_text_decoder")
+# Same resolution order the tests use (tests/conftest.py): the QWEN3ASR_-prefixed
+# name first, the older unprefixed one as a fallback. The README tells the reader
+# to export QWEN3ASR_GOLDEN_DIR / QWEN3ASR_TEXT_DECODER, and dump_reference.py
+# writes to the former, so reading only the unprefixed names meant following the
+# documented setup left this demo looking in the wrong place.
+GOLDEN = os.environ.get("QWEN3ASR_GOLDEN_DIR", os.environ.get("GOLDEN_DIR", "/golden"))
+CKPT = os.environ.get("QWEN3ASR_TEXT_DECODER", os.environ.get("HF_MODEL", "/tmp/qwen3_asr_text_decoder"))
 REF_TXT = "What's going on? Yako-san alone for the war? Is it? War? That's when it starts. The problem is."
 
 
@@ -71,9 +81,8 @@ def main():
         enc_params = tt_enc.preprocess_weights(w, dev)
         args = ModelArgs(dev, max_batch_size=1, max_seq_len=1024)
         sd = args.load_state_dict()
-        model = Qwen3ASRDecoder(
-            args, ttnn.bfloat16, dev, sd, args.weight_cache_path(ttnn.bfloat16), use_paged_kv_cache=False
-        )
+        dtype = decoder_weight_dtype()
+        model = Qwen3ASRDecoder(args, dtype, dev, sd, args.weight_cache_path(dtype), use_paged_kv_cache=False)
         t_setup = time.time() - t0
 
         def run_once():

@@ -26,6 +26,14 @@ AUDIO_TOKEN_ID = 151676
 
 # Default clip: an in-repo 16 kHz mono speech wav, so the demo prep runs from a clean
 # checkout (this used to point at machine-local audio).
+#
+# The duration must fit the clip. It is 7.62 s long, and --dur decides how many mel
+# frames and audio tokens the processor emits, which is what the TT demo is then
+# compared against clip-for-clip. Asking for more than the file holds silently
+# yields whatever is there while summary.json records the requested figure, so the
+# recorded shape and the recorded duration stop describing the same thing.
+# reference/dump_reference.py picks 7.0 on this same clip for the same reason.
+DEFAULT_DUR = 7.0  # <= the in-repo sample clip (7.62 s), whole seconds
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", ".."))
 DEFAULT_CLIPS = [  # (name, wav, start_s, dur_s)
     (
@@ -42,7 +50,7 @@ DEFAULT_CLIPS = [  # (name, wav, start_s, dur_s)
             "17646385371758249908.wav",
         ),
         0.0,
-        20.0,
+        DEFAULT_DUR,
     ),
 ]
 
@@ -55,7 +63,7 @@ def parse_clip(spec):
     parts = rest.split(",")
     path = parts[0]
     start = float(parts[1]) if len(parts) > 1 else 0.0
-    dur = float(parts[2]) if len(parts) > 2 else 20.0
+    dur = float(parts[2]) if len(parts) > 2 else DEFAULT_DUR
     return (name, path, start, dur)
 
 
@@ -66,7 +74,18 @@ def load_slice(path, start, dur, sr=16000):
         w = w.mean(1)
     a = int(start * sr)
     b = min(len(w), a + int(dur * sr))
-    return w[a:b].copy()
+    got = w[a:b]
+    want = int(dur * sr)
+    if len(got) < want:
+        # Truncating here would leave summary.json claiming a duration the npz
+        # does not contain, and every shape derived from it would be for a
+        # different clip length than the one recorded.
+        raise SystemExit(
+            f"{path}: asked for {dur:.2f}s from {start:.2f}s but only "
+            f"{len(got) / sr:.2f}s is available (file is {len(w) / sr:.2f}s); "
+            f"pass a --clip with a duration the file holds"
+        )
+    return got.copy()
 
 
 def main():
